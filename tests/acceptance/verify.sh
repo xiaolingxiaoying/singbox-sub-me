@@ -116,22 +116,27 @@ reverse_credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' "$ro
 sleep 1
 curl --silent --show-error --include "http://127.0.0.1:2081/sub/$reverse_credential/uri" | grep -F 'HTTP/1.1 200 OK' >/dev/null || fail 'reverse-proxy endpoint did not respond'
 
-# Update check is read-only; a failed update retains its known-good binaries and rollback point.
+# Update check is read-only; a failed health check restores the known-good binaries and keeps a rollback point.
 root_for update "$platform"
 "$sbctl" --root "$root" config init --mode ip-fallback --subscription-host 127.0.0.1 --http-port 2082 --interface ens3 --protocol vless-reality --reality-decoy-sni www.cloudflare.com
 mkdir -p "$root/usr/local/bin"
 printf 'known-good sbctl' > "$root/usr/local/bin/sbctl"
 printf 'known-good sing-box' > "$root/usr/local/bin/sing-box"
-printf '{"sbctl":{"version":"0.1.1","sha256":"0000000000000000000000000000000000000000000000000000000000000000"},"sing_box":{"version":"1.12.0","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}}' > "$work/manifest.json"
+candidate_digest=$(sha256sum "$fake_sing_box" | awk '{print $1}')
+printf '{"sbctl":{"version":"0.1.1","sha256":"%s"},"sing_box":{"version":"1.12.0","sha256":"%s"}}' "$candidate_digest" "$candidate_digest" > "$work/manifest.json"
 before=$(find "$root" -type f -exec sha256sum {} \; | sort)
 "$sbctl" --root "$root" update --check --manifest "$work/manifest.json" >/dev/null
 after=$(find "$root" -type f -exec sha256sum {} \; | sort)
 test "$before" = "$after" || fail 'update --check changed the host'
+mkdir -p "$root/usr/bin"
+printf '#!/bin/sh\nexit 1\n' > "$root/usr/bin/systemctl"
+chmod 0755 "$root/usr/bin/systemctl"
 if "$sbctl" --root "$root" update --manifest "$work/manifest.json" --sbctl-artifact "$fake_sing_box" --sing-box-artifact "$fake_sing_box" >/dev/null 2>&1; then
-  fail 'invalid update artifact was accepted'
+  fail 'update with a failed service health check was accepted'
 fi
 test "$(cat "$root/usr/local/bin/sbctl")" = 'known-good sbctl' || fail 'failed update changed sbctl'
 test "$(cat "$root/usr/local/bin/sing-box")" = 'known-good sing-box' || fail 'failed update changed sing-box'
+test -d "$root/var/lib/sbctl/rollback" || fail 'failed update did not keep a rollback point'
 
 # Uninstall preserves unrelated proxy/firewall files by default; --purge only removes sbctl data.
 seed_uninstall_fixture
