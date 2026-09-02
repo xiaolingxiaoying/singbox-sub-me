@@ -1,8 +1,11 @@
 use serde_json::json;
 use std::fs;
+use std::io::BufReader;
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio_rustls::TlsAcceptor;
 
 use crate::config::{
     ConfigError, DeploymentConfig, DeploymentStore, ManagedProtocol, SubscriptionMode,
@@ -48,14 +51,16 @@ impl SubscriptionFormat {
 
 #[derive(Debug, Error)]
 pub enum SubscriptionError {
-    #[error("subscription is available only in IP fallback mode")]
-    NotIpFallback,
+    #[error("subscription is unavailable in external reverse-proxy mode")]
+    ExternalProxy,
     #[error("VLESS Reality is not enabled")]
     MissingVlessReality,
     #[error("invalid subscription credential")]
     InvalidCredential,
     #[error("subscription artifact is unavailable: {0}")]
     Artifact(#[from] std::io::Error),
+    #[error("TLS certificate could not be loaded: {0}")]
+    Tls(String),
     #[error(transparent)]
     Storage(#[from] ConfigError),
 }
@@ -73,7 +78,7 @@ pub fn regenerate(
 pub fn generated_artifacts(
     config: &DeploymentConfig,
 ) -> Result<Vec<(&'static str, String)>, SubscriptionError> {
-    ensure_vless_ip_fallback(config)?;
+    ensure_vless_subscription(config)?;
     Ok(vec![
         (SING_BOX_SERVER_ARTIFACT, sing_box_server(config)?),
         (SING_BOX_ARTIFACT, sing_box(config)?),
@@ -88,7 +93,7 @@ pub fn read_authorized(
     credential: &str,
     format: SubscriptionFormat,
 ) -> Result<String, SubscriptionError> {
-    ensure_vless_ip_fallback(config)?;
+    ensure_vless_subscription(config)?;
     if !constant_time_eq(
         credential.as_bytes(),
         config.subscription_credential.as_bytes(),
@@ -108,11 +113,19 @@ pub fn subscription_url(
     config: &DeploymentConfig,
     format: SubscriptionFormat,
 ) -> Result<String, SubscriptionError> {
-    ensure_vless_ip_fallback(config)?;
+    ensure_vless_subscription(config)?;
+    let prefix = match config.subscription_mode {
+        SubscriptionMode::IpFallback => format!(
+            "http://{}:{}",
+            config.subscription_host,
+            config.http_port.expect("validated IP fallback port")
+        ),
+        SubscriptionMode::Direct | SubscriptionMode::ExternalProxy => {
+            format!("https://{}", config.subscription_host)
+        }
+    };
     Ok(format!(
-        "http://{}:{}/sub/{}/{}",
-        config.subscription_host,
-        config.http_port.expect("validated IP fallback port"),
+        "{prefix}/sub/{}/{}",
         config.subscription_credential,
         format.path_name()
     ))
@@ -124,34 +137,160 @@ pub async fn serve(
     bind: &str,
     max_requests: Option<usize>,
 ) -> Result<(), SubscriptionError> {
-    ensure_vless_ip_fallback(config)?;
+    ensure_vless_subscription(config)?;
+    if config.subscription_mode == SubscriptionMode::Direct {
+        return serve_direct(store, config).await;
+    }
     let listener = TcpListener::bind(bind).await?;
     for _ in 0..max_requests.unwrap_or(usize::MAX) {
         let (mut stream, _) = listener.accept().await?;
         let mut request = [0_u8; 8192];
         let length = stream.read(&mut request).await?;
-        let target = std::str::from_utf8(&request[..length])
-            .ok()
-            .and_then(|request| request.lines().next())
-            .and_then(|line| line.strip_prefix("GET "))
-            .and_then(|line| line.split_once(' '))
-            .map(|(target, _)| target);
-        let response = target
-            .and_then(|target| parse_route(target))
-            .and_then(|(credential, format)| {
-                read_authorized(store, config, credential, format)
-                    .ok()
-                    .and_then(|body| crate::traffic::reconcile(store, config).ok().map(|traffic| (body, format, traffic)))
-            })
-            .map(|(body, format, traffic)| format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nsubscription-userinfo: upload={}; download={}; total={}; expire={}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                format.content_type(), traffic.received, traffic.transmitted, traffic.monthly_traffic_limit,
-                traffic.next_reset.timestamp(), body.len(), body
-            ))
-            .unwrap_or_else(|| "HTTP/1.1 404 Not Found\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned());
+        let target = request_target(&request[..length]);
+        let response = subscription_response(store, config, target);
         stream.write_all(response.as_bytes()).await?;
     }
     Ok(())
+}
+
+async fn serve_direct(
+    store: &DeploymentStore,
+    config: &DeploymentConfig,
+) -> Result<(), SubscriptionError> {
+    let http = match TcpListener::bind("[::]:80").await {
+        Ok(listener) => listener,
+        Err(_) => TcpListener::bind("0.0.0.0:80").await?,
+    };
+    let https = match TcpListener::bind("[::]:443").await {
+        Ok(listener) => listener,
+        Err(_) => TcpListener::bind("0.0.0.0:443").await?,
+    };
+    tokio::try_join!(
+        serve_acme_webroot(store, http),
+        serve_tls(store, config, https, None)
+    )?;
+    Ok(())
+}
+
+async fn serve_acme_webroot(
+    store: &DeploymentStore,
+    listener: TcpListener,
+) -> Result<(), SubscriptionError> {
+    loop {
+        let (mut stream, _) = listener.accept().await?;
+        let mut request = [0_u8; 8192];
+        let length = stream.read(&mut request).await?;
+        let target = request_target(&request[..length]);
+        let body = target
+            .and_then(|target| target.strip_prefix("/.well-known/acme-challenge/"))
+            .filter(|token| !token.is_empty() && !token.contains('/') && !token.contains('?'))
+            .and_then(|token| {
+                fs::read_to_string(
+                    store
+                        .acme_webroot()
+                        .join(".well-known/acme-challenge")
+                        .join(token),
+                )
+                .ok()
+            });
+        let response = body.map(|body| format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body)).unwrap_or_else(not_found_response);
+        stream.write_all(response.as_bytes()).await?;
+    }
+}
+
+async fn serve_tls(
+    store: &DeploymentStore,
+    config: &DeploymentConfig,
+    listener: TcpListener,
+    mut tls: Option<Arc<rustls::ServerConfig>>,
+) -> Result<(), SubscriptionError> {
+    loop {
+        let (stream, _) = listener.accept().await?;
+        if let Ok(reloaded) = load_tls_config(store, config) {
+            tls = Some(reloaded);
+        }
+        let Some(tls) = &tls else {
+            continue;
+        };
+        let acceptor = TlsAcceptor::from(Arc::clone(tls));
+        let Ok(mut stream) = acceptor.accept(stream).await else {
+            continue;
+        };
+        let mut request = [0_u8; 8192];
+        if let Ok(length) = stream.read(&mut request).await {
+            let target = request_target(&request[..length]);
+            let _ = stream
+                .write_all(subscription_response(store, config, target).as_bytes())
+                .await;
+        }
+    }
+}
+
+fn request_target(request: &[u8]) -> Option<&str> {
+    std::str::from_utf8(request)
+        .ok()
+        .and_then(|request| request.lines().next())
+        .and_then(|line| line.strip_prefix("GET "))
+        .and_then(|line| line.split_once(' '))
+        .map(|(target, _)| target)
+}
+
+fn load_tls_config(
+    store: &DeploymentStore,
+    config: &DeploymentConfig,
+) -> Result<Arc<rustls::ServerConfig>, SubscriptionError> {
+    let directory = store
+        .root()
+        .join("etc/letsencrypt/live")
+        .join(&config.subscription_host);
+    let mut certificates = BufReader::new(fs::File::open(directory.join("fullchain.pem"))?);
+    let certificates = rustls_pemfile::certs(&mut certificates)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| SubscriptionError::Tls(error.to_string()))?;
+    let mut key = BufReader::new(fs::File::open(directory.join("privkey.pem"))?);
+    let key = rustls_pemfile::private_key(&mut key)
+        .map_err(|error| SubscriptionError::Tls(error.to_string()))?
+        .ok_or_else(|| SubscriptionError::Tls("private key file contains no key".to_owned()))?;
+    rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certificates, key)
+        .map(Arc::new)
+        .map_err(|error| SubscriptionError::Tls(error.to_string()))
+}
+
+fn subscription_response(
+    store: &DeploymentStore,
+    config: &DeploymentConfig,
+    target: Option<&str>,
+) -> String {
+    target
+        .and_then(parse_route)
+        .and_then(|(credential, format)| {
+            read_authorized(store, config, credential, format)
+                .ok()
+                .and_then(|body| {
+                    crate::traffic::reconcile(store, config)
+                        .ok()
+                        .map(|traffic| (body, format, traffic))
+                })
+        })
+        .map(|(body, format, traffic)| {
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nsubscription-userinfo: upload={}; download={}; total={}; expire={}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                format.content_type(),
+                traffic.received,
+                traffic.transmitted,
+                traffic.monthly_traffic_limit,
+                traffic.next_reset.timestamp(),
+                body.len(),
+                body
+            )
+        })
+        .unwrap_or_else(not_found_response)
+}
+
+fn not_found_response() -> String {
+    "HTTP/1.1 404 Not Found\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
 }
 
 fn parse_route(target: &str) -> Option<(&str, SubscriptionFormat)> {
@@ -169,9 +308,9 @@ fn parse_route(target: &str) -> Option<(&str, SubscriptionFormat)> {
     parts.next().is_none().then_some((credential, format))
 }
 
-fn ensure_vless_ip_fallback(config: &DeploymentConfig) -> Result<(), SubscriptionError> {
-    if config.subscription_mode != SubscriptionMode::IpFallback {
-        return Err(SubscriptionError::NotIpFallback);
+fn ensure_vless_subscription(config: &DeploymentConfig) -> Result<(), SubscriptionError> {
+    if config.subscription_mode == SubscriptionMode::ExternalProxy {
+        return Err(SubscriptionError::ExternalProxy);
     }
     if !config
         .enabled_protocols
@@ -186,7 +325,7 @@ fn ensure_vless_ip_fallback(config: &DeploymentConfig) -> Result<(), Subscriptio
 fn reality_subscription_inputs(
     config: &DeploymentConfig,
 ) -> Result<(&str, &crate::config::VlessRealityCredentials, &str), SubscriptionError> {
-    ensure_vless_ip_fallback(config)?;
+    ensure_vless_subscription(config)?;
     Ok((
         config
             .proxy_host

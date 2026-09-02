@@ -115,6 +115,52 @@ fn configuration_validation_rejects_an_ip_fallback_host_that_is_not_an_ip_addres
 }
 
 #[test]
+fn direct_domain_mode_generates_https_subscription_urls_without_an_http_port() {
+    let fixture = TempDir::new().expect("temporary root is created");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "direct",
+            "--subscription-host",
+            "sub.example.test",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "sub",
+            "--format",
+            "uri",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("https://sub.example.test/sub/"));
+
+    assert!(
+        fixture
+            .path()
+            .join("var/lib/sbctl/acme-webroot/.well-known/acme-challenge")
+            .is_dir()
+    );
+}
+
+#[test]
 fn vless_reality_ip_fallback_exports_consistent_subscription_formats() {
     let fixture = TempDir::new().expect("temporary root is created");
 

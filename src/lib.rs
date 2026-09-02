@@ -1,3 +1,4 @@
+pub mod certificate;
 pub mod config;
 pub mod preflight;
 pub mod subscription;

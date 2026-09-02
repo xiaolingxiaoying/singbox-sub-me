@@ -24,7 +24,7 @@ enum Command {
         #[arg(long, value_enum)]
         format: Option<CliSubscriptionFormat>,
     },
-    /// Run the IP fallback subscription HTTP service.
+    /// Run the subscription service.
     Serve {
         /// Socket address; defaults to the configured public IP and HTTP port.
         #[arg(long)]
@@ -32,6 +32,11 @@ enum Command {
         /// Stop after this many requests (useful for supervised health checks).
         #[arg(long, hide = true)]
         max_requests: Option<usize>,
+    },
+    /// Obtain or renew a Direct subscription mode certificate with Certbot.
+    Certificate {
+        #[command(subcommand)]
+        command: CertificateCommand,
     },
     /// Create, inspect, and validate the persistent deployment configuration.
     Config {
@@ -74,6 +79,17 @@ enum ConfigCommand {
     Show,
     /// Parse and validate the persisted deployment configuration.
     Validate,
+}
+
+#[derive(Debug, Subcommand)]
+enum CertificateCommand {
+    /// Obtain a certificate using Certbot's webroot authenticator.
+    Obtain {
+        #[arg(long)]
+        email: String,
+    },
+    /// Renew certificates and safely reload the sbctl service if they changed.
+    Renew,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -164,7 +180,31 @@ fn main() -> ExitCode {
         Command::Traffic => print_traffic(root),
         Command::Sub { format } => print_subscription_urls(root, format.map(Into::into)),
         Command::Serve { bind, max_requests } => serve_subscription(root, bind, max_requests),
+        Command::Certificate { command } => run_certificate(root, command),
         Command::Config { command } => run_config(root, command),
+    }
+}
+
+fn run_certificate(root: &Path, command: CertificateCommand) -> ExitCode {
+    let store = sbctl::config::DeploymentStore::new(root);
+    let result = store.load().and_then(|config| {
+        match command {
+            CertificateCommand::Obtain { email } => {
+                sbctl::certificate::obtain(&store, &config, &email)
+            }
+            CertificateCommand::Renew => sbctl::certificate::renew(&config),
+        }
+        .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))
+    });
+    match result {
+        Ok(()) => {
+            println!("certificate operation completed");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("certificate operation failed: {error}");
+            ExitCode::from(2)
+        }
     }
 }
 
@@ -205,6 +245,9 @@ fn print_subscription_urls(
     format: Option<sbctl::subscription::SubscriptionFormat>,
 ) -> ExitCode {
     let store = sbctl::config::DeploymentStore::new(root);
+    let is_ip_fallback = store.load().is_ok_and(|config| {
+        config.subscription_mode == sbctl::config::SubscriptionMode::IpFallback
+    });
     let result = store.load().and_then(|config| {
         let formats = match format {
             Some(format) => vec![format],
@@ -225,9 +268,11 @@ fn print_subscription_urls(
     });
     match result {
         Ok(contents) => {
-            eprintln!(
-                "warning: IP fallback subscription uses unencrypted HTTP and is lower security"
-            );
+            if is_ip_fallback {
+                eprintln!(
+                    "warning: IP fallback subscription uses unencrypted HTTP and is lower security"
+                );
+            }
             print!("{contents}");
             ExitCode::SUCCESS
         }

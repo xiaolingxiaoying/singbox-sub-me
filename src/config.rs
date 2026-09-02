@@ -14,6 +14,7 @@ use x25519_dalek::{X25519_BASEPOINT_BYTES, x25519};
 const CONFIG_RELATIVE_PATH: &str = "etc/sbctl/config.toml";
 const STATE_RELATIVE_PATH: &str = "var/lib/sbctl/state.json";
 const ARTIFACTS_RELATIVE_PATH: &str = "var/lib/sbctl/artifacts";
+const ACME_WEBROOT_RELATIVE_PATH: &str = "var/lib/sbctl/acme-webroot";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -388,6 +389,14 @@ impl DeploymentStore {
         for (name, contents) in artifacts {
             self.write_artifact_unlocked(name, contents)?;
         }
+        if config.subscription_mode == SubscriptionMode::Direct {
+            create_private_directory(
+                &self
+                    .root
+                    .join(ACME_WEBROOT_RELATIVE_PATH)
+                    .join(".well-known/acme-challenge"),
+            )?;
+        }
         let contents = toml::to_string_pretty(config)?;
         Ok(atomic_write(&path, contents.as_bytes())?)
     }
@@ -429,6 +438,10 @@ impl DeploymentStore {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn acme_webroot(&self) -> PathBuf {
+        self.root.join(ACME_WEBROOT_RELATIVE_PATH)
     }
 
     pub fn write_artifact(&self, name: &str, contents: &[u8]) -> Result<(), ConfigError> {
