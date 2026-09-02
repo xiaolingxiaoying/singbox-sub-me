@@ -4,3 +4,4 @@ pub mod lifecycle;
 pub mod preflight;
 pub mod subscription;
 pub mod traffic;
+pub mod update;

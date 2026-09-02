@@ -1,6 +1,7 @@
 use assert_cmd::Command;
 use base64::Engine;
 use predicates::prelude::*;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -20,6 +21,270 @@ fn status_reports_an_unmanaged_host_before_installation() {
         .stdout(predicate::str::contains(
             "sbctl status: unmanaged (not installed)",
         ));
+}
+
+#[test]
+fn update_check_reads_a_verified_release_manifest_without_changing_the_host() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let manifest = fixture.path().join("release-manifest.json");
+    write_release_manifest(&manifest, b"candidate sbctl", b"candidate sing-box");
+    let before = filesystem_snapshot(fixture.path());
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "update",
+            "--check",
+            "--manifest",
+            manifest.to_str().expect("manifest path is UTF-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sbctl: 0.1.1 available"))
+        .stdout(predicate::str::contains("sing-box: 1.12.0 available"));
+
+    assert_eq!(filesystem_snapshot(fixture.path()), before);
+}
+
+#[test]
+fn update_rejects_an_artifact_that_does_not_match_the_fixed_manifest() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let manifest = fixture.path().join("release-manifest.json");
+    write_release_manifest(&manifest, b"expected sbctl", b"expected sing-box");
+    let sbctl = fixture.path().join("candidate-sbctl");
+    let sing_box = fixture.path().join("candidate-sing-box");
+    fs::write(&sbctl, b"unexpected sbctl").expect("candidate is written");
+    fs::write(&sing_box, b"expected sing-box").expect("candidate is written");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "update",
+            "--manifest",
+            manifest.to_str().expect("manifest path is UTF-8"),
+            "--sbctl-artifact",
+            sbctl.to_str().expect("candidate path is UTF-8"),
+            "--sing-box-artifact",
+            sing_box.to_str().expect("candidate path is UTF-8"),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "does not match the pinned release manifest",
+        ));
+
+    assert!(!fixture.path().join("var/lib/sbctl/rollback").exists());
+    assert!(!fixture.path().join("usr/local/bin/sbctl").exists());
+}
+
+#[test]
+fn failed_update_health_check_restores_the_known_good_binaries_and_keeps_a_rollback_point() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    initialize_update_fixture(&fixture);
+    let manifest = fixture.path().join("release-manifest.json");
+    let sbctl = command_fixture(&fixture, "candidate-sbctl", true, &[]);
+    let sing_box = sing_box_check_fixture(&fixture, true, &["vless"]);
+    write_release_manifest(
+        &manifest,
+        &fs::read(&sbctl).expect("candidate is readable"),
+        &fs::read(&sing_box).expect("candidate is readable"),
+    );
+    write_systemctl_fixture(&fixture, false);
+    let old_sbctl = b"known-good sbctl";
+    let old_sing_box = b"known-good sing-box";
+    write_managed_file(&fixture, "usr/local/bin/sbctl", old_sbctl);
+    write_managed_file(&fixture, "usr/local/bin/sing-box", old_sing_box);
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "update",
+            "--manifest",
+            manifest.to_str().expect("manifest path is UTF-8"),
+            "--sbctl-artifact",
+            sbctl.to_str().expect("candidate path is UTF-8"),
+            "--sing-box-artifact",
+            sing_box.to_str().expect("candidate path is UTF-8"),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("service health check failed"));
+
+    assert_eq!(
+        fs::read(fixture.path().join("usr/local/bin/sbctl")).expect("old sbctl is restored"),
+        old_sbctl
+    );
+    assert_eq!(
+        fs::read(fixture.path().join("usr/local/bin/sing-box")).expect("old sing-box is restored"),
+        old_sing_box
+    );
+    assert!(fixture.path().join("var/lib/sbctl/rollback").is_dir());
+}
+
+#[test]
+fn failed_candidate_configuration_check_leaves_the_known_good_binaries_untouched() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    initialize_update_fixture(&fixture);
+    let manifest = fixture.path().join("release-manifest.json");
+    let sbctl = command_fixture(&fixture, "candidate-sbctl", true, &[]);
+    let sing_box = sing_box_check_fixture(&fixture, false, &[]);
+    write_release_manifest(
+        &manifest,
+        &fs::read(&sbctl).expect("candidate is readable"),
+        &fs::read(&sing_box).expect("candidate is readable"),
+    );
+    let old_sbctl = b"known-good sbctl";
+    let old_sing_box = b"known-good sing-box";
+    write_managed_file(&fixture, "usr/local/bin/sbctl", old_sbctl);
+    write_managed_file(&fixture, "usr/local/bin/sing-box", old_sing_box);
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "update",
+            "--manifest",
+            manifest.to_str().expect("manifest path is UTF-8"),
+            "--sbctl-artifact",
+            sbctl.to_str().expect("candidate path is UTF-8"),
+            "--sing-box-artifact",
+            sing_box.to_str().expect("candidate path is UTF-8"),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "sing-box candidate configuration check failed",
+        ));
+
+    assert_eq!(
+        fs::read(fixture.path().join("usr/local/bin/sbctl")).expect("old sbctl is preserved"),
+        old_sbctl
+    );
+    assert_eq!(
+        fs::read(fixture.path().join("usr/local/bin/sing-box")).expect("old sing-box is preserved"),
+        old_sing_box
+    );
+    assert!(!fixture.path().join("var/lib/sbctl/rollback").exists());
+}
+
+fn initialize_update_fixture(fixture: &TempDir) {
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "203.0.113.7",
+            "--http-port",
+            "2080",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+}
+
+fn write_managed_file(fixture: &TempDir, relative: &str, contents: &[u8]) {
+    let path = fixture.path().join(relative);
+    fs::create_dir_all(path.parent().expect("managed path has a parent"))
+        .expect("managed directory is created");
+    fs::write(path, contents).expect("managed file is written");
+}
+
+fn write_systemctl_fixture(fixture: &TempDir, succeeds: bool) {
+    let _ = command_fixture(fixture, "usr/bin/systemctl", succeeds, &[]);
+}
+
+fn command_fixture(
+    fixture: &TempDir,
+    name: &str,
+    succeeds: bool,
+    expected_protocols: &[&str],
+) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let path = fixture.path().join(format!("{name}.cmd"));
+        fs::create_dir_all(path.parent().expect("command path has a parent"))
+            .expect("command directory is created");
+        let checks = expected_protocols
+            .iter()
+            .map(|protocol| {
+                format!("findstr /C:\"\\\"type\\\": \\\"{protocol}\\\"\" %3 >nul || exit /b 1\r\n")
+            })
+            .collect::<String>();
+        fs::write(
+            &path,
+            format!(
+                "@echo off\r\n{checks}exit /b {}\r\n",
+                if succeeds { 0 } else { 1 }
+            ),
+        )
+        .expect("command fixture is written");
+        path
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = fixture.path().join(name);
+        fs::create_dir_all(path.parent().expect("command path has a parent"))
+            .expect("command directory is created");
+        let checks = expected_protocols
+            .iter()
+            .map(|protocol| format!("grep -q '\"type\": \"{protocol}\"' \"$3\" || exit 1\n"))
+            .collect::<String>();
+        fs::write(
+            &path,
+            format!("#!/bin/sh\n{checks}exit {}\n", if succeeds { 0 } else { 1 }),
+        )
+        .expect("command fixture is written");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+            .expect("command fixture is executable");
+        path
+    }
+}
+
+fn write_release_manifest(path: &std::path::Path, sbctl: &[u8], sing_box: &[u8]) {
+    let digest = |contents: &[u8]| format!("{:x}", Sha256::digest(contents));
+    fs::write(
+        path,
+        format!(
+            r#"{{"sbctl":{{"version":"0.1.1","sha256":"{}"}},"sing_box":{{"version":"1.12.0","sha256":"{}"}}}}"#,
+            digest(sbctl),
+            digest(sing_box),
+        ),
+    )
+    .expect("release manifest is written");
+}
+
+fn filesystem_snapshot(root: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(root).expect("fixture root is readable") {
+        let entry = entry.expect("fixture entry is readable");
+        if entry.file_type().expect("file type is readable").is_file() {
+            entries.push((
+                entry.path(),
+                fs::read(entry.path()).expect("file is readable"),
+            ));
+        }
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries
 }
 
 #[test]

@@ -713,6 +713,21 @@ impl DeploymentStore {
         self.atomic_write_managed(&self.root.join("etc/sing-box/config.json"), contents)
     }
 
+    /// Serializes a multi-file lifecycle operation with configuration and state
+    /// writers. Callers use the locked write helpers only while this guard lives.
+    pub fn acquire_operation_lock(&self) -> Result<OperationLock, ConfigError> {
+        self.operation_lock()
+    }
+
+    pub fn write_relative_locked(
+        &self,
+        relative: &str,
+        contents: &[u8],
+    ) -> Result<(), ConfigError> {
+        let path = safe_managed_path(&self.root, relative)?;
+        Ok(atomic_write(&path, contents)?)
+    }
+
     fn write_artifact_unlocked(&self, name: &str, contents: &[u8]) -> Result<(), ConfigError> {
         if name.is_empty() || Path::new(name).components().count() != 1 {
             return Err(ConfigError::InvalidValue(
@@ -735,7 +750,7 @@ impl DeploymentStore {
     }
 }
 
-struct OperationLock(File);
+pub struct OperationLock(File);
 
 impl OperationLock {
     fn acquire(directory: &Path) -> io::Result<Self> {
@@ -779,6 +794,25 @@ fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn safe_managed_path(root: &Path, relative: &str) -> Result<PathBuf, ConfigError> {
+    let path = Path::new(relative);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(ConfigError::InvalidValue(
+            "managed path must be a relative path",
+        ));
+    }
+    Ok(root.join(path))
 }
 
 fn private_open(path: &Path, create_new: bool) -> io::Result<File> {

@@ -168,6 +168,12 @@ fn write_unit(root: &Path, relative_path: &str, contents: &str) -> Result<(), Co
 
 fn systemctl(root: &Path, args: &[&str]) -> Result<(), String> {
     let command = root.join("usr/bin/systemctl");
+    #[cfg(windows)]
+    let command = if command.is_file() {
+        command
+    } else {
+        root.join("usr/bin/systemctl.cmd")
+    };
     let program = if command.is_file() {
         command
     } else {

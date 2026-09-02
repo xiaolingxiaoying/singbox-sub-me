@@ -4,7 +4,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Debug, Parser)]
-#[command(name = "sbctl", about = "Manage a private sing-box deployment")]
+#[command(
+    name = "sbctl",
+    version,
+    about = "Manage a private sing-box deployment"
+)]
 struct Cli {
     #[arg(long, global = true, hide = true, value_name = "PATH")]
     root: Option<PathBuf>,
@@ -45,6 +49,21 @@ enum Command {
     Restart {
         #[arg(long, value_name = "PATH")]
         sing_box_bin: Option<PathBuf>,
+    },
+    /// Check or install explicitly selected, hash-verified release artifacts.
+    Update {
+        /// Display versions from the pinned manifest without downloading or changing the host.
+        #[arg(long)]
+        check: bool,
+        /// Fixed release manifest containing the allowed artifact hashes.
+        #[arg(long, value_name = "PATH")]
+        manifest: PathBuf,
+        /// Local sbctl candidate artifact. Required unless --check is used.
+        #[arg(long, value_name = "PATH")]
+        sbctl_artifact: Option<PathBuf>,
+        /// Local sing-box candidate artifact. Required unless --check is used.
+        #[arg(long, value_name = "PATH")]
+        sing_box_artifact: Option<PathBuf>,
     },
     /// Retrieve a generated subscription representation using its path credential.
     Sub {
@@ -245,10 +264,65 @@ fn main() -> ExitCode {
         Command::Traffic => print_traffic(root),
         Command::Node => print_nodes(root),
         Command::Restart { sing_box_bin } => restart(root, sing_box_bin),
+        Command::Update {
+            check,
+            manifest,
+            sbctl_artifact,
+            sing_box_artifact,
+        } => update(
+            root,
+            check,
+            &manifest,
+            sbctl_artifact.as_deref(),
+            sing_box_artifact.as_deref(),
+        ),
         Command::Sub { format } => print_subscription_urls(root, format.map(Into::into)),
         Command::Serve { bind, max_requests } => serve_subscription(root, bind, max_requests),
         Command::Certificate { command } => run_certificate(root, command),
         Command::Config { command } => run_config(root, command),
+    }
+}
+
+fn update(
+    root: &Path,
+    check: bool,
+    manifest_path: &Path,
+    sbctl_artifact: Option<&Path>,
+    sing_box_artifact: Option<&Path>,
+) -> ExitCode {
+    let result = sbctl::update::read_manifest(manifest_path).and_then(|manifest| {
+        if check {
+            return Ok(format!(
+                "update check completed without downloading or changing the host\n{}",
+                sbctl::update::available_versions(&manifest)
+            ));
+        }
+        let sbctl_artifact = sbctl_artifact.ok_or(
+            sbctl::update::UpdateError::MissingArtifactArgument("--sbctl-artifact"),
+        )?;
+        let sing_box_artifact = sing_box_artifact.ok_or(
+            sbctl::update::UpdateError::MissingArtifactArgument("--sing-box-artifact"),
+        )?;
+        let rollback = sbctl::update::apply(
+            &sbctl::config::DeploymentStore::new(root),
+            &manifest,
+            sbctl_artifact,
+            sing_box_artifact,
+        )?;
+        Ok(format!(
+            "update completed after verified validation and service health checks\nrollback point: {}",
+            rollback.display()
+        ))
+    });
+    match result {
+        Ok(message) => {
+            println!("{message}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("update failed: {error}");
+            ExitCode::from(2)
+        }
     }
 }
 
