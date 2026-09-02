@@ -715,6 +715,147 @@ fn ip_fallback_http_service_accepts_only_the_exact_credential_path_and_reports_v
     );
 }
 
+#[test]
+fn external_proxy_mode_serves_loopback_without_touching_public_ports_or_proxy_configuration() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let port = TcpListener::bind("127.0.0.1:0")
+        .expect("an ephemeral port is available")
+        .local_addr()
+        .expect("address is available")
+        .port();
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "external-proxy",
+            "--subscription-host",
+            "sub.example.test",
+            "--listen-port",
+            &port.to_string(),
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+
+    let config = fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
+        .expect("configuration is persisted");
+    let credential = config
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("subscription_credential = \"")
+                .and_then(|value| value.strip_suffix('\"'))
+        })
+        .expect("credential is available");
+    assert!(config.contains("subscription_listen_port"));
+    assert!(!fixture.path().join("etc/caddy/Caddyfile").exists());
+    assert!(!fixture.path().join("etc/nginx/nginx.conf").exists());
+
+    let mut server = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("sbctl"))
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "serve",
+            "--max-requests",
+            "2",
+        ])
+        .spawn()
+        .expect("loopback subscription service starts");
+    let response = http_get(port, &format!("/sub/{credential}/uri"));
+    assert!(response.starts_with("HTTP/1.1 200 OK"));
+    assert!(response.contains("subscription-userinfo:"));
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "switch-mode",
+            "--mode",
+            "external-proxy",
+            "--listen-port",
+            &port.to_string(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already in use"));
+    let preserved = http_get(port, &format!("/sub/{credential}/uri"));
+    assert!(preserved.starts_with("HTTP/1.1 200 OK"));
+    assert!(
+        fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
+            .expect("configuration remains readable")
+            .contains("subscription_mode = \"external-proxy\"")
+    );
+    assert!(server.wait().expect("server exits").success());
+}
+
+#[test]
+fn external_proxy_mode_rejects_a_managed_tcp_protocol_port_when_switching_modes() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "external-proxy",
+            "--subscription-host",
+            "sub.example.test",
+            "--listen-port",
+            "2080",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+
+    let config_path = fixture.path().join("etc/sbctl/config.toml");
+    let config = fs::read_to_string(&config_path).expect("configuration is persisted");
+    let protocol_port = config
+        .lines()
+        .find_map(|line| line.strip_prefix("listen_port = "))
+        .expect("VLESS Reality listener port is persisted")
+        .to_owned();
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "switch-mode",
+            "--mode",
+            "external-proxy",
+            "--listen-port",
+            &protocol_port,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("must not conflict"));
+    assert!(
+        fs::read_to_string(config_path)
+            .expect("configuration remains readable")
+            .contains("subscription_listen_port = 2080")
+    );
+}
+
 fn http_get(port: u16, path: &str) -> String {
     let mut stream = (0..50)
         .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {

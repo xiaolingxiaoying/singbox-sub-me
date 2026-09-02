@@ -58,6 +58,9 @@ enum ConfigCommand {
         proxy_host: Option<String>,
         #[arg(long)]
         http_port: Option<u16>,
+        /// Loopback HTTP port used by an external reverse proxy.
+        #[arg(long)]
+        listen_port: Option<u16>,
         /// Linux network interface; defaults to the detected default-route interface.
         #[arg(long = "interface")]
         interface: Option<String>,
@@ -78,6 +81,14 @@ enum ConfigCommand {
         /// sing-box binary used to validate VMess WebSocket or Hysteria2 server configuration.
         #[arg(long, value_name = "PATH")]
         sing_box_bin: Option<PathBuf>,
+    },
+    /// Change only the subscription delivery mode while retaining generated nodes and credentials.
+    SwitchMode {
+        #[arg(long, value_enum)]
+        mode: CliSubscriptionMode,
+        /// Required when switching to external-proxy mode.
+        #[arg(long)]
+        listen_port: Option<u16>,
     },
     /// Display the persisted deployment summary without exposing credentials.
     Show,
@@ -215,12 +226,19 @@ fn run_certificate(root: &Path, command: CertificateCommand) -> ExitCode {
 fn serve_subscription(root: &Path, bind: Option<String>, max_requests: Option<usize>) -> ExitCode {
     let store = sbctl::config::DeploymentStore::new(root);
     let result = store.load().and_then(|config| {
-        let bind = bind.unwrap_or_else(|| {
-            format!(
+        let bind = bind.unwrap_or_else(|| match config.subscription_mode {
+            sbctl::config::SubscriptionMode::ExternalProxy => format!(
+                "127.0.0.1:{}",
+                config
+                    .subscription_listen_port
+                    .expect("validated external reverse-proxy listener port")
+            ),
+            sbctl::config::SubscriptionMode::IpFallback => format!(
                 "{}:{}",
                 config.subscription_host,
-                config.http_port.unwrap_or_default()
-            )
+                config.http_port.expect("validated IP fallback port")
+            ),
+            sbctl::config::SubscriptionMode::Direct => "0.0.0.0:0".to_owned(),
         });
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
@@ -334,6 +352,7 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
             subscription_host,
             proxy_host,
             http_port,
+            listen_port,
             interface,
             protocols,
             reality_decoy_sni,
@@ -360,12 +379,17 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
                     protocols.into_iter().map(Into::into).collect(),
                     reality_decoy_sni,
                 )?;
+                config.subscription_listen_port = listen_port;
                 config.monthly_traffic_limit = monthly_traffic_limit;
                 config.accounting_policy = accounting_policy.into();
                 config.accounting_timezone =
                     accounting_timezone.unwrap_or_else(|| system_accounting_timezone(root));
                 config.anchored_reset_at = anchored_reset_at;
                 config.validate()?;
+                if let Some(port) = config.subscription_listen_port {
+                    sbctl::subscription::ensure_external_proxy_listener_available(port)
+                        .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+                }
                 let generated_artifacts = if config
                     .enabled_protocols
                     .iter()
@@ -412,6 +436,20 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
             })
         }
         .map(|_| "deployment configuration initialized".to_owned()),
+        ConfigCommand::SwitchMode { mode, listen_port } => store.load().and_then(|mut config| {
+            config.subscription_mode = mode.into();
+            config.subscription_listen_port = listen_port;
+            if config.subscription_mode != sbctl::config::SubscriptionMode::IpFallback {
+                config.http_port = None;
+            }
+            config.validate()?;
+            if let Some(port) = config.subscription_listen_port {
+                sbctl::subscription::ensure_external_proxy_listener_available(port)
+                    .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+            }
+            store.replace(&config)
+        })
+        .map(|_| "subscription mode changed".to_owned()),
         ConfigCommand::Show => store.load().map(|config| config.summary()),
         ConfigCommand::Validate => store
             .load()

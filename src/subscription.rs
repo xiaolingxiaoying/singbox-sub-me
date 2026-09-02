@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 use std::fs;
 use std::io::BufReader;
 use std::io::Write;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -55,8 +56,10 @@ impl SubscriptionFormat {
 
 #[derive(Debug, Error)]
 pub enum SubscriptionError {
-    #[error("subscription is unavailable in external reverse-proxy mode")]
-    ExternalProxy,
+    #[error("external reverse-proxy subscription must bind a loopback address")]
+    ExternalProxyBind,
+    #[error("subscription listener port {0} is already in use")]
+    ListenerUnavailable(u16),
     #[error("no subscription-capable Managed protocol is enabled")]
     MissingNodes,
     #[error("invalid subscription credential")]
@@ -168,6 +171,14 @@ pub async fn serve(
     ensure_subscription_nodes(config)?;
     if config.subscription_mode == SubscriptionMode::Direct {
         return serve_direct(store, config).await;
+    }
+    if config.subscription_mode == SubscriptionMode::ExternalProxy
+        && !bind
+            .parse::<SocketAddr>()
+            .ok()
+            .is_some_and(|address| address.ip().is_loopback())
+    {
+        return Err(SubscriptionError::ExternalProxyBind);
     }
     let listener = TcpListener::bind(bind).await?;
     for _ in 0..max_requests.unwrap_or(usize::MAX) {
@@ -337,9 +348,6 @@ fn parse_route(target: &str) -> Option<(&str, SubscriptionFormat)> {
 }
 
 fn ensure_subscription_nodes(config: &DeploymentConfig) -> Result<(), SubscriptionError> {
-    if config.subscription_mode == SubscriptionMode::ExternalProxy {
-        return Err(SubscriptionError::ExternalProxy);
-    }
     if !config
         .enabled_protocols
         .iter()
@@ -348,6 +356,12 @@ fn ensure_subscription_nodes(config: &DeploymentConfig) -> Result<(), Subscripti
         return Err(SubscriptionError::MissingNodes);
     }
     Ok(())
+}
+
+pub fn ensure_external_proxy_listener_available(port: u16) -> Result<(), SubscriptionError> {
+    std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
+        .map(|listener| drop(listener))
+        .map_err(|_| SubscriptionError::ListenerUnavailable(port))
 }
 
 fn sing_box(config: &DeploymentConfig) -> Result<String, SubscriptionError> {

@@ -23,6 +23,8 @@ pub struct DeploymentConfig {
     pub subscription_host: String,
     pub proxy_host: Option<String>,
     pub http_port: Option<u16>,
+    #[serde(default)]
+    pub subscription_listen_port: Option<u16>,
     pub interface: String,
     pub enabled_protocols: Vec<ManagedProtocol>,
     pub reality_decoy_sni: Option<String>,
@@ -187,11 +189,14 @@ impl DeploymentConfig {
             .contains(&ManagedProtocol::Anytls)
             .then(|| generate_anytls_credentials(&mut allocated_ports))
             .transpose()?;
+        let subscription_listen_port =
+            (subscription_mode == SubscriptionMode::ExternalProxy).then_some(2080);
         let config = Self {
             subscription_mode,
             subscription_host,
             proxy_host,
             http_port,
+            subscription_listen_port,
             interface,
             enabled_protocols,
             reality_decoy_sni,
@@ -319,6 +324,11 @@ impl DeploymentConfig {
         }
         match self.subscription_mode {
             SubscriptionMode::IpFallback => {
+                if self.subscription_listen_port.is_some() {
+                    return Err(ConfigError::InvalidValue(
+                        "only external reverse-proxy subscription configures a listener port",
+                    ));
+                }
                 if self.subscription_host.parse::<IpAddr>().is_err() {
                     return Err(ConfigError::InvalidValue(
                         "IP fallback subscription requires an IP address as the subscription host",
@@ -348,7 +358,7 @@ impl DeploymentConfig {
                     ));
                 }
             }
-            SubscriptionMode::Direct | SubscriptionMode::ExternalProxy => {
+            SubscriptionMode::Direct => {
                 if self.subscription_host.parse::<IpAddr>().is_ok() {
                     return Err(ConfigError::InvalidValue(
                         "domain subscription modes require a hostname",
@@ -357,6 +367,38 @@ impl DeploymentConfig {
                 if self.http_port.is_some() {
                     return Err(ConfigError::InvalidValue(
                         "only IP fallback subscription configures an HTTP port",
+                    ));
+                }
+                if self.subscription_listen_port.is_some() {
+                    return Err(ConfigError::InvalidValue(
+                        "only external reverse-proxy subscription configures a listener port",
+                    ));
+                }
+            }
+            SubscriptionMode::ExternalProxy => {
+                if self.subscription_host.parse::<IpAddr>().is_ok() {
+                    return Err(ConfigError::InvalidValue(
+                        "domain subscription modes require a hostname",
+                    ));
+                }
+                if self.http_port.is_some() {
+                    return Err(ConfigError::InvalidValue(
+                        "only IP fallback subscription configures an HTTP port",
+                    ));
+                }
+                let Some(port) = self.subscription_listen_port else {
+                    return Err(ConfigError::InvalidValue(
+                        "external reverse-proxy subscription requires a loopback listener port",
+                    ));
+                };
+                if port <= 1024 {
+                    return Err(ConfigError::InvalidValue(
+                        "external reverse-proxy listener port must be higher than 1024",
+                    ));
+                }
+                if self.tcp_protocol_listener_ports().contains(&port) {
+                    return Err(ConfigError::InvalidValue(
+                        "external reverse-proxy listener port must not conflict with a Managed protocol port",
                     ));
                 }
             }
@@ -394,6 +436,9 @@ impl DeploymentConfig {
         if let Some(port) = self.http_port {
             lines.push(format!("HTTP port: {port}"));
         }
+        if let Some(port) = self.subscription_listen_port {
+            lines.push(format!("loopback subscription port: {port}"));
+        }
         if let Some(sni) = &self.reality_decoy_sni {
             lines.push(format!("Reality decoy SNI: {sni}"));
         }
@@ -401,6 +446,17 @@ impl DeploymentConfig {
             lines.push(format!("anchored reset: {reset_at}"));
         }
         lines.join("\n")
+    }
+
+    fn tcp_protocol_listener_ports(&self) -> Vec<u16> {
+        [
+            self.vless_reality.as_ref().map(|node| node.listen_port),
+            self.vmess_websocket.as_ref().map(|node| node.listen_port),
+            self.anytls.as_ref().map(|node| node.listen_port),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 }
 
@@ -601,6 +657,17 @@ impl DeploymentStore {
         let config = toml::from_str::<DeploymentConfig>(&contents)?;
         config.validate()?;
         Ok(config)
+    }
+
+    pub fn replace(&self, config: &DeploymentConfig) -> Result<(), ConfigError> {
+        config.validate()?;
+        let path = self.root.join(CONFIG_RELATIVE_PATH);
+        let _lock = self.operation_lock()?;
+        if !path.exists() {
+            return Err(ConfigError::Missing);
+        }
+        let contents = toml::to_string_pretty(config)?;
+        Ok(atomic_write(&path, contents.as_bytes())?)
     }
 
     pub fn write_state(&self, contents: &[u8]) -> Result<(), ConfigError> {
