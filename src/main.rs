@@ -386,11 +386,13 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
                         protocol,
                         sbctl::config::ManagedProtocol::VmessWebsocket
                             | sbctl::config::ManagedProtocol::Hysteria2
+                            | sbctl::config::ManagedProtocol::Tuic
+                            | sbctl::config::ManagedProtocol::Anytls
                     )
                 });
                 if requires_sing_box_check && sing_box_bin.is_none() {
                     return Err(sbctl::config::ConfigError::InvalidValue(
-                        "VMess WebSocket and Hysteria2 require --sing-box-bin for configuration validation",
+                        "certificate-based Managed protocols require --sing-box-bin for configuration validation",
                     ));
                 }
                 if let Some(sing_box_bin) = sing_box_bin {

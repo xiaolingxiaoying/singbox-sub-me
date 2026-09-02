@@ -41,6 +41,10 @@ pub struct DeploymentConfig {
     pub vmess_websocket: Option<VmessWebsocketCredentials>,
     #[serde(default)]
     pub hysteria2: Option<Hysteria2Credentials>,
+    #[serde(default)]
+    pub tuic: Option<TuicCredentials>,
+    #[serde(default)]
+    pub anytls: Option<AnytlsCredentials>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -61,6 +65,19 @@ pub struct VmessWebsocketCredentials {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Hysteria2Credentials {
+    pub listen_port: u16,
+    pub password: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct TuicCredentials {
+    pub listen_port: u16,
+    pub uuid: String,
+    pub password: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct AnytlsCredentials {
     pub listen_port: u16,
     pub password: String,
 }
@@ -130,7 +147,7 @@ impl ManagedProtocol {
     pub fn has_generated_subscription_artifacts(&self) -> bool {
         matches!(
             self,
-            Self::VlessReality | Self::VmessWebsocket | Self::Hysteria2
+            Self::VlessReality | Self::VmessWebsocket | Self::Hysteria2 | Self::Tuic | Self::Anytls
         )
     }
 }
@@ -162,6 +179,14 @@ impl DeploymentConfig {
             .contains(&ManagedProtocol::Hysteria2)
             .then(|| generate_hysteria2_credentials(&mut allocated_ports))
             .transpose()?;
+        let tuic = enabled_protocols
+            .contains(&ManagedProtocol::Tuic)
+            .then(|| generate_tuic_credentials(&mut allocated_ports))
+            .transpose()?;
+        let anytls = enabled_protocols
+            .contains(&ManagedProtocol::Anytls)
+            .then(|| generate_anytls_credentials(&mut allocated_ports))
+            .transpose()?;
         let config = Self {
             subscription_mode,
             subscription_host,
@@ -178,6 +203,8 @@ impl DeploymentConfig {
             vless_reality,
             vmess_websocket,
             hysteria2,
+            tuic,
+            anytls,
         };
         config.validate()?;
         Ok(config)
@@ -230,6 +257,18 @@ impl DeploymentConfig {
             ManagedProtocol::Hysteria2,
             self.hysteria2.is_some(),
             "Hysteria2 requires generated node credentials",
+        )?;
+        validate_enabled_credentials(
+            &self.enabled_protocols,
+            ManagedProtocol::Tuic,
+            self.tuic.is_some(),
+            "TUIC requires generated node credentials",
+        )?;
+        validate_enabled_credentials(
+            &self.enabled_protocols,
+            ManagedProtocol::Anytls,
+            self.anytls.is_some(),
+            "AnyTLS requires generated node credentials",
         )?;
         if self
             .enabled_protocols
@@ -298,11 +337,14 @@ impl DeploymentConfig {
                 if self.enabled_protocols.iter().any(|protocol| {
                     matches!(
                         protocol,
-                        ManagedProtocol::VmessWebsocket | ManagedProtocol::Hysteria2
+                        ManagedProtocol::VmessWebsocket
+                            | ManagedProtocol::Hysteria2
+                            | ManagedProtocol::Tuic
+                            | ManagedProtocol::Anytls
                     )
                 }) {
                     return Err(ConfigError::InvalidValue(
-                        "VMess WebSocket and Hysteria2 require a domain subscription mode",
+                        "VMess WebSocket, Hysteria2, TUIC, and AnyTLS require a domain subscription mode",
                     ));
                 }
             }
@@ -414,6 +456,29 @@ fn generate_hysteria2_credentials(
     getrandom::fill(&mut password).map_err(|error| ConfigError::Randomness(error.to_string()))?;
     Ok(Hysteria2Credentials {
         listen_port: allocate_udp_port(allocated_ports)?,
+        password: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(password),
+    })
+}
+
+fn generate_tuic_credentials(
+    allocated_ports: &mut Vec<u16>,
+) -> Result<TuicCredentials, ConfigError> {
+    let mut password = [0_u8; 32];
+    getrandom::fill(&mut password).map_err(|error| ConfigError::Randomness(error.to_string()))?;
+    Ok(TuicCredentials {
+        listen_port: allocate_udp_port(allocated_ports)?,
+        uuid: generate_uuid()?,
+        password: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(password),
+    })
+}
+
+fn generate_anytls_credentials(
+    allocated_ports: &mut Vec<u16>,
+) -> Result<AnytlsCredentials, ConfigError> {
+    let mut password = [0_u8; 32];
+    getrandom::fill(&mut password).map_err(|error| ConfigError::Randomness(error.to_string()))?;
+    Ok(AnytlsCredentials {
+        listen_port: allocate_port(allocated_ports)?,
         password: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(password),
     })
 }

@@ -238,7 +238,7 @@ fn vless_reality_ip_fallback_exports_consistent_subscription_formats() {
 #[test]
 fn domain_nodes_export_vmess_websocket_and_hysteria2_with_independent_tls_credentials() {
     let fixture = TempDir::new().expect("temporary root is created");
-    let checker = sing_box_check_fixture(&fixture, true);
+    let checker = sing_box_check_fixture(&fixture, true, &["vmess"]);
     let root = fixture.path().to_str().expect("fixture path is UTF-8");
 
     Command::cargo_bin("sbctl")
@@ -345,6 +345,180 @@ fn domain_nodes_export_vmess_websocket_and_hysteria2_with_independent_tls_creden
 }
 
 #[test]
+fn domain_nodes_export_tuic_and_anytls_with_independent_tls_credentials() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let checker = sing_box_check_fixture(&fixture, true, &["tuic", "anytls"]);
+    let root = fixture.path().to_str().expect("fixture path is UTF-8");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            root,
+            "config",
+            "init",
+            "--mode",
+            "direct",
+            "--subscription-host",
+            "sub.example.test",
+            "--proxy-host",
+            "proxy.example.test",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "tuic",
+            "--protocol",
+            "anytls",
+            "--protocol",
+            "vless-reality",
+            "--protocol",
+            "vmess-websocket",
+            "--protocol",
+            "hysteria2",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+            "--sing-box-bin",
+            checker.to_str().expect("checker path is UTF-8"),
+        ])
+        .assert()
+        .success();
+
+    let artifacts = fixture.path().join("var/lib/sbctl/artifacts");
+    let server: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(artifacts.join("sing-box-server.json"))
+            .expect("sing-box server configuration is cached"),
+    )
+    .expect("server configuration is JSON");
+    let subscription: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(artifacts.join("subscription-sing-box.json"))
+            .expect("sing-box subscription is cached"),
+    )
+    .expect("subscription is JSON");
+    let inbounds = server["inbounds"].as_array().expect("inbounds are present");
+    let outbounds = subscription["outbounds"]
+        .as_array()
+        .expect("outbounds are present");
+    assert_eq!(inbounds.len(), 5);
+    assert_eq!(outbounds.len(), 5);
+    let tuic = outbounds
+        .iter()
+        .find(|node| node["type"] == "tuic")
+        .expect("TUIC node is exported");
+    let anytls = outbounds
+        .iter()
+        .find(|node| node["type"] == "anytls")
+        .expect("AnyTLS node is exported");
+    assert_eq!(tuic["server"], "proxy.example.test");
+    assert_eq!(tuic["tls"]["server_name"], "sub.example.test");
+    assert_eq!(anytls["server"], "proxy.example.test");
+    assert_eq!(anytls["tls"]["server_name"], "sub.example.test");
+    assert_ne!(tuic["server_port"], anytls["server_port"]);
+    assert_ne!(tuic["uuid"], anytls["password"]);
+    assert_ne!(tuic["password"], anytls["password"]);
+
+    let configuration = fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
+        .expect("configuration is persisted");
+    let subscription_credential = configuration
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("subscription_credential = \"")
+                .and_then(|value| value.strip_suffix('\"'))
+        })
+        .expect("subscription credential is persisted");
+    assert_ne!(subscription_credential, tuic["password"]);
+    assert_ne!(subscription_credential, anytls["password"]);
+
+    let mut baseline: sbctl::config::DeploymentConfig =
+        toml::from_str(&configuration).expect("configuration is valid TOML");
+    baseline.enabled_protocols.retain(|protocol| {
+        !matches!(
+            protocol,
+            sbctl::config::ManagedProtocol::Tuic | sbctl::config::ManagedProtocol::Anytls
+        )
+    });
+    baseline.tuic = None;
+    baseline.anytls = None;
+    let baseline_artifacts = sbctl::subscription::generated_artifacts(&baseline)
+        .expect("existing protocol artifacts are generated");
+    let baseline_subscription = baseline_artifacts
+        .iter()
+        .find(|(name, _)| *name == "subscription-sing-box.json")
+        .map(|(_, contents)| serde_json::from_str::<serde_json::Value>(contents))
+        .expect("baseline sing-box subscription is present")
+        .expect("baseline sing-box subscription is JSON");
+    let existing_types = ["vless", "vmess", "hysteria2"];
+    let retained_outbounds = outbounds
+        .iter()
+        .filter(|node| existing_types.contains(&node["type"].as_str().unwrap_or_default()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retained_outbounds,
+        baseline_subscription["outbounds"]
+            .as_array()
+            .expect("baseline outbounds are present")
+            .iter()
+            .collect::<Vec<_>>(),
+        "adding TUIC and AnyTLS preserves generated existing protocol nodes"
+    );
+
+    let clash = fs::read_to_string(artifacts.join("subscription-clash.yaml"))
+        .expect("Clash subscription is cached");
+    let _: serde_yaml::Value = serde_yaml::from_str(&clash).expect("Clash subscription is YAML");
+    assert!(clash.contains("type: tuic"));
+    assert!(clash.contains("type: anytls"));
+    assert!(clash.contains(tuic["uuid"].as_str().expect("TUIC UUID is text")));
+    assert!(
+        clash.contains(
+            anytls["password"]
+                .as_str()
+                .expect("AnyTLS password is text")
+        )
+    );
+
+    let uri = fs::read_to_string(artifacts.join("subscription-uri.txt"))
+        .expect("URI subscription is cached");
+    let tuic_uri = uri
+        .lines()
+        .find(|line| line.starts_with("tuic://"))
+        .expect("TUIC URI is present");
+    let anytls_uri = uri
+        .lines()
+        .find(|line| line.starts_with("anytls://"))
+        .expect("AnyTLS URI is present");
+    let parsed_tuic = url::Url::parse(tuic_uri).expect("TUIC URI is syntactically valid");
+    assert_eq!(parsed_tuic.scheme(), "tuic");
+    assert_eq!(parsed_tuic.host_str(), Some("proxy.example.test"));
+    assert_eq!(
+        parsed_tuic.port(),
+        Some(tuic["server_port"].as_u64().expect("TUIC port") as u16)
+    );
+    let parsed_anytls = url::Url::parse(anytls_uri).expect("AnyTLS URI is syntactically valid");
+    assert_eq!(parsed_anytls.scheme(), "anytls");
+    assert_eq!(parsed_anytls.host_str(), Some("proxy.example.test"));
+    assert_eq!(
+        parsed_anytls.port(),
+        Some(anytls["server_port"].as_u64().expect("AnyTLS port") as u16)
+    );
+    for credential in [
+        tuic["uuid"].as_str().expect("TUIC UUID is text"),
+        tuic["password"].as_str().expect("TUIC password is text"),
+    ] {
+        assert!(tuic_uri.contains(credential));
+    }
+    assert!(tuic_uri.contains("proxy.example.test"));
+    assert!(tuic_uri.contains("sni=sub.example.test"));
+    assert!(
+        anytls_uri.contains(
+            anytls["password"]
+                .as_str()
+                .expect("AnyTLS password is text")
+        )
+    );
+    assert!(anytls_uri.contains("proxy.example.test"));
+    assert!(anytls_uri.contains("sni=sub.example.test"));
+}
+
+#[test]
 fn configuration_initialization_checks_generated_sing_box_config_before_persisting() {
     let unchecked = TempDir::new().expect("temporary root is created");
     Command::cargo_bin("sbctl")
@@ -369,7 +543,7 @@ fn configuration_initialization_checks_generated_sing_box_config_before_persisti
     assert!(!unchecked.path().join("etc/sbctl/config.toml").exists());
 
     let fixture = TempDir::new().expect("temporary root is created");
-    let checker = sing_box_check_fixture(&fixture, true);
+    let checker = sing_box_check_fixture(&fixture, true, &["vmess"]);
     let root = fixture.path().to_str().expect("fixture path is UTF-8");
 
     Command::cargo_bin("sbctl")
@@ -395,7 +569,7 @@ fn configuration_initialization_checks_generated_sing_box_config_before_persisti
     assert!(fixture.path().join("etc/sbctl/config.toml").is_file());
 
     let rejected = TempDir::new().expect("temporary root is created");
-    let rejecting_checker = sing_box_check_fixture(&rejected, false);
+    let rejecting_checker = sing_box_check_fixture(&rejected, false, &[]);
     Command::cargo_bin("sbctl")
         .expect("sbctl binary is built")
         .args([
@@ -422,14 +596,26 @@ fn configuration_initialization_checks_generated_sing_box_config_before_persisti
     assert!(!rejected.path().join("etc/sbctl/config.toml").exists());
 }
 
-fn sing_box_check_fixture(fixture: &TempDir, accepts_config: bool) -> PathBuf {
+fn sing_box_check_fixture(
+    fixture: &TempDir,
+    accepts_config: bool,
+    expected_protocols: &[&str],
+) -> PathBuf {
     #[cfg(windows)]
     {
         let path = fixture.path().join("sing-box-check.cmd");
         let script = if accepts_config {
-            "@echo off\r\nfindstr /C:\"\\\"type\\\": \\\"vmess\\\"\" %3 >nul || exit /b 1\r\nexit /b 0\r\n"
+            format!(
+                "@echo off\r\n{}exit /b 0\r\n",
+                expected_protocols
+                    .iter()
+                    .map(|protocol| format!(
+                        "findstr /C:\"\\\"type\\\": \\\"{protocol}\\\"\" %3 >nul || exit /b 1\r\n"
+                    ))
+                    .collect::<String>()
+            )
         } else {
-            "@echo off\r\nexit /b 1\r\n"
+            "@echo off\r\nexit /b 1\r\n".to_owned()
         };
         fs::write(&path, script).expect("checker fixture is written");
         path
@@ -440,9 +626,15 @@ fn sing_box_check_fixture(fixture: &TempDir, accepts_config: bool) -> PathBuf {
 
         let path = fixture.path().join("sing-box-check");
         let script = if accepts_config {
-            "#!/bin/sh\ngrep -q '\"type\": \"vmess\"' \"$3\"\n"
+            format!(
+                "#!/bin/sh\n{}",
+                expected_protocols
+                    .iter()
+                    .map(|protocol| format!("grep -q '\"type\": \"{protocol}\"' \"$3\"\n"))
+                    .collect::<String>()
+            )
         } else {
-            "#!/bin/sh\nexit 1\n"
+            "#!/bin/sh\nexit 1\n".to_owned()
         };
         fs::write(&path, script).expect("checker fixture is written");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700))

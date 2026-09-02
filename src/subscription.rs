@@ -375,6 +375,18 @@ fn sing_box(config: &DeploymentConfig) -> Result<String, SubscriptionError> {
             "tls": {"enabled": true, "server_name": config.subscription_host}}),
         );
     }
+    if let Some(node) = &config.tuic {
+        outbounds.push(json!({"type": "tuic", "tag": "sbctl-tuic", "server": host,
+            "server_port": node.listen_port, "uuid": node.uuid, "password": node.password,
+            "tls": {"enabled": true, "server_name": config.subscription_host}}));
+    }
+    if let Some(node) = &config.anytls {
+        outbounds.push(
+            json!({"type": "anytls", "tag": "sbctl-anytls", "server": host,
+            "server_port": node.listen_port, "password": node.password,
+            "tls": {"enabled": true, "server_name": config.subscription_host}}),
+        );
+    }
     Ok(
         serde_json::to_string_pretty(&json!({"outbounds": outbounds}))
             .expect("JSON values serialize"),
@@ -403,6 +415,15 @@ fn sing_box_server(config: &DeploymentConfig) -> Result<String, SubscriptionErro
         inbounds.push(json!({"type": "hysteria2", "tag": "sbctl-hysteria2", "listen": "::",
             "listen_port": node.listen_port, "users": [{"password": node.password}], "tls": certificate}));
     }
+    if let Some(node) = &config.tuic {
+        inbounds.push(json!({"type": "tuic", "tag": "sbctl-tuic", "listen": "::",
+            "listen_port": node.listen_port, "users": [{"uuid": node.uuid, "password": node.password}],
+            "tls": certificate}));
+    }
+    if let Some(node) = &config.anytls {
+        inbounds.push(json!({"type": "anytls", "tag": "sbctl-anytls", "listen": "::",
+            "listen_port": node.listen_port, "users": [{"password": node.password}], "tls": certificate}));
+    }
     Ok(
         serde_json::to_string_pretty(&json!({"inbounds": inbounds}))
             .expect("JSON values serialize"),
@@ -421,6 +442,12 @@ fn clash(config: &DeploymentConfig) -> Result<String, SubscriptionError> {
     }
     if let Some(node) = &config.hysteria2 {
         proxies.push_str(&format!("  - name: sbctl-hysteria2\n    type: hysteria2\n    server: {host}\n    port: {}\n    password: {}\n    sni: {}\n    skip-cert-verify: false\n", node.listen_port, node.password, config.subscription_host));
+    }
+    if let Some(node) = &config.tuic {
+        proxies.push_str(&format!("  - name: sbctl-tuic\n    type: tuic\n    server: {host}\n    port: {}\n    uuid: {}\n    password: {}\n    sni: {}\n    alpn:\n      - h3\n    skip-cert-verify: false\n", node.listen_port, node.uuid, node.password, config.subscription_host));
+    }
+    if let Some(node) = &config.anytls {
+        proxies.push_str(&format!("  - name: sbctl-anytls\n    type: anytls\n    server: {host}\n    port: {}\n    password: {}\n    tls: true\n    sni: {}\n    skip-cert-verify: false\n", node.listen_port, node.password, config.subscription_host));
     }
     Ok(proxies)
 }
@@ -441,6 +468,18 @@ fn uri(config: &DeploymentConfig) -> Result<String, SubscriptionError> {
     if let Some(node) = &config.hysteria2 {
         uris.push_str(&format!(
             "hysteria2://{}@{}:{}?insecure=0&sni={}#sbctl-hysteria2\n",
+            node.password, host, node.listen_port, config.subscription_host
+        ));
+    }
+    if let Some(node) = &config.tuic {
+        uris.push_str(&format!(
+            "tuic://{}:{}@{}:{}?congestion_control=bbr&alpn=h3&sni={}#sbctl-tuic\n",
+            node.uuid, node.password, host, node.listen_port, config.subscription_host
+        ));
+    }
+    if let Some(node) = &config.anytls {
+        uris.push_str(&format!(
+            "anytls://{}@{}:{}?security=tls&sni={}#sbctl-anytls\n",
             node.password, host, node.listen_port, config.subscription_host
         ));
     }
