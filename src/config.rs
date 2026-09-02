@@ -9,6 +9,7 @@ use base64::Engine;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use x25519_dalek::{X25519_BASEPOINT_BYTES, x25519};
 
 const CONFIG_RELATIVE_PATH: &str = "etc/sbctl/config.toml";
 const STATE_RELATIVE_PATH: &str = "var/lib/sbctl/state.json";
@@ -33,6 +34,17 @@ pub struct DeploymentConfig {
     pub accounting_timezone: String,
     #[serde(default)]
     pub anchored_reset_at: Option<String>,
+    #[serde(default)]
+    pub vless_reality: Option<VlessRealityCredentials>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct VlessRealityCredentials {
+    pub listen_port: u16,
+    pub uuid: String,
+    pub private_key: String,
+    pub public_key: String,
+    pub short_id: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -110,6 +122,10 @@ impl DeploymentConfig {
         getrandom::fill(&mut bytes).map_err(|error| ConfigError::Randomness(error.to_string()))?;
         let subscription_credential =
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let vless_reality = enabled_protocols
+            .contains(&ManagedProtocol::VlessReality)
+            .then(generate_vless_reality_credentials)
+            .transpose()?;
         let config = Self {
             subscription_mode,
             subscription_host,
@@ -123,6 +139,7 @@ impl DeploymentConfig {
             accounting_policy: AccountingPolicy::NaturalMonth,
             accounting_timezone: default_accounting_timezone(),
             anchored_reset_at: None,
+            vless_reality,
         };
         config.validate()?;
         Ok(config)
@@ -162,6 +179,15 @@ impl DeploymentConfig {
         {
             return Err(ConfigError::InvalidValue(
                 "VLESS Reality requires a Reality decoy SNI",
+            ));
+        }
+        if self
+            .enabled_protocols
+            .contains(&ManagedProtocol::VlessReality)
+            && self.vless_reality.is_none()
+        {
+            return Err(ConfigError::InvalidValue(
+                "VLESS Reality requires generated node credentials",
             ));
         }
         if let Some(sni) = &self.reality_decoy_sni {
@@ -276,6 +302,45 @@ impl DeploymentConfig {
     }
 }
 
+fn generate_vless_reality_credentials() -> Result<VlessRealityCredentials, ConfigError> {
+    let mut private = [0_u8; 32];
+    let mut uuid = [0_u8; 16];
+    let mut short_id = [0_u8; 8];
+    getrandom::fill(&mut private).map_err(|error| ConfigError::Randomness(error.to_string()))?;
+    getrandom::fill(&mut uuid).map_err(|error| ConfigError::Randomness(error.to_string()))?;
+    getrandom::fill(&mut short_id).map_err(|error| ConfigError::Randomness(error.to_string()))?;
+    let public = x25519(private, X25519_BASEPOINT_BYTES);
+    let listen_port = std::net::TcpListener::bind("[::]:0")
+        .or_else(|_| std::net::TcpListener::bind("0.0.0.0:0"))?
+        .local_addr()?
+        .port();
+    Ok(VlessRealityCredentials {
+        listen_port,
+        uuid: format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            uuid[0],
+            uuid[1],
+            uuid[2],
+            uuid[3],
+            uuid[4],
+            uuid[5],
+            uuid[6],
+            uuid[7],
+            uuid[8],
+            uuid[9],
+            uuid[10],
+            uuid[11],
+            uuid[12],
+            uuid[13],
+            uuid[14],
+            uuid[15]
+        ),
+        private_key: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(private),
+        public_key: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public),
+        short_id: short_id.iter().map(|byte| format!("{byte:02x}")).collect(),
+    })
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("invalid deployment configuration: {0}")]
@@ -306,11 +371,22 @@ impl DeploymentStore {
     }
 
     pub fn initialize(&self, config: &DeploymentConfig) -> Result<(), ConfigError> {
+        self.initialize_with_artifacts(config, &[])
+    }
+
+    pub fn initialize_with_artifacts(
+        &self,
+        config: &DeploymentConfig,
+        artifacts: &[(&str, &[u8])],
+    ) -> Result<(), ConfigError> {
         config.validate()?;
         let path = self.root.join(CONFIG_RELATIVE_PATH);
         let _lock = self.operation_lock()?;
         if path.exists() {
             return Err(ConfigError::AlreadyExists);
+        }
+        for (name, contents) in artifacts {
+            self.write_artifact_unlocked(name, contents)?;
         }
         let contents = toml::to_string_pretty(config)?;
         Ok(atomic_write(&path, contents.as_bytes())?)
@@ -356,15 +432,20 @@ impl DeploymentStore {
     }
 
     pub fn write_artifact(&self, name: &str, contents: &[u8]) -> Result<(), ConfigError> {
+        let _lock = self.operation_lock()?;
+        self.write_artifact_unlocked(name, contents)
+    }
+
+    fn write_artifact_unlocked(&self, name: &str, contents: &[u8]) -> Result<(), ConfigError> {
         if name.is_empty() || Path::new(name).components().count() != 1 {
             return Err(ConfigError::InvalidValue(
                 "artifact name must be a single file name",
             ));
         }
-        self.atomic_write_managed(
+        Ok(atomic_write(
             &self.root.join(ARTIFACTS_RELATIVE_PATH).join(name),
             contents,
-        )
+        )?)
     }
 
     fn atomic_write_managed(&self, path: &Path, contents: &[u8]) -> Result<(), ConfigError> {

@@ -1,6 +1,11 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::process::Command as ProcessCommand;
+use std::thread;
+use std::time::Duration;
 use tempfile::TempDir;
 
 #[test]
@@ -107,6 +112,171 @@ fn configuration_validation_rejects_an_ip_fallback_host_that_is_not_an_ip_addres
         ));
 
     assert!(!fixture.path().join("etc/sbctl/config.toml").exists());
+}
+
+#[test]
+fn vless_reality_ip_fallback_exports_consistent_subscription_formats() {
+    let fixture = TempDir::new().expect("temporary root is created");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "203.0.113.7",
+            "--proxy-host",
+            "198.51.100.9",
+            "--http-port",
+            "2080",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+
+    let config = fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
+        .expect("configuration is persisted");
+    let credential = config
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("subscription_credential = \"")
+                .and_then(|value| value.strip_suffix('"'))
+        })
+        .expect("subscription credential is persisted");
+
+    let artifacts = fixture.path().join("var/lib/sbctl/artifacts");
+    let server = fs::read_to_string(artifacts.join("sing-box-vless-reality.json"))
+        .expect("sing-box server configuration is cached");
+    let sing_box = fs::read_to_string(artifacts.join("subscription-sing-box.json"))
+        .expect("sing-box subscription is cached");
+    let clash = fs::read_to_string(artifacts.join("subscription-clash.yaml"))
+        .expect("Clash subscription is cached");
+    let uri = fs::read_to_string(artifacts.join("subscription-uri.txt"))
+        .expect("URI subscription is cached");
+    assert!(sing_box.contains("\"type\": \"vless\""));
+    assert!(server.contains("\"private_key\""));
+    assert!(sing_box.contains("198.51.100.9"));
+    assert!(clash.contains("type: vless"));
+    assert!(clash.contains("198.51.100.9"));
+    assert!(uri.starts_with("vless://"));
+    assert!(uri.contains("198.51.100.9:"));
+    for value in ["www.cloudflare.com", "security=reality", "xtls-rprx-vision"] {
+        assert!(uri.contains(value), "URI contains {value}");
+    }
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "sub",
+            "--format",
+            "uri",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("/sub/{credential}/uri")));
+}
+
+#[test]
+fn ip_fallback_http_service_accepts_only_the_exact_credential_path_and_reports_vps_traffic() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let port = TcpListener::bind("127.0.0.1:0")
+        .expect("an ephemeral port is available")
+        .local_addr()
+        .expect("address is available")
+        .port();
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "127.0.0.1",
+            "--http-port",
+            &port.to_string(),
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+            "--monthly-traffic-limit",
+            "1000",
+        ])
+        .assert()
+        .success();
+    let credential = fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
+        .expect("configuration is persisted")
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("subscription_credential = \"")
+                .and_then(|value| value.strip_suffix('"'))
+        })
+        .expect("credential is available")
+        .to_owned();
+    let mut server = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("sbctl"))
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "serve",
+            "--bind",
+            &format!("127.0.0.1:{port}"),
+            "--max-requests",
+            "2",
+        ])
+        .spawn()
+        .expect("subscription service starts");
+
+    let response = http_get(port, &format!("/sub/{credential}/uri"));
+    assert!(response.starts_with("HTTP/1.1 200 OK"));
+    assert!(response.contains("subscription-userinfo: upload=0; download=0; total=1000; expire="));
+    assert!(response.contains("Cache-Control: no-store"));
+    let rejected = http_get(
+        port,
+        &format!("/sub/{credential}/uri?credential={credential}"),
+    );
+    assert!(rejected.starts_with("HTTP/1.1 404 Not Found"));
+    assert!(
+        server
+            .wait()
+            .expect("server exits after two requests")
+            .success()
+    );
+}
+
+fn http_get(port: u16, path: &str) -> String {
+    let mut stream = (0..50)
+        .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => Some(stream),
+            Err(_) => {
+                thread::sleep(Duration::from_millis(10));
+                None
+            }
+        })
+        .expect("subscription service accepts connections");
+    stream
+        .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+        .expect("request is sent");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("response is readable");
+    response
 }
 
 #[test]

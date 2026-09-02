@@ -19,6 +19,20 @@ enum Command {
     Status,
     /// Reconcile and show VPS traffic for the current accounting period.
     Traffic,
+    /// Retrieve a generated subscription representation using its path credential.
+    Sub {
+        #[arg(long, value_enum)]
+        format: Option<CliSubscriptionFormat>,
+    },
+    /// Run the IP fallback subscription HTTP service.
+    Serve {
+        /// Socket address; defaults to the configured public IP and HTTP port.
+        #[arg(long)]
+        bind: Option<String>,
+        /// Stop after this many requests (useful for supervised health checks).
+        #[arg(long, hide = true)]
+        max_requests: Option<usize>,
+    },
     /// Create, inspect, and validate the persistent deployment configuration.
     Config {
         #[command(subcommand)]
@@ -84,6 +98,23 @@ enum CliAccountingPolicy {
     AnchoredMonth,
 }
 
+#[derive(Clone, Debug, ValueEnum)]
+enum CliSubscriptionFormat {
+    SingBox,
+    Clash,
+    Uri,
+}
+
+impl From<CliSubscriptionFormat> for sbctl::subscription::SubscriptionFormat {
+    fn from(format: CliSubscriptionFormat) -> Self {
+        match format {
+            CliSubscriptionFormat::SingBox => Self::SingBox,
+            CliSubscriptionFormat::Clash => Self::Clash,
+            CliSubscriptionFormat::Uri => Self::Uri,
+        }
+    }
+}
+
 impl From<CliSubscriptionMode> for sbctl::config::SubscriptionMode {
     fn from(mode: CliSubscriptionMode) -> Self {
         match mode {
@@ -131,7 +162,79 @@ fn main() -> ExitCode {
         },
         Command::Status => print_status(root),
         Command::Traffic => print_traffic(root),
+        Command::Sub { format } => print_subscription_urls(root, format.map(Into::into)),
+        Command::Serve { bind, max_requests } => serve_subscription(root, bind, max_requests),
         Command::Config { command } => run_config(root, command),
+    }
+}
+
+fn serve_subscription(root: &Path, bind: Option<String>, max_requests: Option<usize>) -> ExitCode {
+    let store = sbctl::config::DeploymentStore::new(root);
+    let result = store.load().and_then(|config| {
+        let bind = bind.unwrap_or_else(|| {
+            format!(
+                "{}:{}",
+                config.subscription_host,
+                config.http_port.unwrap_or_default()
+            )
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+        runtime
+            .block_on(sbctl::subscription::serve(
+                &store,
+                &config,
+                &bind,
+                max_requests,
+            ))
+            .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))
+    });
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("subscription service failed: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn print_subscription_urls(
+    root: &Path,
+    format: Option<sbctl::subscription::SubscriptionFormat>,
+) -> ExitCode {
+    let store = sbctl::config::DeploymentStore::new(root);
+    let result = store.load().and_then(|config| {
+        let formats = match format {
+            Some(format) => vec![format],
+            None => [
+                sbctl::subscription::SubscriptionFormat::SingBox,
+                sbctl::subscription::SubscriptionFormat::Clash,
+                sbctl::subscription::SubscriptionFormat::Uri,
+            ]
+            .into_iter()
+            .collect(),
+        };
+        formats
+            .into_iter()
+            .map(|format| sbctl::subscription::subscription_url(&config, format))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|urls| urls.join("\n"))
+            .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))
+    });
+    match result {
+        Ok(contents) => {
+            eprintln!(
+                "warning: IP fallback subscription uses unencrypted HTTP and is lower security"
+            );
+            print!("{contents}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("subscription failed: {error}");
+            ExitCode::from(2)
+        }
     }
 }
 
@@ -213,7 +316,21 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
                     accounting_timezone.unwrap_or_else(|| system_accounting_timezone(root));
                 config.anchored_reset_at = anchored_reset_at;
                 config.validate()?;
-                store.initialize(&config)
+                let generated_artifacts = if config
+                    .enabled_protocols
+                    .contains(&sbctl::config::ManagedProtocol::VlessReality)
+                {
+                    sbctl::subscription::generated_artifacts(&config).map_err(|error| {
+                        sbctl::config::ConfigError::StateContent(error.to_string())
+                    })?
+                } else {
+                    Vec::new()
+                };
+                let artifact_references = generated_artifacts
+                    .iter()
+                    .map(|(name, contents)| (*name, contents.as_bytes()))
+                    .collect::<Vec<_>>();
+                store.initialize_with_artifacts(&config, &artifact_references)
             })
         }
         .map(|_| "deployment configuration initialized".to_owned()),
