@@ -1,11 +1,26 @@
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::{ConfigError, DeploymentConfig, DeploymentStore, ManagedProtocol};
 
 const SING_BOX_UNIT: &str = "etc/systemd/system/sing-box.service";
 const SBCTL_UNIT: &str = "etc/systemd/system/sbctl.service";
+const OWNERSHIP_MARKER: &str = "var/lib/sbctl/ownership";
+const SING_BOX_UNIT_MARKER: &str = "Description=sing-box data plane managed by sbctl";
+const SBCTL_UNIT_MARKER: &str = "Description=sbctl private subscription service";
+
+const BACKED_UP_PATHS: &[&str] = &[
+    "etc/sbctl/config.toml",
+    OWNERSHIP_MARKER,
+    "etc/sing-box/config.json",
+    "var/lib/sbctl/state.json",
+    "var/lib/sbctl/artifacts/sing-box-server.json",
+    "var/lib/sbctl/artifacts/subscription-sing-box.json",
+    "var/lib/sbctl/artifacts/subscription-clash.yaml",
+    "var/lib/sbctl/artifacts/subscription-uri.txt",
+];
 
 pub fn install_units(store: &DeploymentStore, server_config: &str) -> Result<(), ConfigError> {
     for unit in [SING_BOX_UNIT, SBCTL_UNIT] {
@@ -23,7 +38,8 @@ pub fn install_units(store: &DeploymentStore, server_config: &str) -> Result<(),
         store.root(),
         SBCTL_UNIT,
         "[Unit]\nDescription=sbctl private subscription service\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=sbctl\nGroup=sbctl\nExecStart=/usr/local/bin/sbctl serve\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nReadWritePaths=/var/lib/sbctl\n\n[Install]\nWantedBy=multi-user.target\n",
-    )
+    )?;
+    store.write_relative_locked(OWNERSHIP_MARKER, b"sbctl-managed-v1\n")
 }
 
 /// Copies the binary that successfully validated the generated configuration to
@@ -64,12 +80,64 @@ pub fn rollback_fresh_installation(root: &Path) {
         "etc/sing-box/config.json",
         "usr/local/bin/sing-box",
         "etc/sbctl/config.toml",
+        OWNERSHIP_MARKER,
         "var/lib/sbctl/artifacts/sing-box-server.json",
         "var/lib/sbctl/artifacts/subscription-sing-box.json",
         "var/lib/sbctl/artifacts/subscription-clash.yaml",
         "var/lib/sbctl/artifacts/subscription-uri.txt",
     ] {
         let _ = fs::remove_file(root.join(relative));
+    }
+}
+
+/// Removes only paths created by sbctl. A normal uninstall leaves persistent
+/// data in place and first makes a root-readable backup; --purge removes the
+/// explicitly owned configuration and state instead.
+pub fn uninstall(root: &Path, purge: bool) -> Result<Option<std::path::PathBuf>, String> {
+    if !root.join("etc/sbctl/config.toml").is_file() || !root.join(OWNERSHIP_MARKER).is_file() {
+        return Err("no sbctl-managed deployment configuration was found".to_owned());
+    }
+
+    let backup = (!purge).then(|| backup_persistent_data(root)).transpose()?;
+    let sbctl_unit_owned = unit_has_marker(root, SBCTL_UNIT, SBCTL_UNIT_MARKER)?;
+    let sing_box_unit_owned = unit_has_marker(root, SING_BOX_UNIT, SING_BOX_UNIT_MARKER)?;
+    if sbctl_unit_owned {
+        systemctl(root, &["disable", "--now", "sbctl.service"])?;
+    }
+    if sing_box_unit_owned {
+        systemctl(root, &["disable", "--now", "sing-box.service"])?;
+    }
+
+    if sbctl_unit_owned {
+        remove_file_if_present(&root.join(SBCTL_UNIT))?;
+        remove_file_if_present(&root.join("usr/local/bin/sbctl"))?;
+    }
+    if sing_box_unit_owned {
+        remove_file_if_present(&root.join(SING_BOX_UNIT))?;
+        remove_file_if_present(&root.join("usr/local/bin/sing-box"))?;
+    }
+    if sbctl_unit_owned || sing_box_unit_owned {
+        systemctl(root, &["daemon-reload"])?;
+    }
+
+    if purge {
+        if sing_box_unit_owned {
+            remove_file_if_present(&root.join("etc/sing-box/config.json"))?;
+        }
+        remove_file_if_present(&root.join("etc/sbctl/config.toml"))?;
+        remove_directory_if_present(&root.join("var/lib/sbctl"))?;
+    }
+    Ok(backup)
+}
+
+fn unit_has_marker(root: &Path, relative: &str, marker: &str) -> Result<bool, String> {
+    match fs::read_to_string(root.join(relative)) {
+        Ok(contents) => Ok(contents.contains(marker)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "could not inspect {}: {error}",
+            root.join(relative).display()
+        )),
     }
 }
 
@@ -163,6 +231,71 @@ fn write_unit(root: &Path, relative_path: &str, contents: &str) -> Result<(), Co
     let parent = path.parent().expect("unit path has parent");
     fs::create_dir_all(parent)?;
     fs::write(path, contents)?;
+    Ok(())
+}
+
+fn backup_persistent_data(root: &Path) -> Result<std::path::PathBuf, String> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let destination = root.join("var/backups/sbctl").join(timestamp.to_string());
+    fs::create_dir_all(&destination).map_err(|error| error.to_string())?;
+    set_private_directory_permissions(&destination)?;
+    for relative in BACKED_UP_PATHS {
+        let source = root.join(relative);
+        if !source.is_file() {
+            continue;
+        }
+        let target = destination.join(relative);
+        let parent = target
+            .parent()
+            .expect("backup target for a managed file has a parent");
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        set_private_directory_permissions(parent)?;
+        fs::copy(&source, &target).map_err(|error| error.to_string())?;
+        set_root_readable_file_permissions(&target)?;
+    }
+    Ok(destination)
+}
+
+fn remove_file_if_present(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("could not remove {}: {error}", path.display())),
+    }
+}
+
+fn remove_directory_if_present(path: &Path) -> Result<(), String> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("could not remove {}: {error}", path.display())),
+    }
+}
+
+fn set_private_directory_permissions(path: &Path) -> Result<(), String> {
+    #[cfg(not(unix))]
+    let _ = path;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn set_root_readable_file_permissions(path: &Path) -> Result<(), String> {
+    #[cfg(not(unix))]
+    let _ = path;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 

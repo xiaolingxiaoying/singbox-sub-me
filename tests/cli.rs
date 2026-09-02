@@ -1399,6 +1399,244 @@ fn install_rejects_an_existing_sing_box_service_without_changing_it() {
 }
 
 #[test]
+fn uninstall_stops_and_removes_managed_services_and_binaries_but_preserves_root_readable_backup_and_data()
+ {
+    let fixture = supported_systemd_host();
+    initialize_uninstall_fixture(&fixture);
+    write_systemctl_fixture(&fixture, true);
+    let unrelated_service = fixture.path().join("etc/systemd/system/unrelated.service");
+    let proxy_configuration = fixture.path().join("etc/nginx/nginx.conf");
+    let firewall_rules = fixture.path().join("etc/ufw/user.rules");
+    write_managed_file(
+        &fixture,
+        "etc/systemd/system/unrelated.service",
+        b"preserve service",
+    );
+    write_managed_file(&fixture, "etc/nginx/nginx.conf", b"preserve proxy");
+    write_managed_file(&fixture, "etc/ufw/user.rules", b"preserve firewall");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "uninstall",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("backup preserved at"));
+
+    assert!(!fixture.path().join("usr/local/bin/sbctl").exists());
+    assert!(!fixture.path().join("usr/local/bin/sing-box").exists());
+    assert!(
+        !fixture
+            .path()
+            .join("etc/systemd/system/sbctl.service")
+            .exists()
+    );
+    assert!(
+        !fixture
+            .path()
+            .join("etc/systemd/system/sing-box.service")
+            .exists()
+    );
+    assert!(fixture.path().join("etc/sbctl/config.toml").is_file());
+    assert!(fixture.path().join("var/lib/sbctl/state.json").is_file());
+    let backup = fixture
+        .path()
+        .join("var/backups/sbctl")
+        .read_dir()
+        .expect("backup directory exists")
+        .next()
+        .expect("backup is created")
+        .expect("backup entry is readable")
+        .path();
+    let original_config = fs::read(fixture.path().join("etc/sbctl/config.toml"))
+        .expect("deployment configuration remains available");
+    let backed_up_config = fs::read(backup.join("etc/sbctl/config.toml"))
+        .expect("deployment configuration is backed up");
+    assert_eq!(backed_up_config, original_config);
+    assert!(
+        String::from_utf8_lossy(&backed_up_config).contains("subscription_credential"),
+        "the backup retains the subscription credential"
+    );
+    assert_eq!(
+        fs::read(backup.join("var/lib/sbctl/state.json")).expect("traffic state is backed up"),
+        b"managed traffic state"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        assert_eq!(
+            fs::metadata(&backup)
+                .expect("backup directory metadata is readable")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(backup.join("etc/sbctl/config.toml"))
+                .expect("backup configuration metadata is readable")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    assert_eq!(
+        fs::read(unrelated_service).expect("unrelated service survives"),
+        b"preserve service"
+    );
+    assert_eq!(
+        fs::read(proxy_configuration).expect("proxy configuration survives"),
+        b"preserve proxy"
+    );
+    assert_eq!(
+        fs::read(firewall_rules).expect("firewall rules survive"),
+        b"preserve firewall"
+    );
+}
+
+#[test]
+fn uninstall_purge_removes_only_sbctl_owned_persistent_data() {
+    let fixture = supported_systemd_host();
+    initialize_uninstall_fixture(&fixture);
+    write_systemctl_fixture(&fixture, true);
+    let unrelated_state = fixture.path().join("var/lib/unrelated/state");
+    let proxy_configuration = fixture.path().join("etc/nginx/nginx.conf");
+    write_managed_file(&fixture, "var/lib/unrelated/state", b"preserve state");
+    write_managed_file(&fixture, "etc/nginx/nginx.conf", b"preserve proxy");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "uninstall",
+            "--purge",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("persistent sbctl data purged"));
+
+    assert!(!fixture.path().join("etc/sbctl/config.toml").exists());
+    assert!(!fixture.path().join("var/lib/sbctl").exists());
+    assert!(!fixture.path().join("etc/sing-box/config.json").exists());
+    assert_eq!(
+        fs::read(unrelated_state).expect("unrelated state survives"),
+        b"preserve state"
+    );
+    assert_eq!(
+        fs::read(proxy_configuration).expect("proxy configuration survives"),
+        b"preserve proxy"
+    );
+}
+
+#[test]
+fn uninstall_does_not_touch_a_manual_sing_box_deployment_without_sbctl_ownership_markers() {
+    let fixture = supported_systemd_host();
+    initialize_uninstall_fixture(&fixture);
+    write_systemctl_fixture(&fixture, true);
+    let manual_unit = fixture.path().join("etc/systemd/system/sing-box.service");
+    let manual_binary = fixture.path().join("usr/local/bin/sing-box");
+    let manual_configuration = fixture.path().join("etc/sing-box/config.json");
+    write_managed_file(
+        &fixture,
+        "etc/systemd/system/sing-box.service",
+        b"manual sing-box service",
+    );
+    write_managed_file(
+        &fixture,
+        "usr/local/bin/sing-box",
+        b"manual sing-box binary",
+    );
+    write_managed_file(
+        &fixture,
+        "etc/sing-box/config.json",
+        b"manual sing-box configuration",
+    );
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "uninstall",
+            "--purge",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read(manual_unit).expect("manual unit survives"),
+        b"manual sing-box service"
+    );
+    assert_eq!(
+        fs::read(manual_binary).expect("manual binary survives"),
+        b"manual sing-box binary"
+    );
+    assert_eq!(
+        fs::read(manual_configuration).expect("manual configuration survives"),
+        b"manual sing-box configuration"
+    );
+}
+
+fn initialize_uninstall_fixture(fixture: &TempDir) {
+    write_traffic_fixture(fixture, 100, 200, "boot-a");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "203.0.113.7",
+            "--http-port",
+            "2080",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+    write_managed_file(fixture, "usr/local/bin/sbctl", b"managed sbctl binary");
+    write_managed_file(
+        fixture,
+        "usr/local/bin/sing-box",
+        b"managed sing-box binary",
+    );
+    write_managed_file(
+        fixture,
+        "etc/sing-box/config.json",
+        b"managed sing-box configuration",
+    );
+    write_managed_file(
+        fixture,
+        "etc/systemd/system/sbctl.service",
+        b"Description=sbctl private subscription service",
+    );
+    write_managed_file(
+        fixture,
+        "etc/systemd/system/sing-box.service",
+        b"Description=sing-box data plane managed by sbctl",
+    );
+    write_managed_file(
+        fixture,
+        "var/lib/sbctl/state.json",
+        b"managed traffic state",
+    );
+    write_managed_file(fixture, "var/lib/sbctl/ownership", b"sbctl-managed-v1\n");
+}
+
+#[test]
 fn install_explains_when_the_platform_is_not_supported() {
     let fixture = TempDir::new().expect("temporary root is created");
     write_os_release(&fixture, "ID=alpine\nVERSION_ID=3.20\n");

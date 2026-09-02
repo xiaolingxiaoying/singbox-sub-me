@@ -50,6 +50,12 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         sing_box_bin: Option<PathBuf>,
     },
+    /// Remove the sbctl-managed services and binaries; preserve data unless --purge is supplied.
+    Uninstall {
+        /// Also remove persistent data explicitly owned by sbctl.
+        #[arg(long)]
+        purge: bool,
+    },
     /// Check or install explicitly selected, hash-verified release artifacts.
     Update {
         /// Display versions from the pinned manifest without downloading or changing the host.
@@ -264,6 +270,7 @@ fn main() -> ExitCode {
         Command::Traffic => print_traffic(root),
         Command::Node => print_nodes(root),
         Command::Restart { sing_box_bin } => restart(root, sing_box_bin),
+        Command::Uninstall { purge } => uninstall(root, purge),
         Command::Update {
             check,
             manifest,
@@ -280,6 +287,26 @@ fn main() -> ExitCode {
         Command::Serve { bind, max_requests } => serve_subscription(root, bind, max_requests),
         Command::Certificate { command } => run_certificate(root, command),
         Command::Config { command } => run_config(root, command),
+    }
+}
+
+fn uninstall(root: &Path, purge: bool) -> ExitCode {
+    match sbctl::lifecycle::uninstall(root, purge) {
+        Ok(Some(backup)) => {
+            println!(
+                "sbctl services and binaries removed; backup preserved at {}",
+                backup.display()
+            );
+            ExitCode::SUCCESS
+        }
+        Ok(None) => {
+            println!("sbctl services and binaries removed; persistent sbctl data purged");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("uninstall failed: {error}");
+            ExitCode::from(2)
+        }
     }
 }
 
