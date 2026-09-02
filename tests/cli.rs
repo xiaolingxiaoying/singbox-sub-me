@@ -139,6 +139,81 @@ fn configuration_validation_does_not_echo_a_secret_from_a_malformed_file() {
 }
 
 #[test]
+fn traffic_and_status_report_vps_traffic_for_the_detected_default_route_interface() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    fs::create_dir_all(fixture.path().join("proc/net")).expect("route directory is created");
+    fs::write(
+        fixture.path().join("proc/net/route"),
+        "Iface\tDestination\tGateway\tFlags\nens3\t00000000\t00000000\t0003\n",
+    )
+    .expect("default route is written");
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "203.0.113.7",
+            "--http-port",
+            "2080",
+            "--protocol",
+            "hysteria2",
+            "--monthly-traffic-limit",
+            "1000",
+            "--accounting-timezone",
+            "UTC",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "traffic",
+        ])
+        .assert()
+        .success();
+
+    write_traffic_fixture(&fixture, 130, 260, "boot-a");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "traffic",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("interface: ens3"))
+        .stdout(predicate::str::contains("total: 90 bytes"))
+        .stdout(predicate::str::contains(
+            "monthly traffic limit: 1000 bytes",
+        ))
+        .stdout(predicate::str::contains("accounting period:"))
+        .stdout(predicate::str::contains("next reset:"));
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "status",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("VPS traffic"))
+        .stdout(predicate::str::contains("total: 90 bytes"));
+}
+
+#[test]
 fn help_lists_the_safe_install_and_status_commands() {
     Command::cargo_bin("sbctl")
         .expect("sbctl binary is built")
@@ -247,6 +322,17 @@ fn write_os_release(fixture: &TempDir, contents: &str) {
     fs::create_dir_all(path.parent().expect("os-release has a parent"))
         .expect("etc directory is created");
     fs::write(path, contents).expect("os-release is written");
+}
+
+fn write_traffic_fixture(fixture: &TempDir, rx: u64, tx: u64, boot_id: &str) {
+    let statistics = fixture.path().join("sys/class/net/ens3/statistics");
+    fs::create_dir_all(&statistics).expect("statistics directory is created");
+    fs::write(statistics.join("rx_bytes"), rx.to_string()).expect("RX counter is written");
+    fs::write(statistics.join("tx_bytes"), tx.to_string()).expect("TX counter is written");
+    let boot_path = fixture.path().join("proc/sys/kernel/random/boot_id");
+    fs::create_dir_all(boot_path.parent().expect("boot ID has a parent"))
+        .expect("boot ID directory is created");
+    fs::write(boot_path, boot_id).expect("boot ID is written");
 }
 
 fn assert_existing_deployment_is_preserved(

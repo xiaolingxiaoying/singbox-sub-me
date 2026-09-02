@@ -25,6 +25,35 @@ pub struct DeploymentConfig {
     pub enabled_protocols: Vec<ManagedProtocol>,
     pub reality_decoy_sni: Option<String>,
     pub subscription_credential: String,
+    #[serde(default)]
+    pub monthly_traffic_limit: u64,
+    #[serde(default)]
+    pub accounting_policy: AccountingPolicy,
+    #[serde(default = "default_accounting_timezone")]
+    pub accounting_timezone: String,
+    #[serde(default)]
+    pub anchored_reset_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccountingPolicy {
+    #[default]
+    NaturalMonth,
+    AnchoredMonth,
+}
+
+impl fmt::Display for AccountingPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::NaturalMonth => "natural-month",
+            Self::AnchoredMonth => "anchored-month",
+        })
+    }
+}
+
+fn default_accounting_timezone() -> String {
+    "UTC".to_owned()
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -90,6 +119,10 @@ impl DeploymentConfig {
             enabled_protocols,
             reality_decoy_sni,
             subscription_credential,
+            monthly_traffic_limit: 0,
+            accounting_policy: AccountingPolicy::NaturalMonth,
+            accounting_timezone: default_accounting_timezone(),
+            anchored_reset_at: None,
         };
         config.validate()?;
         Ok(config)
@@ -144,6 +177,31 @@ impl DeploymentConfig {
                 "subscription credential must be a URL-safe 256-bit secret",
             ));
         }
+        if self.accounting_timezone.parse::<chrono_tz::Tz>().is_err() {
+            return Err(ConfigError::InvalidValue(
+                "accounting timezone must be a named IANA timezone",
+            ));
+        }
+        match self.accounting_policy {
+            AccountingPolicy::NaturalMonth if self.anchored_reset_at.is_some() => {
+                return Err(ConfigError::InvalidValue(
+                    "Natural-month reset must not configure an anchored reset time",
+                ));
+            }
+            AccountingPolicy::AnchoredMonth => {
+                let Some(reset_at) = &self.anchored_reset_at else {
+                    return Err(ConfigError::InvalidValue(
+                        "Anchored-month reset requires an anchored reset date and time",
+                    ));
+                };
+                if chrono::NaiveDateTime::parse_from_str(reset_at, "%Y-%m-%dT%H:%M").is_err() {
+                    return Err(ConfigError::InvalidValue(
+                        "anchored reset time must use YYYY-MM-DDTHH:MM",
+                    ));
+                }
+            }
+            _ => {}
+        }
         match self.subscription_mode {
             SubscriptionMode::IpFallback => {
                 if self.subscription_host.parse::<IpAddr>().is_err() {
@@ -196,6 +254,12 @@ impl DeploymentConfig {
                     .unwrap_or(&self.subscription_host)
             ),
             format!("interface: {}", self.interface),
+            format!(
+                "monthly traffic limit: {} bytes",
+                self.monthly_traffic_limit
+            ),
+            format!("accounting policy: {}", self.accounting_policy),
+            format!("accounting timezone: {}", self.accounting_timezone),
             format!("enabled protocols: {protocols}"),
             "subscription credential: [redacted]".to_owned(),
         ];
@@ -204,6 +268,9 @@ impl DeploymentConfig {
         }
         if let Some(sni) = &self.reality_decoy_sni {
             lines.push(format!("Reality decoy SNI: {sni}"));
+        }
+        if let Some(reset_at) = &self.anchored_reset_at {
+            lines.push(format!("anchored reset: {reset_at}"));
         }
         lines.join("\n")
     }
@@ -225,6 +292,8 @@ pub enum ConfigError {
     Randomness(String),
     #[error("configuration storage failed: {0}")]
     Storage(#[from] io::Error),
+    #[error("could not update deployment state: {0}")]
+    StateContent(String),
 }
 
 pub struct DeploymentStore {
@@ -260,6 +329,30 @@ impl DeploymentStore {
 
     pub fn write_state(&self, contents: &[u8]) -> Result<(), ConfigError> {
         self.atomic_write_managed(&self.root.join(STATE_RELATIVE_PATH), contents)
+    }
+
+    pub fn update_state(
+        &self,
+        update: impl FnOnce(Option<Vec<u8>>) -> Result<Vec<u8>, ConfigError>,
+    ) -> Result<(), ConfigError> {
+        let _lock = self.operation_lock()?;
+        let contents = update(self.read_state_unlocked()?)?;
+        Ok(atomic_write(
+            &self.root.join(STATE_RELATIVE_PATH),
+            &contents,
+        )?)
+    }
+
+    fn read_state_unlocked(&self) -> Result<Option<Vec<u8>>, ConfigError> {
+        match fs::read(self.root.join(STATE_RELATIVE_PATH)) {
+            Ok(contents) => Ok(Some(contents)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(ConfigError::Storage(error)),
+        }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     pub fn write_artifact(&self, name: &str, contents: &[u8]) -> Result<(), ConfigError> {
