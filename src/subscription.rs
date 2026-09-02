@@ -1,4 +1,5 @@
-use serde_json::json;
+use base64::Engine;
+use serde_json::{Value, json};
 use std::fs;
 use std::io::BufReader;
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use crate::config::{
 const SING_BOX_ARTIFACT: &str = "subscription-sing-box.json";
 const CLASH_ARTIFACT: &str = "subscription-clash.yaml";
 const URI_ARTIFACT: &str = "subscription-uri.txt";
-const SING_BOX_SERVER_ARTIFACT: &str = "sing-box-vless-reality.json";
+const SING_BOX_SERVER_ARTIFACT: &str = "sing-box-server.json";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubscriptionFormat {
@@ -53,8 +54,8 @@ impl SubscriptionFormat {
 pub enum SubscriptionError {
     #[error("subscription is unavailable in external reverse-proxy mode")]
     ExternalProxy,
-    #[error("VLESS Reality is not enabled")]
-    MissingVlessReality,
+    #[error("no subscription-capable Managed protocol is enabled")]
+    MissingNodes,
     #[error("invalid subscription credential")]
     InvalidCredential,
     #[error("subscription artifact is unavailable: {0}")]
@@ -78,7 +79,7 @@ pub fn regenerate(
 pub fn generated_artifacts(
     config: &DeploymentConfig,
 ) -> Result<Vec<(&'static str, String)>, SubscriptionError> {
-    ensure_vless_subscription(config)?;
+    ensure_subscription_nodes(config)?;
     Ok(vec![
         (SING_BOX_SERVER_ARTIFACT, sing_box_server(config)?),
         (SING_BOX_ARTIFACT, sing_box(config)?),
@@ -93,7 +94,7 @@ pub fn read_authorized(
     credential: &str,
     format: SubscriptionFormat,
 ) -> Result<String, SubscriptionError> {
-    ensure_vless_subscription(config)?;
+    ensure_subscription_nodes(config)?;
     if !constant_time_eq(
         credential.as_bytes(),
         config.subscription_credential.as_bytes(),
@@ -113,7 +114,7 @@ pub fn subscription_url(
     config: &DeploymentConfig,
     format: SubscriptionFormat,
 ) -> Result<String, SubscriptionError> {
-    ensure_vless_subscription(config)?;
+    ensure_subscription_nodes(config)?;
     let prefix = match config.subscription_mode {
         SubscriptionMode::IpFallback => format!(
             "http://{}:{}",
@@ -137,7 +138,7 @@ pub async fn serve(
     bind: &str,
     max_requests: Option<usize>,
 ) -> Result<(), SubscriptionError> {
-    ensure_vless_subscription(config)?;
+    ensure_subscription_nodes(config)?;
     if config.subscription_mode == SubscriptionMode::Direct {
         return serve_direct(store, config).await;
     }
@@ -308,71 +309,128 @@ fn parse_route(target: &str) -> Option<(&str, SubscriptionFormat)> {
     parts.next().is_none().then_some((credential, format))
 }
 
-fn ensure_vless_subscription(config: &DeploymentConfig) -> Result<(), SubscriptionError> {
+fn ensure_subscription_nodes(config: &DeploymentConfig) -> Result<(), SubscriptionError> {
     if config.subscription_mode == SubscriptionMode::ExternalProxy {
         return Err(SubscriptionError::ExternalProxy);
     }
     if !config
         .enabled_protocols
-        .contains(&ManagedProtocol::VlessReality)
-        || config.vless_reality.is_none()
+        .iter()
+        .any(ManagedProtocol::has_generated_subscription_artifacts)
     {
-        return Err(SubscriptionError::MissingVlessReality);
+        return Err(SubscriptionError::MissingNodes);
     }
     Ok(())
 }
 
-fn reality_subscription_inputs(
-    config: &DeploymentConfig,
-) -> Result<(&str, &crate::config::VlessRealityCredentials, &str), SubscriptionError> {
-    ensure_vless_subscription(config)?;
-    Ok((
-        config
-            .proxy_host
-            .as_deref()
-            .unwrap_or(&config.subscription_host),
-        config.vless_reality.as_ref().expect("validated VLESS node"),
-        config.reality_decoy_sni.as_deref().expect("validated SNI"),
-    ))
-}
-
 fn sing_box(config: &DeploymentConfig) -> Result<String, SubscriptionError> {
-    let (host, node, sni) = reality_subscription_inputs(config)?;
-    Ok(serde_json::to_string_pretty(&json!({"outbounds": [{
-        "type": "vless", "tag": "sbctl-vless-reality", "server": host,
-        "server_port": node.listen_port, "uuid": node.uuid, "flow": "xtls-rprx-vision",
-        "tls": {"enabled": true, "server_name": sni, "utls": {"enabled": true, "fingerprint": "chrome"},
-            "reality": {"enabled": true, "public_key": node.public_key, "short_id": node.short_id}}
-    }]})).expect("JSON values serialize"))
+    let host = proxy_host(config);
+    let mut outbounds = Vec::new();
+    if let Some(node) = &config.vless_reality {
+        let sni = config.reality_decoy_sni.as_deref().expect("validated SNI");
+        outbounds.push(json!({"type": "vless", "tag": "sbctl-vless-reality", "server": host,
+            "server_port": node.listen_port, "uuid": node.uuid, "flow": "xtls-rprx-vision",
+            "tls": {"enabled": true, "server_name": sni, "utls": {"enabled": true, "fingerprint": "chrome"},
+                "reality": {"enabled": true, "public_key": node.public_key, "short_id": node.short_id}}}));
+    }
+    if let Some(node) = &config.vmess_websocket {
+        outbounds.push(
+            json!({"type": "vmess", "tag": "sbctl-vmess-websocket", "server": host,
+            "server_port": node.listen_port, "uuid": node.uuid, "security": "auto", "alter_id": 0,
+            "transport": {"type": "ws", "path": node.path},
+            "tls": {"enabled": true, "server_name": config.subscription_host}}),
+        );
+    }
+    if let Some(node) = &config.hysteria2 {
+        outbounds.push(
+            json!({"type": "hysteria2", "tag": "sbctl-hysteria2", "server": host,
+            "server_port": node.listen_port, "password": node.password,
+            "tls": {"enabled": true, "server_name": config.subscription_host}}),
+        );
+    }
+    Ok(
+        serde_json::to_string_pretty(&json!({"outbounds": outbounds}))
+            .expect("JSON values serialize"),
+    )
 }
 
 fn sing_box_server(config: &DeploymentConfig) -> Result<String, SubscriptionError> {
-    let (_, node, sni) = reality_subscription_inputs(config)?;
-    Ok(serde_json::to_string_pretty(&json!({"inbounds": [{
-        "type": "vless", "tag": "sbctl-vless-reality", "listen": "::",
-        "listen_port": node.listen_port,
-        "users": [{"uuid": node.uuid, "flow": "xtls-rprx-vision"}],
-        "tls": {"enabled": true, "reality": {"enabled": true,
-            "handshake": {"server": sni, "server_port": 443},
-            "private_key": node.private_key, "short_id": [node.short_id]}}
-    }]}))
-    .expect("JSON values serialize"))
+    let mut inbounds = Vec::new();
+    if let Some(node) = &config.vless_reality {
+        let sni = config.reality_decoy_sni.as_deref().expect("validated SNI");
+        inbounds.push(json!({"type": "vless", "tag": "sbctl-vless-reality", "listen": "::",
+            "listen_port": node.listen_port, "users": [{"uuid": node.uuid, "flow": "xtls-rprx-vision"}],
+            "tls": {"enabled": true, "reality": {"enabled": true,
+                "handshake": {"server": sni, "server_port": 443}, "private_key": node.private_key,
+                "short_id": [node.short_id]}}}));
+    }
+    let certificate = certificate_tls_config(config);
+    if let Some(node) = &config.vmess_websocket {
+        inbounds.push(
+            json!({"type": "vmess", "tag": "sbctl-vmess-websocket", "listen": "::",
+            "listen_port": node.listen_port, "users": [{"uuid": node.uuid, "alter_id": 0}],
+            "transport": {"type": "ws", "path": node.path}, "tls": certificate}),
+        );
+    }
+    if let Some(node) = &config.hysteria2 {
+        inbounds.push(json!({"type": "hysteria2", "tag": "sbctl-hysteria2", "listen": "::",
+            "listen_port": node.listen_port, "users": [{"password": node.password}], "tls": certificate}));
+    }
+    Ok(
+        serde_json::to_string_pretty(&json!({"inbounds": inbounds}))
+            .expect("JSON values serialize"),
+    )
 }
 
 fn clash(config: &DeploymentConfig) -> Result<String, SubscriptionError> {
-    let (host, node, sni) = reality_subscription_inputs(config)?;
-    Ok(format!(
-        "proxies:\n  - name: sbctl-vless-reality\n    type: vless\n    server: {host}\n    port: {}\n    uuid: {}\n    network: tcp\n    flow: xtls-rprx-vision\n    tls: true\n    servername: {sni}\n    client-fingerprint: chrome\n    reality-opts:\n      public-key: {}\n      short-id: {}\n",
-        node.listen_port, node.uuid, node.public_key, node.short_id
-    ))
+    let host = proxy_host(config);
+    let mut proxies = String::from("proxies:\n");
+    if let Some(node) = &config.vless_reality {
+        let sni = config.reality_decoy_sni.as_deref().expect("validated SNI");
+        proxies.push_str(&format!("  - name: sbctl-vless-reality\n    type: vless\n    server: {host}\n    port: {}\n    uuid: {}\n    network: tcp\n    flow: xtls-rprx-vision\n    tls: true\n    servername: {sni}\n    client-fingerprint: chrome\n    reality-opts:\n      public-key: {}\n      short-id: {}\n", node.listen_port, node.uuid, node.public_key, node.short_id));
+    }
+    if let Some(node) = &config.vmess_websocket {
+        proxies.push_str(&format!("  - name: sbctl-vmess-websocket\n    type: vmess\n    server: {host}\n    port: {}\n    uuid: {}\n    alterId: 0\n    cipher: auto\n    tls: true\n    servername: {}\n    network: ws\n    ws-opts:\n      path: {}\n      headers:\n        Host: {}\n", node.listen_port, node.uuid, config.subscription_host, node.path, config.subscription_host));
+    }
+    if let Some(node) = &config.hysteria2 {
+        proxies.push_str(&format!("  - name: sbctl-hysteria2\n    type: hysteria2\n    server: {host}\n    port: {}\n    password: {}\n    sni: {}\n    skip-cert-verify: false\n", node.listen_port, node.password, config.subscription_host));
+    }
+    Ok(proxies)
 }
 
 fn uri(config: &DeploymentConfig) -> Result<String, SubscriptionError> {
-    let (host, node, sni) = reality_subscription_inputs(config)?;
-    Ok(format!(
-        "vless://{}@{}:{}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={sni}&fp=chrome&pbk={}&sid={}&type=tcp#sbctl-vless-reality\n",
-        node.uuid, host, node.listen_port, node.public_key, node.short_id
-    ))
+    let host = proxy_host(config);
+    let mut uris = String::new();
+    if let Some(node) = &config.vless_reality {
+        let sni = config.reality_decoy_sni.as_deref().expect("validated SNI");
+        uris.push_str(&format!("vless://{}@{}:{}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={sni}&fp=chrome&pbk={}&sid={}&type=tcp#sbctl-vless-reality\n", node.uuid, host, node.listen_port, node.public_key, node.short_id));
+    }
+    if let Some(node) = &config.vmess_websocket {
+        let payload = json!({"v": "2", "ps": "sbctl-vmess-websocket", "add": host, "port": node.listen_port.to_string(), "id": node.uuid, "aid": "0", "scy": "auto", "net": "ws", "type": "none", "host": config.subscription_host, "path": node.path, "tls": "tls", "sni": config.subscription_host});
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(serde_json::to_vec(&payload).expect("JSON values serialize"));
+        uris.push_str(&format!("vmess://{encoded}\n"));
+    }
+    if let Some(node) = &config.hysteria2 {
+        uris.push_str(&format!(
+            "hysteria2://{}@{}:{}?insecure=0&sni={}#sbctl-hysteria2\n",
+            node.password, host, node.listen_port, config.subscription_host
+        ));
+    }
+    Ok(uris)
+}
+
+fn proxy_host(config: &DeploymentConfig) -> &str {
+    config
+        .proxy_host
+        .as_deref()
+        .unwrap_or(&config.subscription_host)
+}
+
+fn certificate_tls_config(config: &DeploymentConfig) -> Value {
+    json!({"enabled": true, "server_name": config.subscription_host,
+        "certificate_path": format!("/etc/letsencrypt/live/{}/fullchain.pem", config.subscription_host),
+        "key_path": format!("/etc/letsencrypt/live/{}/privkey.pem", config.subscription_host)})
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {

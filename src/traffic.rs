@@ -398,8 +398,8 @@ mod tests {
             None,
             Some(2080),
             "ens3".into(),
-            vec![ManagedProtocol::Hysteria2],
-            None,
+            vec![ManagedProtocol::VlessReality],
+            Some("www.cloudflare.com".into()),
         )
         .unwrap();
         config.accounting_timezone = "UTC".into();

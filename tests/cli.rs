@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use base64::Engine;
 use predicates::prelude::*;
 use std::fs;
 use std::io::{Read, Write};
@@ -200,7 +201,7 @@ fn vless_reality_ip_fallback_exports_consistent_subscription_formats() {
         .expect("subscription credential is persisted");
 
     let artifacts = fixture.path().join("var/lib/sbctl/artifacts");
-    let server = fs::read_to_string(artifacts.join("sing-box-vless-reality.json"))
+    let server = fs::read_to_string(artifacts.join("sing-box-server.json"))
         .expect("sing-box server configuration is cached");
     let sing_box = fs::read_to_string(artifacts.join("subscription-sing-box.json"))
         .expect("sing-box subscription is cached");
@@ -231,6 +232,112 @@ fn vless_reality_ip_fallback_exports_consistent_subscription_formats() {
         .assert()
         .success()
         .stdout(predicate::str::contains(format!("/sub/{credential}/uri")));
+}
+
+#[test]
+fn domain_nodes_export_vmess_websocket_and_hysteria2_with_independent_tls_credentials() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let root = fixture.path().to_str().expect("fixture path is UTF-8");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            root,
+            "config",
+            "init",
+            "--mode",
+            "direct",
+            "--subscription-host",
+            "sub.example.test",
+            "--proxy-host",
+            "proxy.example.test",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--protocol",
+            "vmess-websocket",
+            "--protocol",
+            "hysteria2",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+
+    let artifacts = fixture.path().join("var/lib/sbctl/artifacts");
+    let server: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(artifacts.join("sing-box-server.json"))
+            .expect("sing-box server configuration is cached"),
+    )
+    .expect("server configuration is JSON");
+    let subscription: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(artifacts.join("subscription-sing-box.json"))
+            .expect("sing-box subscription is cached"),
+    )
+    .expect("subscription is JSON");
+    let inbounds = server["inbounds"].as_array().expect("inbounds are present");
+    let outbounds = subscription["outbounds"]
+        .as_array()
+        .expect("outbounds are present");
+    assert_eq!(inbounds.len(), 3);
+    assert_eq!(outbounds.len(), 3);
+    let vmess = outbounds
+        .iter()
+        .find(|node| node["type"] == "vmess")
+        .expect("VMess WebSocket node is exported");
+    let hysteria = outbounds
+        .iter()
+        .find(|node| node["type"] == "hysteria2")
+        .expect("Hysteria2 node is exported");
+    assert_eq!(vmess["server"], "proxy.example.test");
+    assert_eq!(vmess["tls"]["server_name"], "sub.example.test");
+    assert_eq!(hysteria["server"], "proxy.example.test");
+    assert_eq!(hysteria["tls"]["server_name"], "sub.example.test");
+    assert_ne!(vmess["server_port"], hysteria["server_port"]);
+    assert_ne!(vmess["uuid"], hysteria["password"]);
+
+    let clash = fs::read_to_string(artifacts.join("subscription-clash.yaml"))
+        .expect("Clash subscription is cached");
+    let _: serde_yaml::Value = serde_yaml::from_str(&clash).expect("Clash subscription is YAML");
+    assert!(clash.contains("type: vmess"));
+    assert!(clash.contains("type: hysteria2"));
+    assert!(clash.contains("servername: sub.example.test"));
+    assert!(clash.contains("sni: sub.example.test"));
+    assert!(clash.contains(vmess["uuid"].as_str().expect("VMess UUID is text")));
+    assert!(
+        clash.contains(
+            hysteria["password"]
+                .as_str()
+                .expect("Hysteria2 password is text")
+        )
+    );
+
+    let uri = fs::read_to_string(artifacts.join("subscription-uri.txt"))
+        .expect("URI subscription is cached");
+    assert!(uri.contains("vmess://"));
+    assert!(uri.contains("hysteria2://"));
+    assert!(uri.contains("sni=sub.example.test"));
+    let vmess_uri = uri
+        .lines()
+        .find(|line| line.starts_with("vmess://"))
+        .expect("VMess URI is present");
+    let vmess_payload: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::STANDARD
+            .decode(vmess_uri.trim_start_matches("vmess://"))
+            .expect("VMess URI payload is base64"),
+    )
+    .expect("VMess URI payload is JSON");
+    assert_eq!(vmess_payload["id"], vmess["uuid"]);
+    assert_eq!(vmess_payload["port"], vmess["server_port"].to_string());
+    assert!(
+        uri.contains(
+            hysteria["password"]
+                .as_str()
+                .expect("Hysteria2 password is text")
+        )
+    );
 }
 
 #[test]
@@ -379,11 +486,13 @@ fn traffic_and_status_report_vps_traffic_for_the_detected_default_route_interfac
             "--http-port",
             "2080",
             "--protocol",
-            "hysteria2",
+            "vless-reality",
             "--monthly-traffic-limit",
             "1000",
             "--accounting-timezone",
             "UTC",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
         ])
         .assert()
         .success();

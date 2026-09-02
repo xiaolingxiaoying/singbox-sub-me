@@ -363,7 +363,8 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
                 config.validate()?;
                 let generated_artifacts = if config
                     .enabled_protocols
-                    .contains(&sbctl::config::ManagedProtocol::VlessReality)
+                    .iter()
+                    .any(sbctl::config::ManagedProtocol::has_generated_subscription_artifacts)
                 {
                     sbctl::subscription::generated_artifacts(&config).map_err(|error| {
                         sbctl::config::ConfigError::StateContent(error.to_string())

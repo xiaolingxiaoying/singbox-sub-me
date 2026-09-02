@@ -37,6 +37,10 @@ pub struct DeploymentConfig {
     pub anchored_reset_at: Option<String>,
     #[serde(default)]
     pub vless_reality: Option<VlessRealityCredentials>,
+    #[serde(default)]
+    pub vmess_websocket: Option<VmessWebsocketCredentials>,
+    #[serde(default)]
+    pub hysteria2: Option<Hysteria2Credentials>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -46,6 +50,19 @@ pub struct VlessRealityCredentials {
     pub private_key: String,
     pub public_key: String,
     pub short_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct VmessWebsocketCredentials {
+    pub listen_port: u16,
+    pub uuid: String,
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct Hysteria2Credentials {
+    pub listen_port: u16,
+    pub password: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -109,6 +126,15 @@ impl fmt::Display for ManagedProtocol {
     }
 }
 
+impl ManagedProtocol {
+    pub fn has_generated_subscription_artifacts(&self) -> bool {
+        matches!(
+            self,
+            Self::VlessReality | Self::VmessWebsocket | Self::Hysteria2
+        )
+    }
+}
+
 impl DeploymentConfig {
     pub fn new(
         subscription_mode: SubscriptionMode,
@@ -123,9 +149,18 @@ impl DeploymentConfig {
         getrandom::fill(&mut bytes).map_err(|error| ConfigError::Randomness(error.to_string()))?;
         let subscription_credential =
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let mut allocated_ports = Vec::new();
         let vless_reality = enabled_protocols
             .contains(&ManagedProtocol::VlessReality)
-            .then(generate_vless_reality_credentials)
+            .then(|| generate_vless_reality_credentials(&mut allocated_ports))
+            .transpose()?;
+        let vmess_websocket = enabled_protocols
+            .contains(&ManagedProtocol::VmessWebsocket)
+            .then(|| generate_vmess_websocket_credentials(&mut allocated_ports))
+            .transpose()?;
+        let hysteria2 = enabled_protocols
+            .contains(&ManagedProtocol::Hysteria2)
+            .then(|| generate_hysteria2_credentials(&mut allocated_ports))
             .transpose()?;
         let config = Self {
             subscription_mode,
@@ -141,6 +176,8 @@ impl DeploymentConfig {
             accounting_timezone: default_accounting_timezone(),
             anchored_reset_at: None,
             vless_reality,
+            vmess_websocket,
+            hysteria2,
         };
         config.validate()?;
         Ok(config)
@@ -182,6 +219,18 @@ impl DeploymentConfig {
                 "VLESS Reality requires a Reality decoy SNI",
             ));
         }
+        validate_enabled_credentials(
+            &self.enabled_protocols,
+            ManagedProtocol::VmessWebsocket,
+            self.vmess_websocket.is_some(),
+            "VMess WebSocket requires generated node credentials",
+        )?;
+        validate_enabled_credentials(
+            &self.enabled_protocols,
+            ManagedProtocol::Hysteria2,
+            self.hysteria2.is_some(),
+            "Hysteria2 requires generated node credentials",
+        )?;
         if self
             .enabled_protocols
             .contains(&ManagedProtocol::VlessReality)
@@ -246,6 +295,16 @@ impl DeploymentConfig {
                         "IP fallback HTTP port must be higher than 1024",
                     ));
                 }
+                if self.enabled_protocols.iter().any(|protocol| {
+                    matches!(
+                        protocol,
+                        ManagedProtocol::VmessWebsocket | ManagedProtocol::Hysteria2
+                    )
+                }) {
+                    return Err(ConfigError::InvalidValue(
+                        "VMess WebSocket and Hysteria2 require a domain subscription mode",
+                    ));
+                }
             }
             SubscriptionMode::Direct | SubscriptionMode::ExternalProxy => {
                 if self.subscription_host.parse::<IpAddr>().is_ok() {
@@ -303,43 +362,110 @@ impl DeploymentConfig {
     }
 }
 
-fn generate_vless_reality_credentials() -> Result<VlessRealityCredentials, ConfigError> {
+fn validate_enabled_credentials(
+    enabled_protocols: &[ManagedProtocol],
+    protocol: ManagedProtocol,
+    has_credentials: bool,
+    message: &'static str,
+) -> Result<(), ConfigError> {
+    if enabled_protocols.contains(&protocol) && !has_credentials {
+        return Err(ConfigError::InvalidValue(message));
+    }
+    Ok(())
+}
+
+fn generate_vless_reality_credentials(
+    allocated_ports: &mut Vec<u16>,
+) -> Result<VlessRealityCredentials, ConfigError> {
     let mut private = [0_u8; 32];
-    let mut uuid = [0_u8; 16];
     let mut short_id = [0_u8; 8];
     getrandom::fill(&mut private).map_err(|error| ConfigError::Randomness(error.to_string()))?;
-    getrandom::fill(&mut uuid).map_err(|error| ConfigError::Randomness(error.to_string()))?;
     getrandom::fill(&mut short_id).map_err(|error| ConfigError::Randomness(error.to_string()))?;
     let public = x25519(private, X25519_BASEPOINT_BYTES);
-    let listen_port = std::net::TcpListener::bind("[::]:0")
-        .or_else(|_| std::net::TcpListener::bind("0.0.0.0:0"))?
-        .local_addr()?
-        .port();
+    let listen_port = allocate_port(allocated_ports)?;
     Ok(VlessRealityCredentials {
         listen_port,
-        uuid: format!(
-            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            uuid[0],
-            uuid[1],
-            uuid[2],
-            uuid[3],
-            uuid[4],
-            uuid[5],
-            uuid[6],
-            uuid[7],
-            uuid[8],
-            uuid[9],
-            uuid[10],
-            uuid[11],
-            uuid[12],
-            uuid[13],
-            uuid[14],
-            uuid[15]
-        ),
+        uuid: generate_uuid()?,
         private_key: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(private),
         public_key: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public),
         short_id: short_id.iter().map(|byte| format!("{byte:02x}")).collect(),
     })
+}
+
+fn generate_vmess_websocket_credentials(
+    allocated_ports: &mut Vec<u16>,
+) -> Result<VmessWebsocketCredentials, ConfigError> {
+    let mut path = [0_u8; 16];
+    getrandom::fill(&mut path).map_err(|error| ConfigError::Randomness(error.to_string()))?;
+    Ok(VmessWebsocketCredentials {
+        listen_port: allocate_port(allocated_ports)?,
+        uuid: generate_uuid()?,
+        path: format!(
+            "/{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(path)
+        ),
+    })
+}
+
+fn generate_hysteria2_credentials(
+    allocated_ports: &mut Vec<u16>,
+) -> Result<Hysteria2Credentials, ConfigError> {
+    let mut password = [0_u8; 32];
+    getrandom::fill(&mut password).map_err(|error| ConfigError::Randomness(error.to_string()))?;
+    Ok(Hysteria2Credentials {
+        listen_port: allocate_udp_port(allocated_ports)?,
+        password: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(password),
+    })
+}
+
+fn generate_uuid() -> Result<String, ConfigError> {
+    let mut uuid = [0_u8; 16];
+    getrandom::fill(&mut uuid).map_err(|error| ConfigError::Randomness(error.to_string()))?;
+    Ok(format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        uuid[0],
+        uuid[1],
+        uuid[2],
+        uuid[3],
+        uuid[4],
+        uuid[5],
+        uuid[6],
+        uuid[7],
+        uuid[8],
+        uuid[9],
+        uuid[10],
+        uuid[11],
+        uuid[12],
+        uuid[13],
+        uuid[14],
+        uuid[15]
+    ))
+}
+
+fn allocate_port(allocated_ports: &mut Vec<u16>) -> Result<u16, ConfigError> {
+    loop {
+        let port = std::net::TcpListener::bind("[::]:0")
+            .or_else(|_| std::net::TcpListener::bind("0.0.0.0:0"))?
+            .local_addr()?
+            .port();
+        if !allocated_ports.contains(&port) {
+            allocated_ports.push(port);
+            return Ok(port);
+        }
+    }
+}
+
+fn allocate_udp_port(allocated_ports: &mut Vec<u16>) -> Result<u16, ConfigError> {
+    loop {
+        let port = std::net::UdpSocket::bind("[::]:0")
+            .or_else(|_| std::net::UdpSocket::bind("0.0.0.0:0"))?
+            .local_addr()?
+            .port();
+        if !allocated_ports.contains(&port) {
+            allocated_ports.push(port);
+            return Ok(port);
+        }
+    }
 }
 
 #[derive(Debug, Error)]
