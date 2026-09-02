@@ -41,26 +41,6 @@ test -n "$credential" || fail 'direct subscription credential was not persisted'
 for protocol in vless-reality vmess-websocket hysteria2 tuic anytls; do
   grep -F -- "$protocol" "$root/etc/sbctl/config.toml" >/dev/null || fail "missing $protocol"
 done
-python3 - "$root/var/lib/sbctl/artifacts" "$credential" <<'PY'
-import json
-import pathlib
-import sys
-import yaml
-
-artifacts = pathlib.Path(sys.argv[1])
-credential = sys.argv[2]
-sing_box = json.loads((artifacts / "subscription-sing-box.json").read_text())
-clash = yaml.safe_load((artifacts / "subscription-clash.yaml").read_text())
-uris = (artifacts / "subscription-uri.txt").read_text()
-expected = {"vless", "vmess", "hysteria2", "tuic", "anytls"}
-actual_json = {node["type"] for node in sing_box["outbounds"]}
-actual_yaml = {node["type"] for node in clash["proxies"]}
-assert actual_json == expected, actual_json
-assert actual_yaml == expected, actual_yaml
-for scheme in expected:
-    assert f"{scheme}://" in uris, scheme
-assert credential not in uris
-PY
 test ! -e "$root/etc/ufw/user.rules" || fail 'installation changed firewall rules'
 certificate_directory="$root/etc/letsencrypt/live/sub.example.test"
 mkdir -p "$certificate_directory"
@@ -108,13 +88,36 @@ done
 query_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2080/sub/$credential/uri?credential=$credential")
 test "$query_status" = 404 || fail 'query-string credential was accepted'
 
-# Reverse-proxy mode must bind loopback, retain the five generated protocols, and serve a cache.
+# Reverse-proxy mode must bind loopback and return all formats from the five-node set.
 root_for reverse "$platform"
 "$sbctl" --root "$root" config init --mode external-proxy --subscription-host sub.example.test --listen-port 2081 --interface ens3 --protocol vless-reality --protocol vmess-websocket --protocol hysteria2 --protocol tuic --protocol anytls --reality-decoy-sni www.cloudflare.com --sing-box-bin "$fake_sing_box"
 reverse_credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' "$root/etc/sbctl/config.toml")
-"$sbctl" --root "$root" serve --max-requests 1 &
+"$sbctl" --root "$root" serve --max-requests 4 &
 sleep 1
-curl --silent --show-error --include "http://127.0.0.1:2081/sub/$reverse_credential/uri" | grep -F 'HTTP/1.1 200 OK' >/dev/null || fail 'reverse-proxy endpoint did not respond'
+for format in sing-box.json clash.yaml uri; do
+  curl --silent --show-error --dump-header "$work/$format.headers" --output "$work/$format.body" "http://127.0.0.1:2081/sub/$reverse_credential/$format"
+  grep -F 'HTTP/1.1 200 OK' "$work/$format.headers" >/dev/null || fail "reverse-proxy $format did not respond"
+  grep -Fi 'subscription-userinfo:' "$work/$format.headers" >/dev/null || fail "reverse-proxy $format lacks traffic metadata"
+done
+python3 - "$work/sing-box.json.body" "$work/clash.yaml.body" "$work/uri.body" <<'PY'
+import json
+import pathlib
+import sys
+import yaml
+
+sing_box = json.loads(pathlib.Path(sys.argv[1]).read_text())
+clash = yaml.safe_load(pathlib.Path(sys.argv[2]).read_text())
+uris = pathlib.Path(sys.argv[3]).read_text()
+expected = {"vless", "vmess", "hysteria2", "tuic", "anytls"}
+assert {node["type"] for node in sing_box["outbounds"]} == expected
+assert {node["type"] for node in clash["proxies"]} == expected
+for scheme in expected:
+    assert f"{scheme}://" in uris, scheme
+PY
+proxy_credential=$(sed -n 's|^vless://\([^@]*\)@.*|\1|p' "$work/uri.body")
+test -n "$proxy_credential" || fail 'VLESS proxy credential was not emitted'
+proxy_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2081/sub/$proxy_credential/uri")
+test "$proxy_status" = 404 || fail 'proxy credential authorized a subscription'
 
 # Update check is read-only; a failed health check restores the known-good binaries and keeps a rollback point.
 root_for update "$platform"
