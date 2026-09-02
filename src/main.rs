@@ -45,6 +45,7 @@ enum Command {
     },
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 enum ConfigCommand {
     /// Create the initial deployment configuration without overwriting one.
@@ -74,6 +75,9 @@ enum ConfigCommand {
         /// Required for anchored-month: YYYY-MM-DDTHH:MM in the accounting timezone.
         #[arg(long)]
         anchored_reset_at: Option<String>,
+        /// sing-box binary used to validate VMess WebSocket or Hysteria2 server configuration.
+        #[arg(long, value_name = "PATH")]
+        sing_box_bin: Option<PathBuf>,
     },
     /// Display the persisted deployment summary without exposing credentials.
     Show,
@@ -337,6 +341,7 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
             accounting_policy,
             accounting_timezone,
             anchored_reset_at,
+            sing_box_bin,
         } => {
             let interface = interface.map(Ok).unwrap_or_else(|| {
                 sbctl::traffic::detect_default_route_interface(root).map_err(|_| {
@@ -376,6 +381,31 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
                     .iter()
                     .map(|(name, contents)| (*name, contents.as_bytes()))
                     .collect::<Vec<_>>();
+                let requires_sing_box_check = config.enabled_protocols.iter().any(|protocol| {
+                    matches!(
+                        protocol,
+                        sbctl::config::ManagedProtocol::VmessWebsocket
+                            | sbctl::config::ManagedProtocol::Hysteria2
+                    )
+                });
+                if requires_sing_box_check && sing_box_bin.is_none() {
+                    return Err(sbctl::config::ConfigError::InvalidValue(
+                        "VMess WebSocket and Hysteria2 require --sing-box-bin for configuration validation",
+                    ));
+                }
+                if let Some(sing_box_bin) = sing_box_bin {
+                    let server_config = generated_artifacts
+                        .iter()
+                        .find(|(name, _)| *name == "sing-box-server.json")
+                        .map(|(_, contents)| contents)
+                        .ok_or(sbctl::config::ConfigError::InvalidValue(
+                            "no generated sing-box server configuration is available to check",
+                        ))?;
+                    sbctl::subscription::check_sing_box_config(&sing_box_bin, server_config)
+                        .map_err(|error| {
+                            sbctl::config::ConfigError::StateContent(error.to_string())
+                        })?;
+                }
                 store.initialize_with_artifacts(&config, &artifact_references)
             })
         }

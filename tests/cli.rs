@@ -4,6 +4,7 @@ use predicates::prelude::*;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::thread;
 use std::time::Duration;
@@ -237,6 +238,7 @@ fn vless_reality_ip_fallback_exports_consistent_subscription_formats() {
 #[test]
 fn domain_nodes_export_vmess_websocket_and_hysteria2_with_independent_tls_credentials() {
     let fixture = TempDir::new().expect("temporary root is created");
+    let checker = sing_box_check_fixture(&fixture, true);
     let root = fixture.path().to_str().expect("fixture path is UTF-8");
 
     Command::cargo_bin("sbctl")
@@ -262,6 +264,8 @@ fn domain_nodes_export_vmess_websocket_and_hysteria2_with_independent_tls_creden
             "hysteria2",
             "--reality-decoy-sni",
             "www.cloudflare.com",
+            "--sing-box-bin",
+            checker.to_str().expect("checker path is UTF-8"),
         ])
         .assert()
         .success();
@@ -338,6 +342,113 @@ fn domain_nodes_export_vmess_websocket_and_hysteria2_with_independent_tls_creden
                 .expect("Hysteria2 password is text")
         )
     );
+}
+
+#[test]
+fn configuration_initialization_checks_generated_sing_box_config_before_persisting() {
+    let unchecked = TempDir::new().expect("temporary root is created");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            unchecked.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "direct",
+            "--subscription-host",
+            "sub.example.test",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vmess-websocket",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("require --sing-box-bin"));
+    assert!(!unchecked.path().join("etc/sbctl/config.toml").exists());
+
+    let fixture = TempDir::new().expect("temporary root is created");
+    let checker = sing_box_check_fixture(&fixture, true);
+    let root = fixture.path().to_str().expect("fixture path is UTF-8");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            root,
+            "config",
+            "init",
+            "--mode",
+            "direct",
+            "--subscription-host",
+            "sub.example.test",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vmess-websocket",
+            "--sing-box-bin",
+            checker.to_str().expect("checker path is UTF-8"),
+        ])
+        .assert()
+        .success();
+    assert!(fixture.path().join("etc/sbctl/config.toml").is_file());
+
+    let rejected = TempDir::new().expect("temporary root is created");
+    let rejecting_checker = sing_box_check_fixture(&rejected, false);
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            rejected.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "direct",
+            "--subscription-host",
+            "sub.example.test",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vmess-websocket",
+            "--sing-box-bin",
+            rejecting_checker.to_str().expect("checker path is UTF-8"),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "sing-box configuration check failed",
+        ));
+    assert!(!rejected.path().join("etc/sbctl/config.toml").exists());
+}
+
+fn sing_box_check_fixture(fixture: &TempDir, accepts_config: bool) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let path = fixture.path().join("sing-box-check.cmd");
+        let script = if accepts_config {
+            "@echo off\r\nfindstr /C:\"\\\"type\\\": \\\"vmess\\\"\" %3 >nul || exit /b 1\r\nexit /b 0\r\n"
+        } else {
+            "@echo off\r\nexit /b 1\r\n"
+        };
+        fs::write(&path, script).expect("checker fixture is written");
+        path
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = fixture.path().join("sing-box-check");
+        let script = if accepts_config {
+            "#!/bin/sh\ngrep -q '\"type\": \"vmess\"' \"$3\"\n"
+        } else {
+            "#!/bin/sh\nexit 1\n"
+        };
+        fs::write(&path, script).expect("checker fixture is written");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+            .expect("checker fixture is executable");
+        path
+    }
 }
 
 #[test]

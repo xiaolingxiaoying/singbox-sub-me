@@ -2,6 +2,9 @@ use base64::Engine;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::BufReader;
+use std::io::Write;
+use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -62,6 +65,8 @@ pub enum SubscriptionError {
     Artifact(#[from] std::io::Error),
     #[error("TLS certificate could not be loaded: {0}")]
     Tls(String),
+    #[error("sing-box configuration check failed: {0}")]
+    Check(String),
     #[error(transparent)]
     Storage(#[from] ConfigError),
 }
@@ -86,6 +91,28 @@ pub fn generated_artifacts(
         (CLASH_ARTIFACT, clash(config)?),
         (URI_ARTIFACT, uri(config)?),
     ])
+}
+
+pub fn check_sing_box_config(
+    sing_box_binary: &Path,
+    config: &str,
+) -> Result<(), SubscriptionError> {
+    let mut temporary = tempfile::NamedTempFile::new().map_err(SubscriptionError::Artifact)?;
+    temporary
+        .write_all(config.as_bytes())
+        .map_err(SubscriptionError::Artifact)?;
+    let status = Command::new(sing_box_binary)
+        .args(["check", "-c"])
+        .arg(temporary.path())
+        .status()
+        .map_err(SubscriptionError::Artifact)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(SubscriptionError::Check(format!(
+            "sing-box check exited with {status}"
+        )))
+    }
 }
 
 pub fn read_authorized(
