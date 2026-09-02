@@ -64,12 +64,18 @@ enum Command {
         /// Fixed release manifest containing the allowed artifact hashes.
         #[arg(long, value_name = "PATH")]
         manifest: PathBuf,
-        /// Local sbctl candidate artifact. Required unless --check is used.
+        /// Optional local sbctl candidate artifact; otherwise download from the manifest.
         #[arg(long, value_name = "PATH")]
         sbctl_artifact: Option<PathBuf>,
-        /// Local sing-box candidate artifact. Required unless --check is used.
+        /// Optional local sing-box candidate artifact; otherwise download from the manifest.
         #[arg(long, value_name = "PATH")]
         sing_box_artifact: Option<PathBuf>,
+    },
+    /// Manage the sing-box data-plane binary independently from sbctl.
+    #[command(name = "sing-box")]
+    SingBox {
+        #[command(subcommand)]
+        command: SingBoxCommand,
     },
     /// Retrieve a generated subscription representation using its path credential.
     Sub {
@@ -199,6 +205,33 @@ enum CliSubscriptionFormat {
     Uri,
 }
 
+#[derive(Debug, Subcommand)]
+enum SingBoxCommand {
+    /// Download the pinned sing-box artifact and verify its digest.
+    Download {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Install a verified sing-box artifact at /usr/local/bin/sing-box.
+    Install {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        artifact: PathBuf,
+    },
+    /// Download (when needed), verify, and replace the managed sing-box binary.
+    Update {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        artifact: Option<PathBuf>,
+    },
+    /// Remove only the sbctl-owned sing-box binary and service.
+    Remove,
+}
+
 impl From<CliSubscriptionFormat> for sbctl::subscription::SubscriptionFormat {
     fn from(format: CliSubscriptionFormat) -> Self {
         match format {
@@ -283,10 +316,64 @@ fn main() -> ExitCode {
             sbctl_artifact.as_deref(),
             sing_box_artifact.as_deref(),
         ),
+        Command::SingBox { command } => sing_box(root, command),
         Command::Sub { format } => print_subscription_urls(root, format.map(Into::into)),
         Command::Serve { bind, max_requests } => serve_subscription(root, bind, max_requests),
         Command::Certificate { command } => run_certificate(root, command),
         Command::Config { command } => run_config(root, command),
+    }
+}
+
+fn sing_box(root: &Path, command: SingBoxCommand) -> ExitCode {
+    let result = match command {
+        SingBoxCommand::Download { manifest, output } => sbctl::update::read_manifest(&manifest)
+            .and_then(|manifest| sbctl::update::download_sing_box(&manifest, &output))
+            .map(|_| format!("sing-box downloaded and verified: {}", output.display())),
+        SingBoxCommand::Install { manifest, artifact } => sbctl::update::read_manifest(&manifest)
+            .and_then(|manifest| sbctl::update::verify_sing_box_artifact(&manifest, &artifact))
+            .and_then(|_| {
+                sbctl::lifecycle::install_checked_sing_box(root, &artifact)
+                    .map_err(sbctl::update::UpdateError::Storage)
+            })
+            .map(|_| "sing-box installed".to_owned()),
+        SingBoxCommand::Update { manifest, artifact } => {
+            let result = sbctl::update::read_manifest(&manifest).and_then(|manifest| {
+                let temporary = tempfile::NamedTempFile::new().map_err(|error| {
+                    sbctl::update::UpdateError::DownloadFailed("sing-box", error.to_string())
+                })?;
+                let candidate = match artifact {
+                    Some(candidate) => {
+                        sbctl::update::verify_sing_box_artifact(&manifest, &candidate)?;
+                        candidate
+                    }
+                    None => {
+                        let candidate = temporary.path().to_path_buf();
+                        sbctl::update::download_sing_box(&manifest, &candidate)?;
+                        candidate
+                    }
+                };
+                sbctl::update::apply_sing_box(
+                    &sbctl::config::DeploymentStore::new(root),
+                    &manifest,
+                    &candidate,
+                )
+            });
+            result
+                .map(|rollback| format!("sing-box updated; rollback point: {}", rollback.display()))
+        }
+        SingBoxCommand::Remove => sbctl::lifecycle::remove_managed_sing_box(root)
+            .map(|_| "sing-box removed".to_owned())
+            .map_err(|error| sbctl::update::UpdateError::DownloadFailed("sing-box", error)),
+    };
+    match result {
+        Ok(message) => {
+            println!("{message}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("sing-box operation failed: {error}");
+            ExitCode::from(2)
+        }
     }
 }
 
@@ -324,17 +411,31 @@ fn update(
                 sbctl::update::available_versions(&manifest)
             ));
         }
-        let sbctl_artifact = sbctl_artifact.ok_or(
-            sbctl::update::UpdateError::MissingArtifactArgument("--sbctl-artifact"),
-        )?;
-        let sing_box_artifact = sing_box_artifact.ok_or(
-            sbctl::update::UpdateError::MissingArtifactArgument("--sing-box-artifact"),
-        )?;
+        let sbctl_download = tempfile::NamedTempFile::new().map_err(|error| {
+            sbctl::update::UpdateError::DownloadFailed("sbctl", error.to_string())
+        })?;
+        let sing_box_download = tempfile::NamedTempFile::new().map_err(|error| {
+            sbctl::update::UpdateError::DownloadFailed("sing-box", error.to_string())
+        })?;
+        let sbctl_artifact = match sbctl_artifact {
+            Some(path) => path.to_path_buf(),
+            None => {
+                sbctl::update::download_sbctl(&manifest, sbctl_download.path())?;
+                sbctl_download.path().to_path_buf()
+            }
+        };
+        let sing_box_artifact = match sing_box_artifact {
+            Some(path) => path.to_path_buf(),
+            None => {
+                sbctl::update::download_sing_box(&manifest, sing_box_download.path())?;
+                sing_box_download.path().to_path_buf()
+            }
+        };
         let rollback = sbctl::update::apply(
             &sbctl::config::DeploymentStore::new(root),
             &manifest,
-            sbctl_artifact,
-            sing_box_artifact,
+            &sbctl_artifact,
+            &sing_box_artifact,
         )?;
         Ok(format!(
             "update completed after verified validation and service health checks\nrollback point: {}",

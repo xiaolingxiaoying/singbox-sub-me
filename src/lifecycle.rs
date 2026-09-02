@@ -57,6 +57,21 @@ pub fn install_checked_sing_box(root: &Path, candidate: &Path) -> Result<(), Con
     Ok(())
 }
 
+pub fn restart_sing_box_service(root: &Path) -> Result<(), String> {
+    systemctl(root, &["restart", "sing-box.service"])?;
+    systemctl(root, &["is-active", "--quiet", "sing-box.service"])
+}
+
+pub fn remove_managed_sing_box(root: &Path) -> Result<(), String> {
+    if !unit_has_marker(root, SING_BOX_UNIT, SING_BOX_UNIT_MARKER)? {
+        return Err("sing-box is not an sbctl-managed deployment".to_owned());
+    }
+    systemctl(root, &["disable", "--now", "sing-box.service"])?;
+    remove_file_if_present(&root.join(SING_BOX_UNIT))?;
+    remove_file_if_present(&root.join("usr/local/bin/sing-box"))?;
+    systemctl(root, &["daemon-reload"])
+}
+
 pub fn start_services(root: &Path) -> Result<(), String> {
     ensure_daemon_account(root)?;
     systemctl(root, &["daemon-reload"])?;

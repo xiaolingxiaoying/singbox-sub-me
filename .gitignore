@@ -1,0 +1,10 @@
+/target/
+/.tmp-sing-box-yg-research/
+/.scratch/research/
+
+# Local editor and OS files
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store

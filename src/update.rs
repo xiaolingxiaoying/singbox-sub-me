@@ -27,6 +27,8 @@ pub struct ReleaseManifest {
 pub struct ReleaseArtifact {
     pub version: String,
     pub sha256: String,
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -41,6 +43,10 @@ pub enum UpdateError {
     InvalidDigest(&'static str),
     #[error("{0} artifact does not match the pinned release manifest")]
     DigestMismatch(&'static str),
+    #[error("pinned release manifest has no download URL for {0}")]
+    MissingDownloadUrl(&'static str),
+    #[error("download of {0} failed: {1}")]
+    DownloadFailed(&'static str, String),
     #[error("sbctl candidate health check failed: {0}")]
     SbctlHealth(String),
     #[error("sing-box candidate configuration check failed: {0}")]
@@ -65,6 +71,109 @@ pub fn available_versions(manifest: &ReleaseManifest) -> String {
         "sbctl: {} available\nsing-box: {} available",
         manifest.sbctl.version, manifest.sing_box.version
     )
+}
+
+pub fn download_sing_box(manifest: &ReleaseManifest, output: &Path) -> Result<(), UpdateError> {
+    download_artifact("sing-box", &manifest.sing_box, output)
+}
+
+pub fn download_sbctl(manifest: &ReleaseManifest, output: &Path) -> Result<(), UpdateError> {
+    download_artifact("sbctl", &manifest.sbctl, output)
+}
+
+fn download_artifact(
+    name: &'static str,
+    artifact: &ReleaseArtifact,
+    output: &Path,
+) -> Result<(), UpdateError> {
+    let url = artifact
+        .url
+        .as_deref()
+        .ok_or(UpdateError::MissingDownloadUrl(name))?;
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = output.with_extension("download.tmp");
+    let status = Command::new("curl")
+        .args([
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--output",
+        ])
+        .arg(&temporary)
+        .arg(url)
+        .status()
+        .map_err(|error| UpdateError::DownloadFailed(name, error.to_string()))?;
+    if !status.success() {
+        let _ = fs::remove_file(&temporary);
+        return Err(UpdateError::DownloadFailed(
+            name,
+            format!("curl exited with {status}"),
+        ));
+    }
+    let result = verify_artifact(name, &temporary, &artifact.sha256);
+    if result.is_ok() {
+        fs::rename(&temporary, output)?;
+    } else {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+pub fn verify_sing_box_artifact(
+    manifest: &ReleaseManifest,
+    candidate: &Path,
+) -> Result<(), UpdateError> {
+    verify_artifact("sing-box", candidate, &manifest.sing_box.sha256)
+}
+
+/// Updates only the data-plane binary. The existing generated configuration is
+/// checked with the candidate before the managed binary is replaced.
+pub fn apply_sing_box(
+    store: &DeploymentStore,
+    manifest: &ReleaseManifest,
+    candidate: &Path,
+) -> Result<PathBuf, UpdateError> {
+    verify_sing_box_artifact(manifest, candidate)?;
+    let _lock = store.acquire_operation_lock()?;
+    let server_config = fs::read_to_string(
+        store
+            .root()
+            .join("var/lib/sbctl/artifacts/sing-box-server.json"),
+    )
+    .map_err(ConfigError::Storage)?;
+    crate::subscription::check_sing_box_config(candidate, &server_config)
+        .map_err(|error| UpdateError::SingBoxCheck(error.to_string()))?;
+
+    let rollback = rollback_directory(store.root());
+    let old_path = store.root().join("usr/local/bin/sing-box");
+    let old_contents = fs::read(&old_path).ok();
+    if let Some(contents) = &old_contents {
+        store.write_relative_locked(
+            &format!(
+                "var/lib/sbctl/rollback/{}/usr/local/bin/sing-box",
+                rollback
+                    .file_name()
+                    .ok_or_else(|| UpdateError::Rollback("invalid rollback path".to_owned()))?
+                    .to_string_lossy()
+            ),
+            contents,
+        )?;
+    }
+    store.write_relative_locked("usr/local/bin/sing-box", &fs::read(candidate)?)?;
+    if let Err(error) = crate::lifecycle::restart_sing_box_service(store.root()) {
+        if old_contents.is_some() {
+            let backup = rollback.join("usr/local/bin/sing-box");
+            store.write_relative_locked("usr/local/bin/sing-box", &fs::read(backup)?)?;
+        } else {
+            let _ = fs::remove_file(&old_path);
+        }
+        let _ = crate::lifecycle::restart_sing_box_service(store.root());
+        return Err(UpdateError::ServiceHealth(error));
+    }
+    Ok(rollback)
 }
 
 pub fn apply(

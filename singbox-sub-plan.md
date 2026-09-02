@@ -2,9 +2,9 @@
 
 对这个项目，最合适的是：
 
-> **核心功能做成 C++ 单二进制，安装/升级/卸载保留少量 Shell 脚本。**
+> **核心功能做成 Rust 单二进制，安装/升级/卸载保留少量 Shell 脚本。**
 
-这样既能获得低内存、低运行时开销，又不会把 Linux 系统管理这种本来就适合 Shell 的工作硬塞进 C++。
+这样既能获得低内存、低运行时开销，又不会把 Linux 系统管理这种本来就适合 Shell 的工作硬塞进 Rust。
 
 现有 `sing-box-yg` 已经覆盖了 VLESS Reality、VMess WS、Hysteria2、TUIC、AnyTLS 等节点生成，并支持本地 IP 订阅；它的 README 也明确强调订阅节点本地生成，不依赖第三方订阅转换服务。 而你的 `vps-sub-meter` 当前主要在此基础上补充流量统计、订阅 HTTP 服务、`subscription-userinfo`、鉴权和 HTTPS。
 
@@ -155,7 +155,7 @@ wget
 配置文件
 ```
 
-这只是给 Shell 脚本套了一层 C++ 外壳。
+这只是给 Shell 脚本套了一层 Rust 外壳。
 
 维护时依旧会遇到：
 
@@ -182,59 +182,78 @@ wget
 
 ---
 
-# 四、核心 C++ 项目结构
+# 四、核心 Rust 项目结构
 
-我建议 C++20：
+我建议使用 stable Rust（edition 2024）：
+
+```text
+Tokio（单线程 async runtime）
+Axum（基于 Hyper 的 HTTP 路由与服务）
+Rustls（TLS）
+Serde + toml + serde_json（配置、状态与 sing-box JSON）
+Clap（CLI）
+Reqwest（经校验的下载）
+Tracing（结构化日志与 token 脱敏）
+```
+
+Certbot 由 Debian/Ubuntu 系统包提供，只在证书签发和续期时运行，不作为 sbctl 的常驻依赖。
 
 ```text
 sbctl/
-├── CMakeLists.txt
+├── Cargo.toml
 │
 ├── src/
-│   ├── main.cpp
+│   ├── main.rs
 │   │
 │   ├── cli/
-│   │   ├── cli.cpp
-│   │   └── commands.cpp
+│   │   ├── mod.rs
+│   │   └── commands.rs
 │   │
 │   ├── core/
-│   │   ├── config.cpp
-│   │   ├── state.cpp
-│   │   └── filesystem.cpp
+│   │   ├── mod.rs
+│   │   ├── config.rs
+│   │   ├── state.rs
+│   │   └── filesystem.rs
 │   │
 │   ├── singbox/
-│   │   ├── installer.cpp
-│   │   ├── config_generator.cpp
-│   │   ├── service.cpp
-│   │   └── version.cpp
+│   │   ├── mod.rs
+│   │   ├── installer.rs
+│   │   ├── config_generator.rs
+│   │   ├── service.rs
+│   │   └── version.rs
 │   │
 │   ├── node/
-│   │   ├── node.cpp
-│   │   ├── vless.cpp
-│   │   ├── hysteria2.cpp
-│   │   ├── tuic.cpp
-│   │   ├── anytls.cpp
-│   │   └── vmess.cpp
+│   │   ├── mod.rs
+│   │   ├── node.rs
+│   │   ├── vless.rs
+│   │   ├── hysteria2.rs
+│   │   ├── tuic.rs
+│   │   ├── anytls.rs
+│   │   └── vmess.rs
 │   │
 │   ├── subscription/
-│   │   ├── subscription.cpp
-│   │   ├── singbox_json.cpp
-│   │   ├── clash_yaml.cpp
-│   │   └── uri.cpp
+│   │   ├── mod.rs
+│   │   ├── subscription.rs
+│   │   ├── singbox_json.rs
+│   │   ├── clash_yaml.rs
+│   │   └── uri.rs
 │   │
 │   ├── traffic/
-│   │   ├── traffic.cpp
-│   │   └── sysfs.cpp
+│   │   ├── mod.rs
+│   │   ├── traffic.rs
+│   │   └── sysfs.rs
 │   │
 │   ├── http/
-│   │   ├── server.cpp
-│   │   ├── router.cpp
-│   │   └── auth.cpp
+│   │   ├── mod.rs
+│   │   ├── server.rs
+│   │   ├── router.rs
+│   │   └── auth.rs
 │   │
 │   └── crypto/
-│       ├── uuid.cpp
-│       ├── random.cpp
-│       └── reality.cpp
+│       ├── mod.rs
+│       ├── uuid.rs
+│       ├── random.rs
+│       └── reality.rs
 │
 ├── scripts/
 │   ├── install.sh
@@ -249,7 +268,7 @@ sbctl/
 
 # 五、核心功能 1：安装并运行 sing-box
 
-这部分 C++ 可以完成大多数工作。
+这部分 Rust 可以完成大多数工作。
 
 安装过程：
 
@@ -282,7 +301,7 @@ sing-box check
 也就是说：
 
 ```text
-你的程序 = control plane
+你的程序 = Rust control plane
 sing-box   = data plane
 ```
 
@@ -364,37 +383,32 @@ Clash 配置
 
 应该先生成一个：
 
-```cpp
+```rust
 struct Node {
-    Protocol protocol;
-
-    std::string name;
-    std::string server;
-
-    uint16_t port;
-
-    std::string uuid;
-
-    TLSConfig tls;
-};
+    protocol: Protocol,
+    name: String,
+    server: String,
+    port: u16,
+    credential: ProxyCredential,
+    tls: TlsConfig,
+}
 ```
 
 比如 VLESS：
 
-```cpp
+```rust
 struct RealityConfig {
-    std::string server_name;
-    std::string private_key;
-    std::string public_key;
-    std::string short_id;
-};
+    decoy_sni: String,
+    private_key: SecretString,
+    public_key: String,
+    short_id: String,
+}
 
 struct VlessConfig {
-    std::string uuid;
-    std::string flow;
-
-    RealityConfig reality;
-};
+    uuid: Uuid,
+    flow: String,
+    reality: RealityConfig,
+}
 ```
 
 然后：
@@ -465,7 +479,7 @@ vless://....
 
 **第一版完全不要为了二维码再引入 Python pip。**
 
-以后需要时可以链接一个小 QR Code C/C++ 库。
+以后需要时可以引入一个小型 Rust QR Code crate。
 
 ---
 
@@ -520,21 +534,19 @@ Clash/Mihomo YAML
 
 应该：
 
-```cpp
+```rust
 struct TrafficInfo {
-    uint64_t upload;
-    uint64_t download;
-    uint64_t total;
-    std::optional<std::time_t> expire;
-};
+    upload: u64,
+    download: u64,
+    total: u64,
+    expire: Option<SystemTime>,
+}
 ```
 
 然后：
 
-```cpp
-std::string make_subscription_userinfo(
-    const TrafficInfo& info
-);
+```rust
+fn make_subscription_userinfo(info: &TrafficInfo) -> String;
 ```
 
 例如：
@@ -573,11 +585,11 @@ subscription HTTP header
 
 例如：
 
-```cpp
+```rust
 struct Counters {
-    uint64_t rx;
-    uint64_t tx;
-};
+    rx: u64,
+    tx: u64,
+}
 ```
 
 读取成本非常小。
@@ -637,16 +649,14 @@ current - baseline
 
 状态应该设计成：
 
-```cpp
+```rust
 struct TrafficState {
-    uint64_t accumulated_rx;
-    uint64_t accumulated_tx;
-
-    uint64_t last_rx;
-    uint64_t last_tx;
-
-    std::string boot_id;
-};
+    accumulated_rx: u64,
+    accumulated_tx: u64,
+    last_rx: u64,
+    last_tx: u64,
+    boot_id: String,
+}
 ```
 
 Linux：
@@ -797,12 +807,12 @@ sing-box
 +
 Caddy
 +
-C++ daemon
+Rust daemon
 ```
 
 已经足够轻。
 
-以后 V2 再考虑直接 `rustls`……当然你这里是 C++，可以用 OpenSSL/Boost.Asio SSL，但 ACME 仍然需要处理。
+Rust 版由 `rustls` 直接终止 TLS；ACME 仍由发行版提供的 Certbot 负责申请与续期，不在 sbctl 中重写协议。
 
 ---
 
@@ -892,7 +902,7 @@ curl -fsSL https://example.com/install.sh | bash
 Shell
 只负责 bootstrap
 
-C++
+Rust
 负责真正的软件逻辑
 ```
 
@@ -900,7 +910,7 @@ C++
 
 ---
 
-# 十八、不要把 apt 管理全部写进 C++
+# 十八、不要把 apt 管理全部写进 Rust
 
 例如这种东西：
 
@@ -929,7 +939,7 @@ scripts/
 └── install-alpine.sh
 ```
 
-而 C++ 本身完全发行版无关。
+而 Rust 二进制本身尽量保持发行版无关。
 
 这还有一个额外好处：
 
@@ -1072,7 +1082,7 @@ Reset             2026-10-01
 也不要做：
 
 ```text
-一个什么系统操作都自己实现的巨大 C++ binary
+一个什么系统操作都自己实现的巨大 Rust binary
 ```
 
 而是做：
@@ -1082,7 +1092,7 @@ Reset             2026-10-01
 
         ┌──────────┴──────────┐
         │                     │
-     C++20 sbctl          Shell bootstrap
+     Rust sbctl           Shell bootstrap
         │                     │
         │                install.sh
         │                uninstall.sh
@@ -1097,8 +1107,8 @@ Reset             2026-10-01
 sing-box
 ```
 
-**运行时核心全部 C++；Shell 只负责安装环境。**
+**运行时核心全部 Rust；Shell 只负责安装环境。**
 
-这样既符合你“高性能、低内存”的目标，又不会为了追求“100% C++”把系统维护搞复杂。
+这样既符合你“高性能、低内存”的目标，又不会为了追求“100% Rust”把系统维护搞复杂。
 
 而且如果这是你准备长期维护的项目，我建议第一阶段就只做 **Debian + VLESS Reality + Hysteria2 + sing-box JSON 订阅 + `subscription-userinfo`**。等这一条链路完全稳定之后，再逐个加入 TUIC、AnyTLS、Mihomo 和 Alpine。这样项目很容易做成，而不是一开始就复制 `sing-box-yg` 已经积累多年的全部复杂度。

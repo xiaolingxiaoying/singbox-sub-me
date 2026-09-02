@@ -1,0 +1,69 @@
+# sbctl
+
+sbctl is a single-administrator tool for operating sing-box and providing a private subscription from one VPS.
+
+## Language
+
+**Subscription credential**:
+A high-entropy secret embedded in the sole administrator's subscription URL. It authorizes retrieval of that administrator's generated subscription; it is not a user account.
+_Avoid_: User token, API key, account
+
+**VPS traffic**:
+The total inbound and outbound network bytes measured for the VPS during a monthly accounting period. It is not traffic attributable to a protocol, node, or individual user.
+_Avoid_: Per-user traffic, proxy traffic
+
+**Monthly traffic limit**:
+The administrator-configured VPS traffic allowance for one monthly accounting period. In the first release it is reported in subscription metadata and status, rather than enforcing a connection cutoff.
+_Avoid_: Per-user quota, bandwidth limit
+
+**Accounting period**:
+The monthly interval over which VPS traffic is accumulated and compared with the monthly traffic limit.
+_Avoid_: Billing cycle
+
+**Natural-month reset**:
+An accounting-period policy that begins a new period on the first day of every calendar month at 00:00 in the selected accounting timezone.
+_Avoid_: Rolling month, anchored reset
+
+**Anchored-month reset**:
+An accounting-period policy that begins a new period at the configured day and time every month in the selected accounting timezone. If that day does not exist in a short month, the reset occurs on that month's last day.
+_Avoid_: Natural-month reset, rolling month
+
+**System-timezone accounting**:
+An accounting-period policy that interprets reset times using the VPS's configured operating-system timezone. The administrator may choose a common named timezone during setup without changing the host timezone.
+_Avoid_: UTC-only accounting, browser-local time
+
+**Subscription format**:
+One of the generated client-consumable representations of the same node set: sing-box JSON, Clash/Mihomo YAML, or URI text for Shadowrocket-compatible clients.
+_Avoid_: Subscription protocol, node configuration
+
+**Managed protocol**:
+A proxy protocol whose server configuration, share representation, and subscription representation are owned by sbctl. The first release manages VLESS Reality, VMess WebSocket, Hysteria2, TUIC v5, and AnyTLS.
+_Avoid_: Node type, transport
+
+**Enabled protocol**:
+A managed protocol selected for a particular VPS deployment. Each enabled protocol receives its own generated server configuration and listener port.
+_Avoid_: Installed protocol, default node
+
+**Direct subscription mode**:
+A deployment mode in which sbctl owns public TCP ports 80 and 443 to serve the subscription endpoint and complete ACME validation. It is the default deployment mode.
+_Avoid_: Embedded proxy mode, shared-port mode
+
+**IP fallback subscription**:
+An explicitly lower-security HTTP subscription URL served from the VPS public IP on a configured high port when no usable domain is available. It does not occupy TCP ports 80 or 443.
+_Avoid_: IP HTTPS, domain subscription
+
+**Proxy credential**:
+A randomly generated protocol-specific secret that authenticates one generated proxy node. It is independent for every enabled protocol and is never used to authorize subscription retrieval.
+_Avoid_: Subscription token, shared UUID
+
+**Proxy host**:
+The public IP address or hostname that a generated proxy client connects to. It defaults to the subscription host but may be configured separately.
+_Avoid_: Reality SNI, subscription host
+
+**Reality decoy SNI**:
+The externally plausible server name used by VLESS Reality's camouflage handshake. It is neither the subscription host nor necessarily the proxy host.
+_Avoid_: Proxy hostname, certificate hostname
+
+**Existing deployment**:
+Any sing-box binary, service, or configuration discovered before sbctl is installed. sbctl never silently replaces or adopts an existing deployment.
+_Avoid_: Managed deployment, migration

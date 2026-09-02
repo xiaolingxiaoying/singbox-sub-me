@@ -1259,6 +1259,20 @@ fn help_lists_the_safe_install_and_status_commands() {
 }
 
 #[test]
+fn help_lists_independent_sing_box_lifecycle_commands() {
+    Command::cargo_bin("sbctl")
+        .expect("binary exists")
+        .arg("sing-box")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("download"))
+        .stdout(predicate::str::contains("install"))
+        .stdout(predicate::str::contains("update"))
+        .stdout(predicate::str::contains("remove"));
+}
+
+#[test]
 fn install_reports_a_supported_systemd_fixture_as_ready() {
     let fixture = supported_systemd_host();
 

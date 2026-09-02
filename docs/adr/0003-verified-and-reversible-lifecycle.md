@@ -1,0 +1,3 @@
+# Verified updates and reversible removal
+
+sbctl uses the Debian or Ubuntu Certbot package for its non-resident ACME lifecycle, performs no background software upgrades, and updates only after an explicit administrator command has verified artifacts, backed up state, validated configuration, and retained a rollback point. Uninstall stops and removes sbctl services and binaries but preserves a root-readable backup by default; `--purge` is required to delete only files owned by sbctl. This favors predictable recovery and distribution-maintained certificate tooling over the upstream scripts' remote updates, cron jobs, and broad cleanup.
