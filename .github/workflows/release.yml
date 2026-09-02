@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      sing_box_version:
+        description: Official sing-box version to bundle, without the v prefix
+        required: true
+        type: string
+      tag:
+        description: Existing or new release tag
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-sbctl:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - run: cp target/${{ matrix.target }}/release/sbctl sbctl-linux-${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbctl-${{ matrix.arch }}
+          path: sbctl-linux-${{ matrix.arch }}
+
+  package:
+    needs: build-sbctl
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sbctl-*
+          merge-multiple: true
+      - name: Download and verify official sing-box archives
+        env:
+          SING_BOX_VERSION: ${{ inputs.sing_box_version || '1.12.0' }}
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            archive="sing-box-${SING_BOX_VERSION}-linux-${arch}.tar.gz"
+            url="https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/${archive}"
+            curl --fail --location --silent --show-error "$url" --output "$archive"
+            mkdir -p "extract-${arch}"
+            tar -xzf "$archive" -C "extract-${arch}"
+            install -m 0755 "extract-${arch}/sing-box-${SING_BOX_VERSION}-linux-${arch}/sing-box" "sing-box-linux-${arch}"
+            rm -rf "extract-${arch}" "$archive"
+          done
+      - name: Create GitHub release and upload binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --title "$RELEASE_TAG" --generate-notes
+          gh release upload "$RELEASE_TAG" \
+            sbctl-linux-amd64 sbctl-linux-arm64 sing-box-linux-amd64 sing-box-linux-arm64 \
+            --repo "$GITHUB_REPOSITORY" --clobber
+      - name: Generate and upload architecture manifests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          SING_BOX_VERSION: ${{ inputs.sing_box_version || '1.12.0' }}
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            scripts/generate-manifest.sh \
+              "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$SING_BOX_VERSION" "$arch" \
+              "sbctl-linux-$arch" "sing-box-linux-$arch" "manifest-$arch.json"
+          done
+          gh release upload "$RELEASE_TAG" manifest-amd64.json manifest-arm64.json --repo "$GITHUB_REPOSITORY" --clobber

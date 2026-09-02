@@ -19,7 +19,12 @@ esac
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl jq
 
-manifest_url=${SBCTL_MANIFEST_URL:?请设置 SBCTL_MANIFEST_URL}
+manifest_url_template=${SBCTL_MANIFEST_URL:?请设置 SBCTL_MANIFEST_URL}
+case "$(dpkg --print-architecture)" in
+  amd64|arm64) arch=$(dpkg --print-architecture) ;;
+  *) echo "仅支持 amd64 和 arm64" >&2; exit 2 ;;
+esac
+manifest_url=${manifest_url_template//\{arch\}/$arch}
 work_dir=$(mktemp -d)
 trap 'rm -rf "$work_dir"' EXIT
 
