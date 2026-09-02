@@ -360,7 +360,7 @@ fn ensure_subscription_nodes(config: &DeploymentConfig) -> Result<(), Subscripti
 
 pub fn ensure_external_proxy_listener_available(port: u16) -> Result<(), SubscriptionError> {
     std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
-        .map(|listener| drop(listener))
+        .map(drop)
         .map_err(|_| SubscriptionError::ListenerUnavailable(port))
 }
 

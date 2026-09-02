@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -13,12 +14,38 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Check whether this host is safe for a new sbctl deployment.
-    Install,
+    /// Interactively install a fresh sbctl deployment.
+    Install {
+        #[arg(long, value_enum, default_value_t = CliSubscriptionMode::Direct)]
+        mode: CliSubscriptionMode,
+        #[arg(long)]
+        subscription_host: Option<String>,
+        #[arg(long)]
+        proxy_host: Option<String>,
+        #[arg(long)]
+        interface: Option<String>,
+        #[arg(long)]
+        reality_decoy_sni: Option<String>,
+        /// Explicitly omit a Managed protocol; all five are enabled by default.
+        #[arg(long, value_enum)]
+        disable_protocol: Vec<CliManagedProtocol>,
+        #[arg(long, value_name = "PATH")]
+        sing_box_bin: Option<PathBuf>,
+        /// Create units and configuration without starting services (acceptance fixture use).
+        #[arg(long, hide = true)]
+        no_start: bool,
+    },
     /// Show whether sbctl currently manages a deployment.
     Status,
     /// Reconcile and show VPS traffic for the current accounting period.
     Traffic,
+    /// List the generated Managed protocol listeners without exposing credentials.
+    Node,
+    /// Validate the active sing-box configuration and restart both managed services.
+    Restart {
+        #[arg(long, value_name = "PATH")]
+        sing_box_bin: Option<PathBuf>,
+    },
     /// Retrieve a generated subscription representation using its path credential.
     Sub {
         #[arg(long, value_enum)]
@@ -43,6 +70,17 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+}
+
+struct InstallOptions {
+    mode: CliSubscriptionMode,
+    subscription_host: Option<String>,
+    proxy_host: Option<String>,
+    interface: Option<String>,
+    reality_decoy_sni: Option<String>,
+    disable_protocol: Vec<CliManagedProtocol>,
+    sing_box_bin: Option<PathBuf>,
+    no_start: bool,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -181,22 +219,245 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let root = cli.root.as_deref().unwrap_or_else(|| Path::new("/"));
     match cli.command {
-        Command::Install => match sbctl::preflight::preflight(root) {
+        Command::Install {
+            mode,
+            subscription_host,
+            proxy_host,
+            interface,
+            reality_decoy_sni,
+            disable_protocol,
+            sing_box_bin,
+            no_start,
+        } => install(
+            root,
+            InstallOptions {
+                mode,
+                subscription_host,
+                proxy_host,
+                interface,
+                reality_decoy_sni,
+                disable_protocol,
+                sing_box_bin,
+                no_start,
+            },
+        ),
+        Command::Status => print_status(root),
+        Command::Traffic => print_traffic(root),
+        Command::Node => print_nodes(root),
+        Command::Restart { sing_box_bin } => restart(root, sing_box_bin),
+        Command::Sub { format } => print_subscription_urls(root, format.map(Into::into)),
+        Command::Serve { bind, max_requests } => serve_subscription(root, bind, max_requests),
+        Command::Certificate { command } => run_certificate(root, command),
+        Command::Config { command } => run_config(root, command),
+    }
+}
+
+fn install(root: &Path, options: InstallOptions) -> ExitCode {
+    if options.subscription_host.is_none()
+        && options.interface.is_none()
+        && options.reality_decoy_sni.is_none()
+        && options.sing_box_bin.is_none()
+        && !io::stdin().is_terminal()
+    {
+        return match sbctl::preflight::preflight(root) {
             Ok(()) => {
-                println!("install preflight passed: host is ready for a new sbctl deployment");
+                println!("install preflight passed: host is ready for interactive installation");
                 ExitCode::SUCCESS
             }
             Err(error) => {
                 eprintln!("install preflight failed: {error}");
                 ExitCode::from(2)
             }
-        },
-        Command::Status => print_status(root),
-        Command::Traffic => print_traffic(root),
-        Command::Sub { format } => print_subscription_urls(root, format.map(Into::into)),
-        Command::Serve { bind, max_requests } => serve_subscription(root, bind, max_requests),
-        Command::Certificate { command } => run_certificate(root, command),
-        Command::Config { command } => run_config(root, command),
+        };
+    }
+    let mut installation_started = false;
+    let result = (|| {
+        sbctl::preflight::preflight(root)
+            .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+        let subscription_host =
+            required_install_value(options.subscription_host, "Subscription host")?;
+        let interface = options.interface.map(Ok).unwrap_or_else(|| {
+            sbctl::traffic::detect_default_route_interface(root).map_err(|_| {
+                sbctl::config::ConfigError::InvalidValue(
+                    "could not detect a default-route interface; specify --interface",
+                )
+            })
+        })?;
+        let protocols = select_protocols(&options.disable_protocol)?;
+        let needs_reality_sni = protocols.contains(&sbctl::config::ManagedProtocol::VlessReality);
+        let reality_decoy_sni = if needs_reality_sni {
+            Some(required_install_value(
+                options.reality_decoy_sni,
+                "Reality decoy SNI",
+            )?)
+        } else {
+            None
+        };
+        let config = sbctl::config::DeploymentConfig::new(
+            options.mode.into(),
+            subscription_host,
+            options.proxy_host,
+            None,
+            interface,
+            protocols,
+            reality_decoy_sni,
+        )?;
+        config.validate()?;
+        let sing_box_bin = options
+            .sing_box_bin
+            .ok_or(sbctl::config::ConfigError::InvalidValue(
+                "installation requires --sing-box-bin after verified sing-box retrieval",
+            ))?;
+        let artifacts = sbctl::subscription::generated_artifacts(&config)
+            .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+        let server = artifacts
+            .iter()
+            .find(|(name, _)| *name == "sing-box-server.json")
+            .map(|(_, contents)| contents)
+            .expect("generated server config");
+        sbctl::subscription::check_sing_box_config(&sing_box_bin, server)
+            .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+        installation_started = true;
+        sbctl::lifecycle::install_checked_sing_box(root, &sing_box_bin)?;
+        let references = artifacts
+            .iter()
+            .map(|(name, contents)| (*name, contents.as_bytes()))
+            .collect::<Vec<_>>();
+        let store = sbctl::config::DeploymentStore::new(root);
+        store.initialize_with_artifacts(&config, &references)?;
+        sbctl::lifecycle::install_units(&store, server)?;
+        if !options.no_start {
+            sbctl::lifecycle::start_services(root)
+                .map_err(sbctl::config::ConfigError::StateContent)?;
+        }
+        Ok::<_, sbctl::config::ConfigError>(config)
+    })();
+    match result {
+        Ok(config) => {
+            println!(
+                "installation completed\nenabled protocols: {}\nrequired firewall ports (not changed):\n{}",
+                config
+                    .enabled_protocols
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                sbctl::lifecycle::required_firewall_ports(&config).join("\n")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            if installation_started {
+                sbctl::lifecycle::rollback_fresh_installation(root);
+            }
+            eprintln!("installation failed: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn select_protocols(
+    disabled: &[CliManagedProtocol],
+) -> Result<Vec<sbctl::config::ManagedProtocol>, sbctl::config::ConfigError> {
+    let defaults = [
+        CliManagedProtocol::VlessReality,
+        CliManagedProtocol::VmessWebsocket,
+        CliManagedProtocol::Hysteria2,
+        CliManagedProtocol::Tuic,
+        CliManagedProtocol::Anytls,
+    ];
+    let mut selected = Vec::new();
+    for protocol in defaults {
+        let disabled_by_flag = disabled
+            .iter()
+            .any(|disabled| std::mem::discriminant(disabled) == std::mem::discriminant(&protocol));
+        if !disabled_by_flag && (!io::stdin().is_terminal() || confirm_protocol(&protocol)?) {
+            selected.push(protocol.into());
+        }
+    }
+    Ok(selected)
+}
+
+fn confirm_protocol(protocol: &CliManagedProtocol) -> Result<bool, sbctl::config::ConfigError> {
+    let name = match protocol {
+        CliManagedProtocol::VlessReality => "vless-reality",
+        CliManagedProtocol::VmessWebsocket => "vmess-websocket",
+        CliManagedProtocol::Hysteria2 => "hysteria2",
+        CliManagedProtocol::Tuic => "tuic",
+        CliManagedProtocol::Anytls => "anytls",
+    };
+    print!("Enable {name} [Y/n]: ");
+    io::stdout()
+        .flush()
+        .map_err(sbctl::config::ConfigError::Storage)?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(sbctl::config::ConfigError::Storage)?;
+    Ok(!matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "n" | "no"
+    ))
+}
+
+fn required_install_value(
+    value: Option<String>,
+    label: &str,
+) -> Result<String, sbctl::config::ConfigError> {
+    if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+        return Ok(value);
+    }
+    print!("{label}: ");
+    io::stdout()
+        .flush()
+        .map_err(sbctl::config::ConfigError::Storage)?;
+    let mut value = String::new();
+    io::stdin()
+        .read_line(&mut value)
+        .map_err(sbctl::config::ConfigError::Storage)?;
+    let value = value.trim().to_owned();
+    (!value.is_empty())
+        .then_some(value)
+        .ok_or(sbctl::config::ConfigError::InvalidValue(
+            "interactive installation requires a value",
+        ))
+}
+
+fn print_nodes(root: &Path) -> ExitCode {
+    match sbctl::config::DeploymentStore::new(root).load() {
+        Ok(config) => {
+            println!("{}", sbctl::lifecycle::enabled_nodes(&config));
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("node failed: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn restart(root: &Path, sing_box_bin: Option<PathBuf>) -> ExitCode {
+    let store = sbctl::config::DeploymentStore::new(root);
+    let result = store.load().and_then(|config| {
+        let binary = sing_box_bin.unwrap_or_else(|| root.join("usr/local/bin/sing-box"));
+        let server =
+            std::fs::read_to_string(root.join("var/lib/sbctl/artifacts/sing-box-server.json"))
+                .map_err(sbctl::config::ConfigError::Storage)?;
+        sbctl::subscription::check_sing_box_config(&binary, &server)
+            .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+        sbctl::lifecycle::restart_services(root)
+            .map_err(sbctl::config::ConfigError::StateContent)?;
+        Ok(config)
+    });
+    match result {
+        Ok(_) => {
+            println!("sing-box and sbctl services restarted");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("restart failed: {error}");
+            ExitCode::from(2)
+        }
     }
 }
 
@@ -309,6 +570,7 @@ fn print_status(root: &Path) -> ExitCode {
     match sbctl::config::DeploymentStore::new(root).load() {
         Ok(config) => {
             println!("{}", config.summary());
+            println!("\n{}", sbctl::lifecycle::service_status(root));
             match sbctl::traffic::reconcile(&sbctl::config::DeploymentStore::new(root), &config) {
                 Ok(report) => println!("\n{}", report.summary()),
                 Err(error) => println!("\nVPS traffic: unavailable ({error})"),

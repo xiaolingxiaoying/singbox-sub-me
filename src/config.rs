@@ -707,6 +707,12 @@ impl DeploymentStore {
         self.write_artifact_unlocked(name, contents)
     }
 
+    /// Replaces the configuration consumed by the sing-box systemd unit.
+    /// Callers validate this exact content before invoking this operation.
+    pub fn write_active_sing_box_config(&self, contents: &[u8]) -> Result<(), ConfigError> {
+        self.atomic_write_managed(&self.root.join("etc/sing-box/config.json"), contents)
+    }
+
     fn write_artifact_unlocked(&self, name: &str, contents: &[u8]) -> Result<(), ConfigError> {
         if name.is_empty() || Path::new(name).components().count() != 1 {
             return Err(ConfigError::InvalidValue(

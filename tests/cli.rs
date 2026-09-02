@@ -1010,6 +1010,82 @@ fn install_reports_a_supported_systemd_fixture_as_ready() {
 }
 
 #[test]
+fn install_defaults_to_all_managed_protocols_writes_services_and_only_lists_firewall_ports() {
+    let fixture = supported_systemd_host();
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    let checker = sing_box_check_fixture(
+        &fixture,
+        true,
+        &["vless", "vmess", "hysteria2", "tuic", "anytls"],
+    );
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "install",
+            "--subscription-host",
+            "sub.example.test",
+            "--interface",
+            "ens3",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+            "--sing-box-bin",
+            checker.to_str().expect("checker path is UTF-8"),
+            "--no-start",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "enabled protocols: vless-reality, vmess-websocket, hysteria2, tuic, anytls",
+        ))
+        .stdout(predicate::str::contains(
+            "required firewall ports (not changed):",
+        ));
+
+    let config = fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
+        .expect("installation persists configuration");
+    for protocol in [
+        "vless-reality",
+        "vmess-websocket",
+        "hysteria2",
+        "tuic",
+        "anytls",
+    ] {
+        assert!(
+            config.contains(protocol),
+            "{protocol} is enabled by default"
+        );
+    }
+    let sing_box_unit =
+        fs::read_to_string(fixture.path().join("etc/systemd/system/sing-box.service"))
+            .expect("sing-box unit is installed");
+    let sbctl_unit = fs::read_to_string(fixture.path().join("etc/systemd/system/sbctl.service"))
+        .expect("sbctl unit is installed");
+    assert!(
+        sing_box_unit
+            .contains("ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json")
+    );
+    assert!(sbctl_unit.contains("User=sbctl"));
+    assert!(fixture.path().join("etc/sing-box/config.json").is_file());
+    assert!(!fixture.path().join("etc/ufw/user.rules").exists());
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "node",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("vless-reality: TCP"))
+        .stdout(predicate::str::contains("hysteria2: UDP"))
+        .stdout(predicate::str::contains("tuic: UDP"));
+}
+
+#[test]
 fn install_rejects_an_existing_deployment_without_changing_its_configuration() {
     let fixture = supported_systemd_host();
     let configuration = fixture.path().join("etc/sing-box/config.json");
