@@ -7,3 +7,4 @@ pub mod runtime;
 pub mod subscription;
 pub mod traffic;
 pub mod update;
+pub mod wizard;

@@ -106,6 +106,11 @@ enum Command {
         #[arg(long, value_enum)]
         format: Option<CliSubscriptionFormat>,
     },
+    /// Rotate the Subscription credential so previous subscription URLs stop working.
+    Credential {
+        #[command(subcommand)]
+        command: CredentialCommand,
+    },
     /// Run the subscription service.
     Serve {
         /// Socket address; defaults to the configured public IP and HTTP port.
@@ -215,6 +220,18 @@ enum ConfigCommand {
     Show,
     /// Parse and validate the persisted deployment configuration.
     Validate,
+    /// Open the interactive configuration wizard for a new or existing deployment.
+    Wizard {
+        /// sing-box binary used to validate regenerated protocol configuration.
+        #[arg(long, value_name = "PATH")]
+        sing_box_bin: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CredentialCommand {
+    /// Generate a fresh Subscription credential; the previous URLs stop working immediately.
+    Rotate,
 }
 
 #[derive(Debug, Subcommand)]
@@ -418,6 +435,7 @@ fn main() -> ExitCode {
         ),
         Command::SingBox { command } => sing_box(root, command),
         Command::Sub { format } => print_subscription_urls(root, format.map(Into::into)),
+        Command::Credential { command } => run_credential(root, command),
         Command::Serve { bind, max_requests } => serve_subscription(root, bind, max_requests),
         Command::Certificate { command } => run_certificate(root, command),
         Command::Config { command } => run_config(root, command),
@@ -675,7 +693,7 @@ fn menu(root: &Path) -> ExitCode {
 
     loop {
         println!(
-            "\nsbctl 管理菜单\n1) 查看部署状态\n2) 查看 VPS 流量\n3) 查看节点端口\n4) 显示订阅地址\n5) 校验配置并重启服务\n6) 卸载 sbctl（保留备份和配置）\n0) 退出"
+            "\nsbctl 管理菜单\n1) 查看部署状态\n2) 查看 VPS 流量\n3) 查看节点端口\n4) 显示订阅地址\n5) 校验配置并重启服务\n6) 修改部署配置（向导）\n7) 轮换 Subscription credential\n8) 卸载 sbctl（保留备份和配置）\n0) 退出"
         );
         print!("请选择 [0]: ");
         if let Err(error) = io::stdout().flush() {
@@ -708,12 +726,20 @@ fn menu(root: &Path) -> ExitCode {
                 }
             }
             "6" => {
+                run_config_wizard(root, None);
+            }
+            "7" => {
+                if confirm_menu_action("确认轮换 Subscription credential（旧订阅 URL 将立即失效）") {
+                    rotate_subscription_credential(root);
+                }
+            }
+            "8" => {
                 if confirm_menu_action("确认卸载 sbctl 服务和二进制（保留备份和配置）")
                 {
                     return uninstall(root, false);
                 }
             }
-            _ => eprintln!("无效选择，请输入 0 到 6。"),
+            _ => eprintln!("无效选择，请输入 0 到 8。"),
         }
     }
 }
@@ -1128,6 +1154,7 @@ fn regenerate(root: &Path, sing_box_bin: Option<PathBuf>) -> ExitCode {
 fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
     let store = sbctl::config::DeploymentStore::new(root);
     let result = match command {
+        ConfigCommand::Wizard { sing_box_bin } => return run_config_wizard(root, sing_box_bin),
         ConfigCommand::Init {
             mode,
             subscription_host,
@@ -1250,6 +1277,234 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
         }
         Err(error) => {
             eprintln!("configuration failed: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+struct ConsolePrompts;
+
+impl sbctl::wizard::Prompts for ConsolePrompts {
+    fn ask(&mut self, label: &str, default: Option<&str>) -> io::Result<String> {
+        print!("{label}");
+        if let Some(default) = default {
+            print!(" [{}]", default);
+        }
+        print!(": ");
+        io::stdout().flush()?;
+        let mut answer = String::new();
+        let read = io::stdin().read_line(&mut answer)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "wizard input ended before the prompt was answered",
+            ));
+        }
+        Ok(answer.trim().to_owned())
+    }
+
+    fn report(&mut self, message: &str) {
+        println!("{message}");
+    }
+
+    fn confirm(&mut self, question: &str, default: bool) -> io::Result<bool> {
+        loop {
+            print!("{question} [{}]: ", if default { "Y/n" } else { "y/N" });
+            io::stdout().flush()?;
+            let mut answer = String::new();
+            let read = io::stdin().read_line(&mut answer)?;
+            if read == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "wizard input ended before the confirmation was answered",
+                ));
+            }
+            match answer.trim().to_ascii_lowercase().as_str() {
+                "" => return Ok(default),
+                "y" | "yes" => return Ok(true),
+                "n" | "no" => return Ok(false),
+                _ => eprintln!("请输入 y 或 n"),
+            }
+        }
+    }
+}
+
+fn run_config_wizard(root: &Path, sing_box_bin: Option<PathBuf>) -> ExitCode {
+    let store = sbctl::config::DeploymentStore::new(root);
+    let existing = match store.load() {
+        Ok(config) => Some(config),
+        Err(sbctl::config::ConfigError::Missing) => None,
+        Err(error) => {
+            eprintln!("configuration wizard failed: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let default_interface = if existing.is_none() {
+        sbctl::traffic::detect_default_route_interface(root).ok()
+    } else {
+        None
+    };
+    let mut prompts = ConsolePrompts;
+    let outcome = match sbctl::wizard::run(existing.as_ref(), default_interface, &mut prompts) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            eprintln!("configuration wizard failed: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    match outcome {
+        sbctl::wizard::WizardOutcome::Cancelled => {
+            println!("configuration wizard cancelled; the existing deployment is unchanged");
+            ExitCode::SUCCESS
+        }
+        sbctl::wizard::WizardOutcome::Unchanged => {
+            println!("deployment configuration is unchanged");
+            ExitCode::SUCCESS
+        }
+        sbctl::wizard::WizardOutcome::Changed(config) => {
+            commit_config_change(root, &store, &config, sing_box_bin)
+        }
+    }
+}
+
+/// Commits a confirmed wizard configuration through the artifact/check/health
+/// transaction. A fresh deployment initializes artifacts and configuration;
+/// an existing deployment atomically replaces the changed files, restarts the
+/// managed services, and re-establishes accounting state when the schedule or
+/// interface changed. Any failure restores the previous known-good deployment.
+fn commit_config_change(
+    root: &Path,
+    store: &sbctl::config::DeploymentStore,
+    new: &sbctl::config::DeploymentConfig,
+    sing_box_bin: Option<PathBuf>,
+) -> ExitCode {
+    let existing = match store.load() {
+        Ok(config) => Some(config),
+        Err(sbctl::config::ConfigError::Missing) => None,
+        Err(error) => {
+            eprintln!("configuration wizard failed: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let result = (|| -> Result<(), sbctl::config::ConfigError> {
+        if !sbctl::traffic::interface_exists(root, &new.interface) {
+            return Err(sbctl::config::ConfigError::InvalidValue(
+                "the selected traffic interface does not exist on this host",
+            ));
+        }
+        let binary = sing_box_bin.unwrap_or_else(|| root.join("usr/local/bin/sing-box"));
+        match existing {
+            None => {
+                let artifacts = sbctl::subscription::generated_artifacts(new)
+                    .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+                let server = artifacts
+                    .iter()
+                    .find(|(name, _)| *name == "sing-box-server.json")
+                    .map(|(_, contents)| contents)
+                    .ok_or(sbctl::config::ConfigError::InvalidValue(
+                        "no generated sing-box server configuration is available to check",
+                    ))?;
+                if !binary.is_file() {
+                    return Err(sbctl::config::ConfigError::InvalidValue(
+                        "a new deployment requires --sing-box-bin for configuration validation",
+                    ));
+                }
+                sbctl::subscription::check_sing_box_config(&binary, server)
+                    .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+                let references = artifacts
+                    .iter()
+                    .map(|(name, contents)| (*name, contents.as_bytes()))
+                    .collect::<Vec<_>>();
+                store.initialize_with_artifacts(new, &references)?;
+                Ok(())
+            }
+            Some(prior) => {
+                let snapshot = sbctl::subscription::apply_config_transaction(
+                    store,
+                    new,
+                    binary.is_file().then_some(binary.as_path()),
+                )
+                .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+                restart_services_with_rollback(root, || {
+                    let _ = sbctl::subscription::restore_config_transaction(store, &snapshot);
+                })?;
+                if accounting_schedule_changed(&prior, new)
+                    && let Err(error) = sbctl::traffic::reset(store, new)
+                {
+                    eprintln!(
+                        "warning: could not establish the new accounting state now ({error}); the next accounting reset timer run will establish it"
+                    );
+                }
+                Ok(())
+            }
+        }
+    })();
+    match result {
+        Ok(()) => {
+            println!("deployment configuration committed\n{}", new.summary());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("configuration wizard failed: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// A policy, timezone, first reset instant, or interface change alters the
+/// accounting cycle, so the wizard establishes a new accounting state instead
+/// of carrying the previous period's accumulated traffic forward.
+fn accounting_schedule_changed(
+    prior: &sbctl::config::DeploymentConfig,
+    new: &sbctl::config::DeploymentConfig,
+) -> bool {
+    prior.accounting_policy != new.accounting_policy
+        || prior.accounting_timezone != new.accounting_timezone
+        || prior.anchored_reset_at != new.anchored_reset_at
+        || prior.interface != new.interface
+}
+
+/// Restarts the managed services after a configuration commit. If the health
+/// check fails, the rollback closure restores the previous known-good files,
+/// the services are restarted again, and the failure is reported.
+fn restart_services_with_rollback(
+    root: &Path,
+    rollback: impl FnOnce(),
+) -> Result<(), sbctl::config::ConfigError> {
+    if let Err(error) = sbctl::lifecycle::restart_services(root) {
+        rollback();
+        let _ = sbctl::lifecycle::restart_services(root);
+        return Err(sbctl::config::ConfigError::StateContent(error));
+    }
+    Ok(())
+}
+
+fn run_credential(root: &Path, command: CredentialCommand) -> ExitCode {
+    match command {
+        CredentialCommand::Rotate => rotate_subscription_credential(root),
+    }
+}
+
+fn rotate_subscription_credential(root: &Path) -> ExitCode {
+    let store = sbctl::config::DeploymentStore::new(root);
+    let result = store.load().and_then(|mut config| {
+        let previous = config.subscription_credential.clone();
+        config.subscription_credential = sbctl::config::generate_subscription_credential()?;
+        store.replace(&config)?;
+        restart_services_with_rollback(root, || {
+            config.subscription_credential = previous;
+            let _ = store.replace(&config);
+        })?;
+        Ok(config)
+    });
+    match result {
+        Ok(_) => {
+            println!("subscription credential rotated; all previous subscription URLs are now invalid");
+            println!("run 'sbctl sub' to display the new subscription URLs");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("credential rotation failed: {error}");
             ExitCode::from(2)
         }
     }

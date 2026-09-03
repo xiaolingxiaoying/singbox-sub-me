@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use x25519_dalek::{X25519_BASEPOINT_BYTES, x25519};
 
-const CONFIG_RELATIVE_PATH: &str = "etc/sbctl/config.toml";
+pub const CONFIG_RELATIVE_PATH: &str = "etc/sbctl/config.toml";
 pub const STATE_RELATIVE_PATH: &str = "var/lib/sbctl/state.json";
 const ARTIFACTS_RELATIVE_PATH: &str = "var/lib/sbctl/artifacts";
 const ACME_WEBROOT_RELATIVE_PATH: &str = "var/lib/sbctl/acme-webroot";
@@ -28,6 +28,9 @@ pub struct DeploymentConfig {
     pub http_port: Option<u16>,
     #[serde(default)]
     pub subscription_listen_port: Option<u16>,
+    /// Administrator contact for Direct-mode Certbot issuance; never printed.
+    #[serde(default)]
+    pub certbot_email: Option<String>,
     pub interface: String,
     pub enabled_protocols: Vec<ManagedProtocol>,
     pub reality_decoy_sni: Option<String>,
@@ -96,6 +99,27 @@ pub struct ProtocolPorts {
     pub hysteria2: Option<u16>,
     pub tuic: Option<u16>,
     pub anytls: Option<u16>,
+}
+
+/// The complete set of administrator-selected deployment choices carried by the
+/// interactive wizard and rebuilt into a `DeploymentConfig`. Optional fields
+/// are `None` when the deployment does not use that feature.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeploymentOptions {
+    pub subscription_mode: SubscriptionMode,
+    pub subscription_host: String,
+    pub proxy_host: Option<String>,
+    pub certbot_email: Option<String>,
+    pub http_port: Option<u16>,
+    pub subscription_listen_port: Option<u16>,
+    pub interface: String,
+    pub enabled_protocols: Vec<ManagedProtocol>,
+    pub reality_decoy_sni: Option<String>,
+    pub monthly_traffic_limit: u64,
+    pub accounting_policy: AccountingPolicy,
+    pub accounting_timezone: String,
+    pub anchored_reset_at: Option<String>,
+    pub ports: ProtocolPorts,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -203,10 +227,7 @@ impl DeploymentConfig {
         reality_decoy_sni: Option<String>,
         ports: ProtocolPorts,
     ) -> Result<Self, ConfigError> {
-        let mut bytes = [0_u8; 32];
-        getrandom::fill(&mut bytes).map_err(|error| ConfigError::Randomness(error.to_string()))?;
-        let subscription_credential =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let subscription_credential = generate_subscription_credential()?;
         let mut allocated_ports = Vec::new();
         validate_requested_ports(&enabled_protocols, &ports)?;
         let vless_reality = enabled_protocols
@@ -247,6 +268,7 @@ impl DeploymentConfig {
             accounting_policy: AccountingPolicy::NaturalMonth,
             accounting_timezone: default_accounting_timezone(),
             anchored_reset_at: None,
+            certbot_email: None,
             vless_reality,
             vmess_websocket,
             hysteria2,
@@ -255,6 +277,120 @@ impl DeploymentConfig {
         };
         config.validate()?;
         Ok(config)
+    }
+
+    /// Rebuilds a deployment from a complete set of administrator-selected
+    /// options, preserving every existing Proxy credential and the Subscription
+    /// credential when an existing deployment is being edited. Protocols that
+    /// remain enabled keep their credentials (with an optionally changed port);
+    /// newly enabled protocols receive fresh credentials; a fresh deployment
+    /// allocates every credential and the Subscription credential.
+    pub fn apply_options(
+        existing: Option<&DeploymentConfig>,
+        options: &DeploymentOptions,
+    ) -> Result<Self, ConfigError> {
+        let DeploymentOptions {
+            subscription_mode,
+            subscription_host,
+            proxy_host,
+            certbot_email,
+            http_port,
+            subscription_listen_port,
+            interface,
+            enabled_protocols,
+            reality_decoy_sni,
+            monthly_traffic_limit,
+            accounting_policy,
+            accounting_timezone,
+            anchored_reset_at,
+            ports,
+        } = options;
+        validate_requested_ports(enabled_protocols, ports)?;
+        let mut allocated_ports = Vec::new();
+        let vless_reality = build_protocol_credentials(
+            existing.and_then(|config| config.vless_reality.as_ref()),
+            enabled_protocols.contains(&ManagedProtocol::VlessReality),
+            ports.vless_reality,
+            &mut allocated_ports,
+            generate_vless_reality_credentials,
+            |credentials| credentials.listen_port,
+            |credentials, port| credentials.listen_port = port,
+        )?;
+        let vmess_websocket = build_protocol_credentials(
+            existing.and_then(|config| config.vmess_websocket.as_ref()),
+            enabled_protocols.contains(&ManagedProtocol::VmessWebsocket),
+            ports.vmess_websocket,
+            &mut allocated_ports,
+            generate_vmess_websocket_credentials,
+            |credentials| credentials.listen_port,
+            |credentials, port| credentials.listen_port = port,
+        )?;
+        let hysteria2 = build_protocol_credentials(
+            existing.and_then(|config| config.hysteria2.as_ref()),
+            enabled_protocols.contains(&ManagedProtocol::Hysteria2),
+            ports.hysteria2,
+            &mut allocated_ports,
+            generate_hysteria2_credentials,
+            |credentials| credentials.listen_port,
+            |credentials, port| credentials.listen_port = port,
+        )?;
+        let tuic = build_protocol_credentials(
+            existing.and_then(|config| config.tuic.as_ref()),
+            enabled_protocols.contains(&ManagedProtocol::Tuic),
+            ports.tuic,
+            &mut allocated_ports,
+            generate_tuic_credentials,
+            |credentials| credentials.listen_port,
+            |credentials, port| credentials.listen_port = port,
+        )?;
+        let anytls = build_protocol_credentials(
+            existing.and_then(|config| config.anytls.as_ref()),
+            enabled_protocols.contains(&ManagedProtocol::Anytls),
+            ports.anytls,
+            &mut allocated_ports,
+            generate_anytls_credentials,
+            |credentials| credentials.listen_port,
+            |credentials, port| credentials.listen_port = port,
+        )?;
+        let subscription_credential = match existing {
+            Some(config) => config.subscription_credential.clone(),
+            None => generate_subscription_credential()?,
+        };
+        let config = Self {
+            subscription_mode: subscription_mode.clone(),
+            subscription_host: subscription_host.clone(),
+            proxy_host: proxy_host.clone(),
+            http_port: *http_port,
+            subscription_listen_port: *subscription_listen_port,
+            interface: interface.clone(),
+            enabled_protocols: enabled_protocols.clone(),
+            reality_decoy_sni: reality_decoy_sni.clone(),
+            subscription_credential,
+            monthly_traffic_limit: *monthly_traffic_limit,
+            accounting_policy: accounting_policy.clone(),
+            accounting_timezone: accounting_timezone.clone(),
+            anchored_reset_at: anchored_reset_at.clone(),
+            certbot_email: certbot_email.clone(),
+            vless_reality,
+            vmess_websocket,
+            hysteria2,
+            tuic,
+            anytls,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn protocol_listener_port(&self, protocol: &ManagedProtocol) -> Option<u16> {
+        match protocol {
+            ManagedProtocol::VlessReality => self.vless_reality.as_ref().map(|node| node.listen_port),
+            ManagedProtocol::VmessWebsocket => {
+                self.vmess_websocket.as_ref().map(|node| node.listen_port)
+            }
+            ManagedProtocol::Hysteria2 => self.hysteria2.as_ref().map(|node| node.listen_port),
+            ManagedProtocol::Tuic => self.tuic.as_ref().map(|node| node.listen_port),
+            ManagedProtocol::Anytls => self.anytls.as_ref().map(|node| node.listen_port),
+        }
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -603,6 +739,64 @@ fn validate_requested_ports(
     Ok(())
 }
 
+/// A fresh high-entropy Subscription credential. `credential rotate` and new
+/// deployments each call this so the URL-safe 256-bit secret is always generated
+/// by the same path.
+pub fn generate_subscription_credential() -> Result<String, ConfigError> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).map_err(|error| ConfigError::Randomness(error.to_string()))?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+/// Reuses an existing protocol credential when the protocol stays enabled,
+/// changing only its listener port when requested, or generates a fresh one.
+fn build_protocol_credentials<T, G>(
+    existing: Option<&T>,
+    enabled: bool,
+    requested_port: Option<u16>,
+    allocated_ports: &mut Vec<u16>,
+    mut generate: G,
+    get_port: impl Fn(&T) -> u16,
+    set_port: impl Fn(&mut T, u16),
+) -> Result<Option<T>, ConfigError>
+where
+    T: Clone,
+    G: FnMut(&mut Vec<u16>, Option<u16>) -> Result<T, ConfigError>,
+{
+    if !enabled {
+        return Ok(None);
+    }
+    if let Some(current) = existing {
+        let current_port = get_port(current);
+        let port = apply_existing_port(current_port, requested_port, allocated_ports)?;
+        let mut updated = current.clone();
+        set_port(&mut updated, port);
+        return Ok(Some(updated));
+    }
+    generate(allocated_ports, requested_port).map(Some)
+}
+
+fn apply_existing_port(
+    current_port: u16,
+    requested_port: Option<u16>,
+    allocated_ports: &mut Vec<u16>,
+) -> Result<u16, ConfigError> {
+    let port = match requested_port {
+        Some(requested) if requested != current_port => requested,
+        _ => current_port,
+    };
+    if allocated_ports.contains(&port) {
+        return Err(ConfigError::InvalidValue(
+            "Managed protocol ports must be unique across TCP and UDP",
+        ));
+    }
+    if port != current_port {
+        ensure_protocol_port_available(port)?;
+    }
+    allocated_ports.push(port);
+    Ok(port)
+}
+
 fn generate_vless_reality_credentials(
     allocated_ports: &mut Vec<u16>,
     requested_port: Option<u16>,
@@ -851,6 +1045,19 @@ impl DeploymentStore {
         Ok(atomic_write(&path, contents.as_bytes())?)
     }
 
+    /// Replaces the persisted configuration while an operation lock is already
+    /// held. Multi-file lifecycle transactions use this so the configuration,
+    /// artifacts, and active sing-box configuration commit together.
+    pub fn replace_locked(&self, config: &DeploymentConfig) -> Result<(), ConfigError> {
+        config.validate()?;
+        let path = self.root.join(CONFIG_RELATIVE_PATH);
+        if !path.exists() {
+            return Err(ConfigError::Missing);
+        }
+        let contents = toml::to_string_pretty(config)?;
+        Ok(atomic_write(&path, contents.as_bytes())?)
+    }
+
     pub fn write_state(&self, contents: &[u8]) -> Result<(), ConfigError> {
         self.atomic_write_managed(&self.root.join(STATE_RELATIVE_PATH), contents)
     }
@@ -1053,6 +1260,18 @@ fn validate_host(label: &'static str, value: &str) -> Result<(), ConfigError> {
     validate_hostname(label, value)
 }
 
+/// Public host-format check used by the interactive wizard's per-item
+/// validation. Accepts a hostname or an IP address.
+pub fn host_is_valid(value: &str) -> bool {
+    validate_host("host", value).is_ok()
+}
+
+/// Public hostname-only check used for fields that cannot be an IP address,
+/// such as the Reality decoy SNI.
+pub fn hostname_is_valid(value: &str) -> bool {
+    validate_hostname("hostname", value).is_ok()
+}
+
 fn validate_hostname(label: &'static str, value: &str) -> Result<(), ConfigError> {
     let valid = !value.is_empty()
         && value.len() <= 253
@@ -1084,8 +1303,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        AccountingPolicy, DeploymentConfig, DeploymentStore, ManagedProtocol, ProtocolPorts,
-        SubscriptionMode,
+        AccountingPolicy, DeploymentConfig, DeploymentOptions, DeploymentStore, ManagedProtocol,
+        ProtocolPorts, SubscriptionMode,
     };
 
     #[test]
@@ -1490,5 +1709,204 @@ mod tests {
         config.accounting_timezone = timezone.to_owned();
         config.anchored_reset_at = Some(reset_at.to_owned());
         Ok(config)
+    }
+
+    #[test]
+    fn apply_options_with_unchanged_values_preserves_the_existing_configuration() {
+        let config = DeploymentConfig::new(
+            SubscriptionMode::IpFallback,
+            "203.0.113.7".into(),
+            Some("198.51.100.9".into()),
+            Some(2080),
+            "ens3".into(),
+            vec![ManagedProtocol::VlessReality],
+            Some("www.cloudflare.com".into()),
+        )
+        .expect("an existing deployment is valid");
+        let source = config.clone();
+
+        let rebuilt = DeploymentConfig::apply_options(
+            Some(&config),
+            &DeploymentOptions {
+                subscription_mode: source.subscription_mode,
+                subscription_host: source.subscription_host.clone(),
+                proxy_host: source.proxy_host.clone(),
+                certbot_email: source.certbot_email.clone(),
+                http_port: source.http_port,
+                subscription_listen_port: source.subscription_listen_port,
+                interface: source.interface.clone(),
+                enabled_protocols: source.enabled_protocols.clone(),
+                reality_decoy_sni: source.reality_decoy_sni.clone(),
+                monthly_traffic_limit: source.monthly_traffic_limit,
+                accounting_policy: source.accounting_policy,
+                accounting_timezone: source.accounting_timezone.clone(),
+                anchored_reset_at: source.anchored_reset_at.clone(),
+                ports: ProtocolPorts {
+                    vless_reality: source.vless_reality.as_ref().map(|node| node.listen_port),
+                    ..ProtocolPorts::default()
+                },
+            },
+        )
+        .expect("rebuilding with unchanged values is valid");
+
+        assert_eq!(rebuilt, config);
+    }
+
+    #[test]
+    fn apply_options_preserves_proxy_credentials_when_changing_only_a_port() {
+        let config = DeploymentConfig::new(
+            SubscriptionMode::IpFallback,
+            "203.0.113.7".into(),
+            None,
+            Some(2080),
+            "ens3".into(),
+            vec![ManagedProtocol::VlessReality],
+            Some("www.cloudflare.com".into()),
+        )
+        .expect("an existing deployment is valid");
+        let source = config.clone();
+        let current = config.vless_reality.clone().expect("VLESS node exists");
+        let new_port = free_port();
+        if new_port == current.listen_port {
+            return;
+        }
+
+        let rebuilt = DeploymentConfig::apply_options(
+            Some(&config),
+            &DeploymentOptions {
+                subscription_mode: source.subscription_mode,
+                subscription_host: source.subscription_host.clone(),
+                proxy_host: source.proxy_host.clone(),
+                certbot_email: source.certbot_email.clone(),
+                http_port: source.http_port,
+                subscription_listen_port: source.subscription_listen_port,
+                interface: source.interface.clone(),
+                enabled_protocols: source.enabled_protocols.clone(),
+                reality_decoy_sni: source.reality_decoy_sni.clone(),
+                monthly_traffic_limit: source.monthly_traffic_limit,
+                accounting_policy: source.accounting_policy,
+                accounting_timezone: source.accounting_timezone.clone(),
+                anchored_reset_at: source.anchored_reset_at.clone(),
+                ports: ProtocolPorts {
+                    vless_reality: Some(new_port),
+                    ..ProtocolPorts::default()
+                },
+            },
+        )
+        .expect("a changed listener port is valid");
+
+        let updated = rebuilt.vless_reality.expect("VLESS node remains enabled");
+        assert_eq!(updated.listen_port, new_port);
+        assert_eq!(updated.uuid, current.uuid);
+        assert_eq!(updated.private_key, current.private_key);
+        assert_eq!(updated.public_key, current.public_key);
+        assert_eq!(updated.short_id, current.short_id);
+    }
+
+    #[test]
+    fn apply_options_for_a_new_deployment_generates_fresh_credentials() {
+        let rebuilt = DeploymentConfig::apply_options(
+            None,
+            &DeploymentOptions {
+                subscription_mode: SubscriptionMode::Direct,
+                subscription_host: "sub.example.test".into(),
+                proxy_host: None,
+                certbot_email: None,
+                http_port: None,
+                subscription_listen_port: None,
+                interface: "ens3".into(),
+                enabled_protocols: vec![
+                    ManagedProtocol::VlessReality,
+                    ManagedProtocol::VmessWebsocket,
+                ],
+                reality_decoy_sni: Some("www.cloudflare.com".into()),
+                monthly_traffic_limit: 0,
+                accounting_policy: AccountingPolicy::NaturalMonth,
+                accounting_timezone: "UTC".into(),
+                anchored_reset_at: None,
+                ports: ProtocolPorts::default(),
+            },
+        )
+        .expect("a fresh deployment from options is valid");
+
+        assert_eq!(rebuilt.subscription_credential.len(), 43);
+        assert!(rebuilt.vless_reality.is_some());
+        assert!(rebuilt.vmess_websocket.is_some());
+        assert!(rebuilt.hysteria2.is_none());
+    }
+
+    #[test]
+    fn apply_options_keeps_the_existing_subscription_credential() {
+        let config = DeploymentConfig::new(
+            SubscriptionMode::IpFallback,
+            "203.0.113.7".into(),
+            None,
+            Some(2080),
+            "ens3".into(),
+            vec![ManagedProtocol::VlessReality],
+            Some("www.cloudflare.com".into()),
+        )
+        .expect("an existing deployment is valid");
+        let credential = config.subscription_credential.clone();
+        let source = config.clone();
+
+        let rebuilt = DeploymentConfig::apply_options(
+            Some(&config),
+            &DeploymentOptions {
+                subscription_mode: source.subscription_mode,
+                subscription_host: source.subscription_host.clone(),
+                proxy_host: source.proxy_host.clone(),
+                certbot_email: source.certbot_email.clone(),
+                http_port: source.http_port,
+                subscription_listen_port: source.subscription_listen_port,
+                interface: source.interface.clone(),
+                enabled_protocols: source.enabled_protocols.clone(),
+                reality_decoy_sni: source.reality_decoy_sni.clone(),
+                monthly_traffic_limit: source.monthly_traffic_limit,
+                accounting_policy: source.accounting_policy,
+                accounting_timezone: source.accounting_timezone.clone(),
+                anchored_reset_at: source.anchored_reset_at.clone(),
+                ports: ProtocolPorts {
+                    vless_reality: source.vless_reality.as_ref().map(|node| node.listen_port),
+                    ..ProtocolPorts::default()
+                },
+            },
+        )
+        .expect("editing preserves the subscription credential");
+
+        assert_eq!(rebuilt.subscription_credential, credential);
+    }
+
+    #[test]
+    fn apply_options_rejects_mode_preconditions_before_returning_a_config() {
+        let result = DeploymentConfig::apply_options(
+            None,
+            &DeploymentOptions {
+                subscription_mode: SubscriptionMode::IpFallback,
+                subscription_host: "203.0.113.7".into(),
+                proxy_host: None,
+                certbot_email: None,
+                http_port: Some(2080),
+                subscription_listen_port: None,
+                interface: "ens3".into(),
+                enabled_protocols: vec![
+                    ManagedProtocol::VlessReality,
+                    ManagedProtocol::VmessWebsocket,
+                ],
+                reality_decoy_sni: Some("www.cloudflare.com".into()),
+                monthly_traffic_limit: 0,
+                accounting_policy: AccountingPolicy::NaturalMonth,
+                accounting_timezone: "UTC".into(),
+                anchored_reset_at: None,
+                ports: ProtocolPorts::default(),
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(super::ConfigError::InvalidValue(
+                "VMess WebSocket, Hysteria2, TUIC, and AnyTLS require a domain subscription mode"
+            ))
+        ));
     }
 }

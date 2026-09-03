@@ -3114,3 +3114,535 @@ fn assert_existing_deployment_is_preserved(
         contents
     );
 }
+
+fn read_subscription_credential(fixture: &TempDir) -> String {
+    fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
+        .expect("configuration is persisted")
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("subscription_credential = \"")
+                .and_then(|value| value.strip_suffix('"'))
+        })
+        .expect("subscription credential is available")
+        .to_owned()
+}
+
+fn read_vless_uuid(fixture: &TempDir) -> String {
+    let config = fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
+        .expect("configuration is persisted");
+    let section = config
+        .split("[vless_reality]")
+        .nth(1)
+        .expect("VLESS Reality section exists");
+    section
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("uuid = \"")
+                .and_then(|value| value.strip_suffix('"'))
+        })
+        .expect("VLESS proxy credential is available")
+        .to_owned()
+}
+
+#[test]
+fn credential_rotate_invalidates_the_old_url_and_keeps_proxy_credentials() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let port = free_high_tcp_port();
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    write_systemctl_fixture(&fixture, true);
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "127.0.0.1",
+            "--http-port",
+            &port.to_string(),
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+    let old_credential = read_subscription_credential(&fixture);
+    let old_proxy_uuid = read_vless_uuid(&fixture);
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "accounting-reset",
+        ])
+        .assert()
+        .success();
+    let uri_before = fs::read(
+        fixture
+            .path()
+            .join("var/lib/sbctl/artifacts/subscription-uri.txt"),
+    )
+    .expect("URI artifact is readable");
+
+    let output = Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "credential",
+            "rotate",
+        ])
+        .output()
+        .expect("rotation output is captured");
+    assert!(output.status.success(), "rotation succeeds");
+    let rotate_stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(rotate_stdout.contains("rotated"));
+    assert!(
+        !rotate_stdout.contains(&old_credential),
+        "rotation output must not expose the old Subscription credential"
+    );
+
+    let new_credential = read_subscription_credential(&fixture);
+    assert_ne!(new_credential, old_credential, "rotation generates a fresh credential");
+    assert!(
+        !rotate_stdout.contains(&new_credential),
+        "rotation output must not print the complete new Subscription credential; run 'sbctl sub' for URLs"
+    );
+    let config = fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
+        .expect("configuration is readable");
+    assert!(
+        config.contains(&old_proxy_uuid),
+        "Proxy credential is unchanged by Subscription rotation"
+    );
+    assert_eq!(
+        fs::read(
+            fixture
+                .path()
+                .join("var/lib/sbctl/artifacts/subscription-uri.txt"),
+        )
+        .expect("URI artifact remains readable"),
+        uri_before,
+        "rotation must not alter the generated proxy artifacts"
+    );
+
+    let stderr_log = fixture.path().join("rotate-serve.err");
+    let mut server = spawn_sbctl_serve(&fixture, port, 2, &stderr_log);
+    assert!(
+        http_get(port, &format!("/sub/{old_credential}/uri")).starts_with("HTTP/1.1 404 Not Found"),
+        "the previous Subscription URL must immediately stop working"
+    );
+    assert!(
+        http_get(port, &format!("/sub/{new_credential}/uri")).starts_with("HTTP/1.1 200 OK"),
+        "the new Subscription URL is usable"
+    );
+    assert!(server.wait().expect("server exits").success());
+}
+
+#[test]
+fn config_wizard_with_empty_answers_leaves_an_existing_deployment_unchanged() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "203.0.113.7",
+            "--http-port",
+            "2080",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+    let config_path = fixture.path().join("etc/sbctl/config.toml");
+    let before = fs::read(&config_path).expect("configuration is readable");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "wizard",
+        ])
+        .write_stdin("\n".repeat(25))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("deployment configuration is unchanged"));
+
+    assert_eq!(
+        fs::read(&config_path).expect("configuration remains readable"),
+        before,
+        "empty answers must keep every current value"
+    );
+}
+
+#[test]
+fn config_wizard_cancelled_leaves_the_existing_deployment_unchanged() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "203.0.113.7",
+            "--http-port",
+            "2080",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+    let config_path = fixture.path().join("etc/sbctl/config.toml");
+    let before = fs::read(&config_path).expect("configuration is readable");
+    let mut answers = vec![String::new(); 15];
+    answers[1] = "198.51.100.9".into();
+    answers.push("n".into());
+    let input = answers.join("\n") + "\n";
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "wizard",
+        ])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "configuration wizard cancelled; the existing deployment is unchanged",
+        ));
+
+    assert_eq!(
+        fs::read(&config_path).expect("configuration remains readable"),
+        before,
+        "an unconfirmed summary must not change the deployment"
+    );
+}
+
+#[test]
+fn config_wizard_without_input_aborts_without_changing_the_deployment() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "203.0.113.7",
+            "--http-port",
+            "2080",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+    let config_path = fixture.path().join("etc/sbctl/config.toml");
+    let before = fs::read(&config_path).expect("configuration is readable");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "wizard",
+        ])
+        .write_stdin("")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("wizard input ended"));
+
+    assert_eq!(
+        fs::read(&config_path).expect("configuration remains readable"),
+        before,
+        "an interrupted wizard must not change the deployment"
+    );
+}
+
+#[test]
+fn config_wizard_rejects_an_ambiguous_dst_anchored_reset_before_committing() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "203.0.113.7",
+            "--http-port",
+            "2080",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+    let config_path = fixture.path().join("etc/sbctl/config.toml");
+    let before = fs::read(&config_path).expect("configuration is readable");
+    let mut answers = vec![String::new(); 16];
+    answers[13] = "America/New_York".into();
+    answers[14] = "anchored-month".into();
+    answers[15] = "2024-11-03T01:30".into();
+    answers.push("y".into());
+    let input = answers.join("\n") + "\n";
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "wizard",
+        ])
+        .write_stdin(input)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "anchored reset time is ambiguous in the accounting timezone",
+        ));
+
+    assert_eq!(
+        fs::read(&config_path).expect("configuration remains readable"),
+        before,
+        "a DST-ambiguous schedule must be rejected before any commit"
+    );
+}
+
+#[test]
+fn config_wizard_commits_a_timezone_change_and_establishes_new_accounting_state() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    write_systemctl_fixture(&fixture, true);
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "203.0.113.7",
+            "--http-port",
+            "2080",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "accounting-reset",
+        ])
+        .assert()
+        .success();
+    let state_path = fixture.path().join("var/lib/sbctl/state.json");
+    let state_before = fs::read_to_string(&state_path).expect("state is established");
+    assert!(
+        state_before.contains("+00:00"),
+        "the initial UTC period is established"
+    );
+
+    let mut answers = vec![String::new(); 15];
+    answers[13] = "Asia/Tokyo".into();
+    answers.push("y".into());
+    let input = answers.join("\n") + "\n";
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "wizard",
+        ])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("deployment configuration committed"));
+
+    let config = fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
+        .expect("configuration is committed");
+    assert!(config.contains("accounting_timezone = \"Asia/Tokyo\""));
+    let state_after = fs::read_to_string(&state_path).expect("new state is established");
+    assert!(
+        state_after.contains("+09:00"),
+        "changing the accounting timezone establishes a new accounting state"
+    );
+    assert_ne!(state_after, state_before);
+}
+
+#[test]
+fn config_wizard_creates_a_new_deployment_with_secure_defaults() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    fs::create_dir_all(fixture.path().join("proc/net")).expect("route directory is created");
+    fs::write(
+        fixture.path().join("proc/net/route"),
+        "Iface\tDestination\tGateway\tFlags\nens3\t00000000\t00000000\t0003\n",
+    )
+    .expect("route fixture is written");
+    fs::create_dir_all(fixture.path().join("sys/class/net/ens3"))
+        .expect("interface fixture is created");
+    let checker = sing_box_check_fixture(
+        &fixture,
+        true,
+        &["vless", "vmess", "hysteria2", "tuic", "anytls"],
+    );
+    let answers = [
+        "",
+        "sub.example.test",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "www.cloudflare.com",
+        "",
+        "",
+        "",
+        "y",
+    ];
+    let input = answers.join("\n") + "\n";
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "wizard",
+            "--sing-box-bin",
+            checker.to_str().expect("checker path is UTF-8"),
+        ])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("deployment configuration committed"));
+
+    let config = fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
+        .expect("a fresh wizard deployment is committed");
+    assert!(config.contains("subscription_mode = \"direct\""));
+    assert!(config.contains("subscription_host = \"sub.example.test\""));
+    assert!(config.contains("interface = \"ens3\""));
+    assert!(config.contains("accounting_timezone = \"UTC\""));
+    assert!(config.contains("accounting_policy = \"natural-month\""));
+    for protocol in [
+        "vless-reality",
+        "vmess-websocket",
+        "hysteria2",
+        "tuic",
+        "anytls",
+    ] {
+        assert!(config.contains(protocol), "{protocol} is enabled by default");
+    }
+}
+
+#[test]
+fn config_wizard_output_does_not_leak_credentials() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "203.0.113.7",
+            "--http-port",
+            "2080",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+    let credential = read_subscription_credential(&fixture);
+    let proxy_uuid = read_vless_uuid(&fixture);
+    let mut answers = vec![String::new(); 15];
+    answers[1] = "198.51.100.9".into();
+    answers.push("n".into());
+    let input = answers.join("\n") + "\n";
+
+    let output = Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "wizard",
+        ])
+        .write_stdin(input)
+        .output()
+        .expect("wizard output is captured");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for secret in [&credential, &proxy_uuid] {
+        assert!(!stdout.contains(secret), "stdout must not expose {secret}");
+        assert!(!stderr.contains(secret), "stderr must not expose {secret}");
+    }
+    assert!(stdout.contains("subscription credential: [redacted]"));
+}

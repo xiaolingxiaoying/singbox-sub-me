@@ -154,6 +154,104 @@ fn restore_replaced(
     }
 }
 
+/// The prior complete versions of every file a configuration transaction can
+/// replace, used to restore the previous known-good deployment after a failed
+/// service health check.
+pub struct DeploymentSnapshot {
+    pub config: Vec<u8>,
+    pub artifacts: Vec<(&'static str, Option<Vec<u8>>)>,
+    pub active_config: Option<Vec<u8>>,
+}
+
+/// Validates, then atomically replaces the deployment configuration together
+/// with any changed canonical artifacts and the active sing-box configuration
+/// under one operation lock. The generated server configuration is checked with
+/// `sing-box check` before any file is replaced, so a failed check leaves every
+/// existing file untouched. A configuration-only change (one that does not alter
+/// the canonical node model) skips the check and the artifact writes. The
+/// returned snapshot lets the caller restore the previous deployment if the
+/// subsequent service health check fails.
+pub fn apply_config_transaction(
+    store: &DeploymentStore,
+    config: &DeploymentConfig,
+    sing_box_bin: Option<&Path>,
+) -> Result<DeploymentSnapshot, SubscriptionError> {
+    config.validate()?;
+    let artifacts = generated_artifacts(config)?;
+    let server = server_artifact(&artifacts)?;
+    let _lock = store.acquire_operation_lock()?;
+    let prior_artifacts = artifacts
+        .iter()
+        .map(|(name, _)| (*name, read_artifact(store, name)))
+        .collect::<Vec<_>>();
+    let prior_active = fs::read(store.root().join(ACTIVE_CONFIG_RELATIVE_PATH)).ok();
+    let prior_config = fs::read(store.root().join(crate::config::CONFIG_RELATIVE_PATH)).ok();
+
+    let artifacts_changed = prior_artifacts.iter().any(|(name, prior)| {
+        artifacts
+            .iter()
+            .find(|(artifact_name, _)| artifact_name == name)
+            .is_none_or(|(_, contents)| prior.as_deref() != Some(contents.as_bytes()))
+    });
+    // A deployment that has no active sing-box configuration yet (configuration
+    // initialized without installation) is not synced: writing the active file
+    // is the installation step. Once present, it is re-synced whenever the
+    // canonical node model changes or it drifted from the generated server.
+    let need_active_sync = prior_active.is_some()
+        && (artifacts_changed || prior_active.as_deref() != Some(server.as_bytes()));
+
+    if artifacts_changed || need_active_sync {
+        let Some(sing_box_bin) = sing_box_bin else {
+            return Err(SubscriptionError::Check(
+                "configuration change requires a sing-box binary for validation".to_owned(),
+            ));
+        };
+        check_sing_box_config(sing_box_bin, server)?;
+        for (name, contents) in &artifacts {
+            if let Err(error) = store.write_artifact_locked(name, contents.as_bytes()) {
+                restore_replaced(store, &prior_artifacts, prior_active.as_deref());
+                return Err(SubscriptionError::Storage(error));
+            }
+        }
+        if need_active_sync
+            && let Err(error) =
+                store.write_relative_locked(ACTIVE_CONFIG_RELATIVE_PATH, server.as_bytes())
+        {
+            restore_replaced(store, &prior_artifacts, prior_active.as_deref());
+            return Err(SubscriptionError::Storage(error));
+        }
+    }
+    store.replace_locked(config)?;
+    Ok(DeploymentSnapshot {
+        config: prior_config.unwrap_or_default(),
+        artifacts: prior_artifacts,
+        active_config: prior_active,
+    })
+}
+
+/// Restores a previously captured deployment snapshot after a failed service
+/// health check, then restarts the managed services to return the running
+/// deployment to the previous known-good configuration.
+pub fn restore_config_transaction(
+    store: &DeploymentStore,
+    snapshot: &DeploymentSnapshot,
+) -> Result<(), SubscriptionError> {
+    let _lock = store.acquire_operation_lock()?;
+    for (name, prior) in snapshot.artifacts.iter().rev() {
+        match prior {
+            Some(prior) => store.write_artifact_locked(name, prior)?,
+            None => {
+                let _ = fs::remove_file(store.root().join(ARTIFACTS_RELATIVE_DIR).join(name));
+            }
+        }
+    }
+    if let Some(active) = &snapshot.active_config {
+        store.write_relative_locked(ACTIVE_CONFIG_RELATIVE_PATH, active)?;
+    }
+    store.write_relative_locked(crate::config::CONFIG_RELATIVE_PATH, &snapshot.config)?;
+    Ok(())
+}
+
 pub fn generated_artifacts(
     config: &DeploymentConfig,
 ) -> Result<Vec<(&'static str, String)>, SubscriptionError> {
@@ -885,6 +983,153 @@ mod tests {
         assert_eq!(
             super::redact_secret("subscription artifact failed: no such file", "secret"),
             "subscription artifact failed: no such file"
+        );
+    }
+
+    fn write_initial_deployment(store: &DeploymentStore, config: &DeploymentConfig) {
+        let artifacts = generated_artifacts(config).expect("artifacts generate");
+        let references = artifacts
+            .iter()
+            .map(|(name, contents)| (*name, contents.as_bytes()))
+            .collect::<Vec<_>>();
+        store
+            .initialize_with_artifacts(config, &references)
+            .expect("initial deployment is written");
+        let server = artifacts
+            .iter()
+            .find(|(name, _)| *name == "sing-box-server.json")
+            .map(|(_, contents)| contents.as_bytes())
+            .expect("server artifact exists");
+        store
+            .write_relative_locked("etc/sing-box/config.json", server)
+            .expect("active config is written");
+    }
+
+    fn persisted_config(store: &DeploymentStore) -> Vec<u8> {
+        fs::read(store.root().join("etc/sbctl/config.toml")).expect("config is readable")
+    }
+
+    #[test]
+    fn apply_config_transaction_with_a_failed_check_leaves_everything_unchanged() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let store = DeploymentStore::new(fixture.path());
+        let old = vless_config();
+        write_initial_deployment(&store, &old);
+        let mut new = old.clone();
+        new.subscription_host = "198.51.100.9".into();
+        let rejecting = checker(&fixture, false);
+
+        let result =
+            super::apply_config_transaction(&store, &new, Some(&rejecting));
+
+        assert!(result.is_err(), "a rejected check must fail the transaction");
+        let expected = generated_artifacts(&old).expect("old artifacts are generated");
+        for (name, contents) in &expected {
+            assert_eq!(
+                artifact(&store, name),
+                contents.as_bytes(),
+                "{name} stays on the old complete version"
+            );
+        }
+        assert_eq!(
+            persisted_config(&store),
+            toml::to_string_pretty(&old).expect("old config serializes").as_bytes()
+        );
+    }
+
+    #[test]
+    fn apply_config_transaction_replaces_config_artifacts_and_active_config_together() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let store = DeploymentStore::new(fixture.path());
+        let old = vless_config();
+        write_initial_deployment(&store, &old);
+        let mut new = old.clone();
+        new.subscription_host = "198.51.100.9".into();
+        let accepting = checker(&fixture, true);
+
+        let snapshot =
+            super::apply_config_transaction(&store, &new, Some(&accepting)).expect("transaction");
+
+        let expected = generated_artifacts(&new).expect("new artifacts are generated");
+        for (name, contents) in &expected {
+            assert_eq!(
+                artifact(&store, name),
+                contents.as_bytes(),
+                "{name} is replaced by the new complete version"
+            );
+        }
+        assert_eq!(
+            persisted_config(&store),
+            toml::to_string_pretty(&new).expect("new config serializes").as_bytes()
+        );
+        let server = expected
+            .iter()
+            .find(|(name, _)| *name == "sing-box-server.json")
+            .map(|(_, contents)| contents.as_bytes())
+            .expect("server artifact exists");
+        assert_eq!(
+            fs::read(store.root().join("etc/sing-box/config.json"))
+                .expect("active config is readable"),
+            server
+        );
+        assert_eq!(snapshot.config, toml::to_string_pretty(&old).expect("old serializes").as_bytes().to_vec());
+    }
+
+    #[test]
+    fn apply_config_transaction_skips_the_check_for_a_config_only_change() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let store = DeploymentStore::new(fixture.path());
+        let old = vless_config();
+        write_initial_deployment(&store, &old);
+        let artifacts_before = generated_artifacts(&old).expect("old artifacts are generated");
+        let active_before = fs::read(store.root().join("etc/sing-box/config.json")).expect("active config is readable");
+        let mut new = old.clone();
+        new.monthly_traffic_limit = 1_000_000;
+
+        super::apply_config_transaction(&store, &new, None).expect("config-only change needs no check");
+
+        for (name, contents) in &artifacts_before {
+            assert_eq!(
+                artifact(&store, name),
+                contents.as_bytes(),
+                "{name} is untouched by a config-only change"
+            );
+        }
+        assert_eq!(
+            fs::read(store.root().join("etc/sing-box/config.json")).expect("active config is readable"),
+            active_before
+        );
+        assert_eq!(
+            persisted_config(&store),
+            toml::to_string_pretty(&new).expect("new config serializes").as_bytes()
+        );
+    }
+
+    #[test]
+    fn restore_config_transaction_returns_the_previous_deployment() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let store = DeploymentStore::new(fixture.path());
+        let old = vless_config();
+        write_initial_deployment(&store, &old);
+        let mut new = old.clone();
+        new.subscription_host = "198.51.100.9".into();
+        let accepting = checker(&fixture, true);
+
+        let snapshot =
+            super::apply_config_transaction(&store, &new, Some(&accepting)).expect("transaction");
+        super::restore_config_transaction(&store, &snapshot).expect("restore succeeds");
+
+        let old_artifacts = generated_artifacts(&old).expect("old artifacts are generated");
+        for (name, contents) in &old_artifacts {
+            assert_eq!(
+                artifact(&store, name),
+                contents.as_bytes(),
+                "{name} is restored"
+            );
+        }
+        assert_eq!(
+            persisted_config(&store),
+            toml::to_string_pretty(&old).expect("old config serializes").as_bytes()
         );
     }
 }

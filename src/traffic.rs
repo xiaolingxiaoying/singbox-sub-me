@@ -520,6 +520,13 @@ pub fn detect_default_route_interface(root: &Path) -> Result<String, TrafficErro
         ))
 }
 
+/// Whether the named interface is present on this host. The wizard validates
+/// the selected traffic interface against the host before committing a
+/// configuration, so a typo does not replace a running deployment.
+pub fn interface_exists(root: &Path, interface: &str) -> bool {
+    root.join("sys/class/net").join(interface).is_dir()
+}
+
 fn read_interface_counters<C: crate::runtime::Clock>(
     runtime: &Runtime<C>,
     interface: &str,
