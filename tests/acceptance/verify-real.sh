@@ -77,6 +77,9 @@ test "$(cat /etc/nginx.conf)" = proxy || fail 'uninstall changed unrelated data'
 # A release artifact must accept the public IP fallback port option advertised by
 # the bootstrap installer and expose its lower-security HTTP subscription.
 $sbctl uninstall --purge >/dev/null
+# Production bootstrap installs the management binary before invoking `install`.
+# The acceptance artifact lives outside that managed path so it survives purge.
+install -m 0755 "$sbctl" /usr/local/bin/sbctl
 ip_install_output=$(
   "$sbctl" install \
     --mode ip-fallback \
