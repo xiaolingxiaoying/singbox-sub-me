@@ -662,6 +662,12 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
         if !options.no_start {
             sbctl::lifecycle::start_services(root, direct)
                 .map_err(sbctl::config::ConfigError::StateContent)?;
+            sbctl::lifecycle::check_service_health(root, direct)
+                .map_err(sbctl::config::ConfigError::StateContent)?;
+            // The ownership marker is the commit point of the complete
+            // transaction. A `--no-start` fixture install defers startup and
+            // the health check, so it never claims ownership.
+            sbctl::lifecycle::write_ownership_marker(&store)?;
         }
         Ok::<_, sbctl::config::ConfigError>(config)
     })();

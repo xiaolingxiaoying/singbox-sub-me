@@ -100,6 +100,15 @@ pub fn install_units(
         write_unit(store.root(), CERTBOT_DEPLOY_HOOK, certbot_deploy_hook())?;
         set_executable(&store.root().join(CERTBOT_DEPLOY_HOOK))?;
     }
+    Ok(())
+}
+
+/// The final commit point of a successful installation. The ownership marker is
+/// written only after the complete transaction — download verification, accounts
+/// and directories, configuration and artifacts, units, daemon reload, startup,
+/// and the health check — has succeeded, so a failed install never leaves a
+/// marker that would make an Existing deployment look sbctl-managed.
+pub fn write_ownership_marker(store: &DeploymentStore) -> Result<(), ConfigError> {
     store.write_relative_locked(OWNERSHIP_MARKER, b"sbctl-managed-v1\n")
 }
 
@@ -140,6 +149,14 @@ pub fn start_services(root: &Path, direct: bool) -> Result<(), String> {
     }
     prepare_daemon_storage(root, direct)?;
     systemctl(root, &["daemon-reload"])?;
+    let mut arguments = vec!["enable", "--now"];
+    arguments.extend(managed_units(direct));
+    systemctl(root, &arguments)
+}
+
+/// The units an installation transaction enables. Direct subscription mode
+/// additionally owns the socket unit that holds public TCP 80/443.
+fn managed_units(direct: bool) -> Vec<&'static str> {
     let mut units = vec![
         "sing-box.service",
         "sbctl.service",
@@ -148,9 +165,18 @@ pub fn start_services(root: &Path, direct: bool) -> Result<(), String> {
     if direct {
         units.push("sbctl-http.socket");
     }
-    let mut arguments = vec!["enable", "--now"];
-    arguments.extend(units);
-    systemctl(root, &arguments)
+    units
+}
+
+/// The health check phase of an installation: verifies that every unit the
+/// transaction enabled reports active. The ownership marker is written only
+/// after this passes, so a unit that starts but immediately fails keeps the
+/// installation rolled back instead of leaving a misleading deployment.
+pub fn check_service_health(root: &Path, direct: bool) -> Result<(), String> {
+    for unit in managed_units(direct) {
+        systemctl(root, &["is-active", "--quiet", unit])?;
+    }
+    Ok(())
 }
 
 /// Removes only files created by a failed fresh installation. Preflight has

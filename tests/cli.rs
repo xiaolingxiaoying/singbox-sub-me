@@ -1109,6 +1109,10 @@ fn regenerate_validates_before_replacing_artifacts_and_the_active_config() {
         .assert()
         .success();
 
+    // A `--no-start` fixture install never commits ownership. Seed the marker
+    // so `regenerate` exercises the fully-managed active-config path.
+    write_managed_file(&fixture, "var/lib/sbctl/ownership", b"sbctl-managed-v1\n");
+
     let config_path = fixture.path().join("etc/sbctl/config.toml");
     let configuration = fs::read_to_string(&config_path).expect("configuration is persisted");
     let changed = configuration.replace(
@@ -2739,6 +2743,178 @@ fn install_defaults_to_all_managed_protocols_writes_services_and_only_lists_fire
 }
 
 #[test]
+fn install_writes_the_ownership_marker_after_services_start_and_pass_the_health_check() {
+    let fixture = supported_systemd_host();
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    seed_service_accounts(&fixture);
+    write_systemctl_fixture(&fixture, true);
+    let checker = sing_box_check_fixture(
+        &fixture,
+        true,
+        &["vless", "vmess", "hysteria2", "tuic", "anytls"],
+    );
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "install",
+            "--mode",
+            "external-proxy",
+            "--subscription-host",
+            "sub.example.test",
+            "--interface",
+            "ens3",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+            "--sing-box-bin",
+            checker.to_str().expect("checker path is UTF-8"),
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(fixture.path().join("var/lib/sbctl/ownership"))
+            .expect("the ownership marker is written only after the health check"),
+        "sbctl-managed-v1\n"
+    );
+}
+
+#[test]
+fn install_startup_failure_rolls_back_without_leaving_an_ownership_marker() {
+    let fixture = supported_systemd_host();
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    seed_service_accounts(&fixture);
+    write_systemctl_fixture(&fixture, false);
+    let checker = sing_box_check_fixture(
+        &fixture,
+        true,
+        &["vless", "vmess", "hysteria2", "tuic", "anytls"],
+    );
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "install",
+            "--mode",
+            "external-proxy",
+            "--subscription-host",
+            "sub.example.test",
+            "--interface",
+            "ens3",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+            "--sing-box-bin",
+            checker.to_str().expect("checker path is UTF-8"),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("installation failed"));
+
+    assert!(
+        !fixture.path().join("var/lib/sbctl/ownership").exists(),
+        "a failed installation must not leave an ownership marker"
+    );
+    assert!(!fixture.path().join("etc/sbctl/config.toml").exists());
+    assert!(!fixture.path().join("usr/local/bin/sing-box").exists());
+    assert!(
+        !fixture
+            .path()
+            .join("etc/systemd/system/sing-box.service")
+            .exists()
+    );
+    assert!(
+        !fixture
+            .path()
+            .join("etc/systemd/system/sbctl.service")
+            .exists()
+    );
+    assert!(
+        !fixture
+            .path()
+            .join("etc/systemd/system/sbctl-accounting-reset.timer")
+            .exists()
+    );
+}
+
+#[test]
+fn install_health_check_failure_rolls_back_without_leaving_an_ownership_marker() {
+    let fixture = supported_systemd_host();
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    seed_service_accounts(&fixture);
+    write_systemctl_health_failing_fixture(&fixture);
+    let checker = sing_box_check_fixture(
+        &fixture,
+        true,
+        &["vless", "vmess", "hysteria2", "tuic", "anytls"],
+    );
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "install",
+            "--mode",
+            "external-proxy",
+            "--subscription-host",
+            "sub.example.test",
+            "--interface",
+            "ens3",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+            "--sing-box-bin",
+            checker.to_str().expect("checker path is UTF-8"),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("installation failed"));
+
+    assert!(
+        !fixture.path().join("var/lib/sbctl/ownership").exists(),
+        "a failed health check must not leave an ownership marker"
+    );
+    assert!(!fixture.path().join("etc/sbctl/config.toml").exists());
+    assert!(!fixture.path().join("usr/local/bin/sing-box").exists());
+    assert!(
+        !fixture
+            .path()
+            .join("etc/systemd/system/sbctl.service")
+            .exists()
+    );
+}
+
+fn seed_service_accounts(fixture: &TempDir) {
+    write_managed_file(
+        fixture,
+        "etc/passwd",
+        b"sbctl:x:999:999::/nonexistent:/usr/sbin/nologin\nsing-box:x:998:998::/nonexistent:/usr/sbin/nologin\n",
+    );
+}
+
+/// A systemctl stub that starts units successfully but reports every unit as
+/// inactive, so the install health check phase fails after a successful start.
+fn write_systemctl_health_failing_fixture(fixture: &TempDir) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = fixture.path().join("usr/bin/systemctl");
+        fs::create_dir_all(path.parent().expect("systemctl has a parent"))
+            .expect("systemctl directory is created");
+        fs::write(
+            &path,
+            "#!/bin/sh\ncase \"$1\" in\n  is-active) exit 1 ;;\n  *) exit 0 ;;\nesac\n",
+        )
+        .expect("systemctl fixture is written");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+            .expect("systemctl fixture is executable");
+    }
+}
+
+#[test]
 fn external_proxy_install_does_not_install_the_direct_https_socket() {
     let fixture = supported_systemd_host();
     write_traffic_fixture(&fixture, 100, 200, "boot-a");
@@ -2899,6 +3075,11 @@ fn uninstall_removes_the_direct_https_socket_unit() {
             .join("etc/systemd/system/sbctl-http.socket")
             .exists()
     );
+
+    // A `--no-start` fixture install defers startup and the health check, so
+    // it never writes the ownership marker. Seed it here so the uninstall flow
+    // recognizes the fixture as an sbctl-managed deployment.
+    write_managed_file(&fixture, "var/lib/sbctl/ownership", b"sbctl-managed-v1\n");
 
     Command::cargo_bin("sbctl")
         .expect("sbctl binary is built")
