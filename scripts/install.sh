@@ -24,12 +24,11 @@ case "$(dpkg --print-architecture)" in
   amd64|arm64) arch=$(dpkg --print-architecture) ;;
   *) echo "仅支持 amd64 和 arm64" >&2; exit 2 ;;
 esac
-placeholder='{arch}'
-manifest_url=${manifest_url_template//$placeholder/$arch}
+manifest_url=$(printf '%s' "$manifest_url_template" | sed "s/{arch}/$arch/g")
 work_dir=$(mktemp -d)
 trap 'rm -rf "$work_dir"' EXIT
 
-curl --fail --location --silent --show-error "$manifest_url" >"$work_dir/manifest.json"
+curl --fail --globoff --location --silent --show-error "$manifest_url" >"$work_dir/manifest.json"
 artifact_url=$(jq -er '.sbctl.url' "$work_dir/manifest.json")
 expected_sha=$(jq -er '.sbctl.sha256' "$work_dir/manifest.json")
 curl --fail --location --silent --show-error "$artifact_url" >"$work_dir/sbctl"
