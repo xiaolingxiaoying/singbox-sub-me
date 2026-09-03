@@ -70,6 +70,20 @@ done
 query_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2080/sub/$credential/uri?credential=$credential")
 test "$query_status" = 404 || fail 'query-string credential was accepted'
 
+# Anchored-month before its first reset is a valid pending state; DST collisions are rejected.
+fixture_root_for anchored "$platform"
+if "$sbctl" --root "$root" config init --mode ip-fallback --subscription-host 127.0.0.1 --http-port 2084 --interface ens3 --protocol vless-reality --reality-decoy-sni www.cloudflare.com --accounting-policy anchored-month --accounting-timezone America/New_York --anchored-reset-at 2024-03-10T02:30 >"$work/dst.out" 2>&1; then
+  fail 'nonexistent DST anchored reset was accepted'
+fi
+grep -F 'does not exist in the accounting timezone' "$work/dst.out" >/dev/null || fail 'missing nonexistent DST diagnostic'
+if "$sbctl" --root "$root" config init --mode ip-fallback --subscription-host 127.0.0.1 --http-port 2085 --interface ens3 --protocol vless-reality --reality-decoy-sni www.cloudflare.com --accounting-policy anchored-month --accounting-timezone America/New_York --anchored-reset-at 2024-11-03T01:30 >"$work/dst2.out" 2>&1; then
+  fail 'ambiguous DST anchored reset was accepted'
+fi
+grep -F 'ambiguous in the accounting timezone' "$work/dst2.out" >/dev/null || fail 'missing ambiguous DST diagnostic'
+"$sbctl" --root "$root" config init --mode ip-fallback --subscription-host 127.0.0.1 --http-port 2083 --interface ens3 --protocol vless-reality --reality-decoy-sni www.cloudflare.com --accounting-policy anchored-month --accounting-timezone UTC --anchored-reset-at "$(date -d '+2 months' +%Y-%m-%dT%H:%M)"
+contains "$("$sbctl" --root "$root" traffic)" 'accounting period: pending-first-reset'
+contains "$("$sbctl" --root "$root" traffic)" 'total: 0 bytes'
+
 # Reverse-proxy mode must bind loopback and return all formats from the five-node set.
 fixture_root_for reverse "$platform"
 "$sbctl" --root "$root" config init --mode external-proxy --subscription-host sub.example.test --listen-port 2081 --interface ens3 --protocol vless-reality --protocol vmess-websocket --protocol hysteria2 --protocol tuic --protocol anytls --reality-decoy-sni www.cloudflare.com --sing-box-bin "$fake_sing_box"

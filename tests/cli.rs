@@ -1327,6 +1327,136 @@ fn traffic_and_status_report_vps_traffic_for_the_detected_default_route_interfac
 }
 
 #[test]
+fn configuration_init_defaults_the_accounting_timezone_to_utc() {
+    let fixture = TempDir::new().expect("temporary root is created");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "203.0.113.7",
+            "--http-port",
+            "2080",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+
+    let config = fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
+        .expect("configuration is persisted");
+    assert!(config.contains("accounting_timezone = \"UTC\""));
+}
+
+#[test]
+fn anchored_month_before_the_first_reset_reports_pending_first_reset_with_zero_usage() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "203.0.113.7",
+            "--http-port",
+            "2080",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+            "--accounting-policy",
+            "anchored-month",
+            "--accounting-timezone",
+            "UTC",
+            "--anchored-reset-at",
+            "2099-01-01T00:00",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "traffic",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "accounting period: pending-first-reset",
+        ))
+        .stdout(predicate::str::contains("total: 0 bytes"))
+        .stdout(predicate::str::contains(
+            "next reset: 2099-01-01T00:00:00+00:00",
+        ));
+}
+
+#[test]
+fn anchored_reset_rejects_nonexistent_and_ambiguous_dst_local_times() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let anchored_init = |reset_at: &str| {
+        let mut command = Command::cargo_bin("sbctl").expect("sbctl binary is built");
+        command
+            .arg("--root")
+            .arg(fixture.path())
+            .arg("config")
+            .arg("init")
+            .arg("--mode")
+            .arg("ip-fallback")
+            .arg("--subscription-host")
+            .arg("203.0.113.7")
+            .arg("--http-port")
+            .arg("2080")
+            .arg("--interface")
+            .arg("ens3")
+            .arg("--protocol")
+            .arg("vless-reality")
+            .arg("--reality-decoy-sni")
+            .arg("www.cloudflare.com")
+            .arg("--accounting-policy")
+            .arg("anchored-month")
+            .arg("--accounting-timezone")
+            .arg("America/New_York")
+            .arg("--anchored-reset-at")
+            .arg(reset_at);
+        command
+    };
+
+    anchored_init("2024-03-10T02:30")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "does not exist in the accounting timezone",
+        ));
+    anchored_init("2024-11-03T01:30")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "ambiguous in the accounting timezone",
+        ));
+    assert!(!fixture.path().join("etc/sbctl/config.toml").exists());
+}
+
+#[test]
 fn help_lists_the_safe_install_and_status_commands() {
     Command::cargo_bin("sbctl")
         .expect("sbctl binary is built")

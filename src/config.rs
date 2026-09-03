@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::Engine;
+use chrono::{Datelike, LocalResult, TimeZone, Timelike};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -360,11 +361,12 @@ impl DeploymentConfig {
                 "subscription credential must be a URL-safe 256-bit secret",
             ));
         }
-        if self.accounting_timezone.parse::<chrono_tz::Tz>().is_err() {
-            return Err(ConfigError::InvalidValue(
-                "accounting timezone must be a named IANA timezone",
-            ));
-        }
+        let accounting_timezone =
+            self.accounting_timezone
+                .parse::<chrono_tz::Tz>()
+                .map_err(|_| {
+                    ConfigError::InvalidValue("accounting timezone must be a named IANA timezone")
+                })?;
         match self.accounting_policy {
             AccountingPolicy::NaturalMonth if self.anchored_reset_at.is_some() => {
                 return Err(ConfigError::InvalidValue(
@@ -377,11 +379,11 @@ impl DeploymentConfig {
                         "Anchored-month reset requires an anchored reset date and time",
                     ));
                 };
-                if chrono::NaiveDateTime::parse_from_str(reset_at, "%Y-%m-%dT%H:%M").is_err() {
-                    return Err(ConfigError::InvalidValue(
-                        "anchored reset time must use YYYY-MM-DDTHH:MM",
-                    ));
-                }
+                let reset = chrono::NaiveDateTime::parse_from_str(reset_at, "%Y-%m-%dT%H:%M")
+                    .map_err(|_| {
+                        ConfigError::InvalidValue("anchored reset time must use YYYY-MM-DDTHH:MM")
+                    })?;
+                validate_anchored_reset_local_time(accounting_timezone, reset)?;
             }
             _ => {}
         }
@@ -540,6 +542,30 @@ fn validate_enabled_credentials(
         return Err(ConfigError::InvalidValue(message));
     }
     Ok(())
+}
+
+/// Rejects an anchored reset instant whose local time is skipped or repeated by
+/// a DST transition in the accounting timezone, so the schedule is unambiguous.
+fn validate_anchored_reset_local_time(
+    timezone: chrono_tz::Tz,
+    reset: chrono::NaiveDateTime,
+) -> Result<(), ConfigError> {
+    match timezone.with_ymd_and_hms(
+        reset.year(),
+        reset.month(),
+        reset.day(),
+        reset.hour(),
+        reset.minute(),
+        0,
+    ) {
+        LocalResult::Single(_) => Ok(()),
+        LocalResult::Ambiguous(_, _) => Err(ConfigError::InvalidValue(
+            "anchored reset time is ambiguous in the accounting timezone",
+        )),
+        LocalResult::None => Err(ConfigError::InvalidValue(
+            "anchored reset time does not exist in the accounting timezone",
+        )),
+    }
 }
 
 fn validate_requested_ports(
@@ -758,6 +784,10 @@ pub enum ConfigError {
     Storage(#[from] io::Error),
     #[error("could not update deployment state: {0}")]
     StateContent(String),
+    #[error("VPS traffic state is corrupted: {0}")]
+    StateCorrupt(String),
+    #[error("VPS traffic state schema version {0} is not supported")]
+    StateSchemaMismatch(u32),
 }
 
 pub struct DeploymentStore {
@@ -1036,7 +1066,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        DeploymentConfig, DeploymentStore, ManagedProtocol, ProtocolPorts, SubscriptionMode,
+        AccountingPolicy, DeploymentConfig, DeploymentStore, ManagedProtocol, ProtocolPorts,
+        SubscriptionMode,
     };
 
     #[test]
@@ -1293,5 +1324,75 @@ mod tests {
                 return port;
             }
         }
+    }
+
+    #[test]
+    fn accounting_timezone_defaults_to_utc() {
+        let config = DeploymentConfig::new(
+            SubscriptionMode::IpFallback,
+            "203.0.113.7".into(),
+            None,
+            Some(2080),
+            "ens3".into(),
+            vec![ManagedProtocol::VlessReality],
+            Some("www.cloudflare.com".into()),
+        )
+        .expect("a default deployment is valid");
+
+        assert_eq!(config.accounting_timezone, "UTC");
+    }
+
+    #[test]
+    fn anchored_reset_rejects_a_nonexistent_dst_local_time() {
+        let config = anchored_reset_config("America/New_York", "2024-03-10T02:30")
+            .expect("base anchored config is valid");
+
+        assert!(matches!(
+            config.validate(),
+            Err(super::ConfigError::InvalidValue(
+                "anchored reset time does not exist in the accounting timezone"
+            ))
+        ));
+    }
+
+    #[test]
+    fn anchored_reset_rejects_an_ambiguous_dst_local_time() {
+        let config = anchored_reset_config("America/New_York", "2024-11-03T01:30")
+            .expect("base anchored config is valid");
+
+        assert!(matches!(
+            config.validate(),
+            Err(super::ConfigError::InvalidValue(
+                "anchored reset time is ambiguous in the accounting timezone"
+            ))
+        ));
+    }
+
+    #[test]
+    fn anchored_reset_accepts_a_stable_dst_local_time() {
+        let config = anchored_reset_config("America/New_York", "2024-06-15T09:30")
+            .expect("a stable anchored reset is valid");
+
+        assert!(config.validate().is_ok());
+    }
+
+    fn anchored_reset_config(
+        timezone: &str,
+        reset_at: &str,
+    ) -> Result<DeploymentConfig, super::ConfigError> {
+        let mut config = DeploymentConfig::new_with_ports(
+            SubscriptionMode::IpFallback,
+            "203.0.113.7".into(),
+            None,
+            Some(2080),
+            "ens3".into(),
+            vec![ManagedProtocol::VlessReality],
+            Some("www.cloudflare.com".into()),
+            ProtocolPorts::default(),
+        )?;
+        config.accounting_policy = AccountingPolicy::AnchoredMonth;
+        config.accounting_timezone = timezone.to_owned();
+        config.anchored_reset_at = Some(reset_at.to_owned());
+        Ok(config)
     }
 }

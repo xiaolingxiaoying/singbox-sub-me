@@ -175,7 +175,7 @@ enum ConfigCommand {
         monthly_traffic_limit: u64,
         #[arg(long, value_enum, default_value_t = CliAccountingPolicy::NaturalMonth)]
         accounting_policy: CliAccountingPolicy,
-        /// Named IANA timezone; defaults to the VPS system timezone when available.
+        /// Named IANA timezone; defaults to UTC.
         #[arg(long)]
         accounting_timezone: Option<String>,
         /// Required for anchored-month: YYYY-MM-DDTHH:MM in the accounting timezone.
@@ -983,8 +983,9 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
                 config.subscription_listen_port = listen_port;
                 config.monthly_traffic_limit = monthly_traffic_limit;
                 config.accounting_policy = accounting_policy.into();
-                config.accounting_timezone =
-                    accounting_timezone.unwrap_or_else(|| system_accounting_timezone(root));
+                if let Some(timezone) = accounting_timezone {
+                    config.accounting_timezone = timezone;
+                }
                 config.anchored_reset_at = anchored_reset_at;
                 config.validate()?;
                 if let Some(port) = config.subscription_listen_port {
@@ -1066,12 +1067,4 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
             ExitCode::from(2)
         }
     }
-}
-
-fn system_accounting_timezone(root: &Path) -> String {
-    std::fs::read_to_string(root.join("etc/timezone"))
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| value.parse::<chrono_tz::Tz>().is_ok())
-        .unwrap_or_else(|| "UTC".to_owned())
 }
