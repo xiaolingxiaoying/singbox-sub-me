@@ -863,6 +863,362 @@ fn domain_nodes_export_tuic_and_anytls_with_independent_tls_credentials() {
 }
 
 #[test]
+fn five_protocols_export_the_same_canonical_nodes_across_server_and_subscription_formats() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let checker = sing_box_check_fixture(
+        &fixture,
+        true,
+        &["vless", "vmess", "hysteria2", "tuic", "anytls"],
+    );
+    let root = fixture.path().to_str().expect("fixture path is UTF-8");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            root,
+            "config",
+            "init",
+            "--mode",
+            "direct",
+            "--subscription-host",
+            "sub.example.test",
+            "--proxy-host",
+            "proxy.example.test",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--protocol",
+            "vmess-websocket",
+            "--protocol",
+            "hysteria2",
+            "--protocol",
+            "tuic",
+            "--protocol",
+            "anytls",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+            "--sing-box-bin",
+            checker.to_str().expect("checker path is UTF-8"),
+        ])
+        .assert()
+        .success();
+
+    let artifacts = fixture.path().join("var/lib/sbctl/artifacts");
+    let server: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(artifacts.join("sing-box-server.json"))
+            .expect("server configuration is cached"),
+    )
+    .expect("server configuration is JSON");
+    let subscription: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(artifacts.join("subscription-sing-box.json"))
+            .expect("sing-box subscription is cached"),
+    )
+    .expect("subscription is JSON");
+    let clash = fs::read_to_string(artifacts.join("subscription-clash.yaml"))
+        .expect("Clash subscription is cached");
+    let uri = fs::read_to_string(artifacts.join("subscription-uri.txt"))
+        .expect("URI subscription is cached");
+    let inbounds = server["inbounds"].as_array().expect("inbounds are present");
+    let outbounds = subscription["outbounds"]
+        .as_array()
+        .expect("outbounds are present");
+    assert_eq!(inbounds.len(), 5);
+    assert_eq!(outbounds.len(), 5);
+
+    for outbound in outbounds {
+        let kind = outbound["type"].as_str().expect("node type is present");
+        let inbound = inbounds
+            .iter()
+            .find(|inbound| inbound["type"] == outbound["type"])
+            .expect("every exported node has a server inbound");
+        assert_eq!(
+            outbound["server_port"],
+            inbound["listen_port"],
+            "{kind} keeps one port across the server and the client configuration"
+        );
+        assert_eq!(
+            outbound["server"],
+            "proxy.example.test",
+            "{kind} uses the proxy host in every client format"
+        );
+        let expected_sni = if kind == "vless" {
+            "www.cloudflare.com"
+        } else {
+            "sub.example.test"
+        };
+        assert_eq!(
+            outbound["tls"]["server_name"],
+            expected_sni,
+            "{kind} uses the canonical TLS server name"
+        );
+        assert!(
+            clash.contains(&outbound["server_port"].as_u64().expect("port").to_string()),
+            "Clash carries the {kind} port"
+        );
+        let port_text = outbound["server_port"].as_u64().expect("port").to_string();
+        if kind == "vmess" {
+            let vmess_uri = uri
+                .lines()
+                .find(|line| line.starts_with("vmess://"))
+                .expect("VMess URI is present");
+            let payload: serde_json::Value = serde_json::from_slice(
+                &base64::engine::general_purpose::STANDARD
+                    .decode(vmess_uri.trim_start_matches("vmess://"))
+                    .expect("VMess URI payload is base64"),
+            )
+            .expect("VMess URI payload is JSON");
+            assert_eq!(payload["port"], port_text, "URI carries the vmess port");
+        } else {
+            assert!(
+                uri.contains(&port_text),
+                "URI carries the {kind} port"
+            );
+        }
+        assert!(uri.contains("proxy.example.test"));
+        for secret in [
+            outbound["uuid"].as_str(),
+            outbound["password"].as_str(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(
+                clash.contains(secret),
+                "Clash carries the same {kind} credential as the sing-box JSON"
+            );
+            if kind == "vmess" {
+                let vmess_uri = uri
+                    .lines()
+                    .find(|line| line.starts_with("vmess://"))
+                    .expect("VMess URI is present");
+                let payload: serde_json::Value = serde_json::from_slice(
+                    &base64::engine::general_purpose::STANDARD
+                        .decode(vmess_uri.trim_start_matches("vmess://"))
+                        .expect("VMess URI payload is base64"),
+                )
+                .expect("VMess URI payload is JSON");
+                assert_eq!(
+                    payload["id"], outbound["uuid"],
+                    "URI carries the same VMess credential as the sing-box JSON"
+                );
+            } else {
+                assert!(
+                    uri.contains(secret),
+                    "URI carries the same {kind} credential as the sing-box JSON"
+                );
+            }
+        }
+    }
+    let _: serde_yaml::Value = serde_yaml::from_str(&clash).expect("Clash subscription is YAML");
+}
+
+#[test]
+fn regenerate_validates_before_replacing_artifacts_and_the_active_config() {
+    let fixture = supported_systemd_host();
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    let checker = sing_box_check_fixture(&fixture, true, &["vless"]);
+    let root = fixture.path().to_str().expect("fixture path is UTF-8");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            root,
+            "install",
+            "--subscription-host",
+            "sub.example.test",
+            "--interface",
+            "ens3",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+            "--sing-box-bin",
+            checker.to_str().expect("checker path is UTF-8"),
+            "--no-start",
+        ])
+        .assert()
+        .success();
+
+    let config_path = fixture.path().join("etc/sbctl/config.toml");
+    let configuration = fs::read_to_string(&config_path).expect("configuration is persisted");
+    let changed = configuration.replace(
+        "reality_decoy_sni = \"www.cloudflare.com\"",
+        "reality_decoy_sni = \"www.apple.com\"",
+    );
+    assert_ne!(changed, configuration, "the canonical node field is edited");
+    fs::write(&config_path, changed).expect("configuration is edited");
+
+    let artifacts = fixture.path().join("var/lib/sbctl/artifacts");
+    let active = fixture.path().join("etc/sing-box/config.json");
+    let artifact_names = [
+        "sing-box-server.json",
+        "subscription-sing-box.json",
+        "subscription-clash.yaml",
+        "subscription-uri.txt",
+    ];
+    let snapshot = || {
+        let mut files = Vec::new();
+        for name in artifact_names {
+            files.push(fs::read(artifacts.join(name)).expect("artifact is readable"));
+        }
+        files.push(fs::read(&active).expect("active configuration is readable"));
+        files
+    };
+    let before = snapshot();
+
+    let rejecting_fixture = TempDir::new().expect("rejecting checker root is created");
+    let rejecting = sing_box_check_fixture(&rejecting_fixture, false, &[]);
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            root,
+            "regenerate",
+            "--sing-box-bin",
+            rejecting.to_str().expect("rejecting checker path is UTF-8"),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "sing-box configuration check failed",
+        ));
+    assert_eq!(
+        snapshot(),
+        before,
+        "a rejected regeneration leaves every artifact and the active config unchanged"
+    );
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            root,
+            "regenerate",
+            "--sing-box-bin",
+            checker.to_str().expect("accepting checker path is UTF-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("regenerated and validated"));
+    assert_ne!(
+        snapshot(),
+        before,
+        "a passing regeneration atomically replaces artifacts and the active config"
+    );
+    for name in artifact_names {
+        let contents = fs::read_to_string(artifacts.join(name)).expect("artifact is readable");
+        assert!(
+            contents.contains("www.apple.com"),
+            "{name} carries the new canonical node field"
+        );
+    }
+    assert!(
+        fs::read_to_string(&active)
+            .expect("active configuration is readable")
+            .contains("www.apple.com"),
+        "the active configuration follows the regenerated server configuration"
+    );
+}
+
+#[test]
+fn proxy_credentials_cannot_read_the_subscription_and_the_subscription_credential_is_not_a_node_credential()
+{
+    let fixture = TempDir::new().expect("temporary root is created");
+    let checker = sing_box_check_fixture(
+        &fixture,
+        true,
+        &["vless", "vmess", "hysteria2", "tuic", "anytls"],
+    );
+    let port = TcpListener::bind("127.0.0.1:0")
+        .expect("an ephemeral port is available")
+        .local_addr()
+        .expect("address is available")
+        .port();
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    let root = fixture.path().to_str().expect("fixture path is UTF-8");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            root,
+            "config",
+            "init",
+            "--mode",
+            "external-proxy",
+            "--subscription-host",
+            "sub.example.test",
+            "--listen-port",
+            &port.to_string(),
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--protocol",
+            "vmess-websocket",
+            "--protocol",
+            "hysteria2",
+            "--protocol",
+            "tuic",
+            "--protocol",
+            "anytls",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+            "--sing-box-bin",
+            checker.to_str().expect("checker path is UTF-8"),
+        ])
+        .assert()
+        .success();
+
+    let configuration = fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
+        .expect("configuration is persisted");
+    let deployment: sbctl::config::DeploymentConfig =
+        toml::from_str(&configuration).expect("configuration is valid TOML");
+    let subscription_credential = deployment.subscription_credential.clone();
+    let node_secrets = sbctl::canonical::nodes(&deployment)
+        .into_iter()
+        .flat_map(|node| node.secrets().into_iter().map(str::to_owned).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    assert!(
+        !node_secrets.contains(&subscription_credential),
+        "the Subscription credential is independent from every Proxy credential"
+    );
+    for name in [
+        "sing-box-server.json",
+        "subscription-sing-box.json",
+        "subscription-clash.yaml",
+        "subscription-uri.txt",
+    ] {
+        let contents = fs::read_to_string(fixture.path().join("var/lib/sbctl/artifacts").join(name))
+            .expect("artifact is readable");
+        assert!(
+            !contents.contains(&subscription_credential),
+            "the Subscription credential never appears in {name}"
+        );
+    }
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(["--root", root, "accounting-reset"])
+        .assert()
+        .success();
+    let stderr_log = fixture.path().join("serve.err");
+    let mut server = spawn_sbctl_serve(&fixture, port, node_secrets.len() + 1, &stderr_log);
+
+    let authorized = http_get(port, &format!("/sub/{subscription_credential}/uri"));
+    assert!(authorized.starts_with("HTTP/1.1 200 OK"));
+    for secret in &node_secrets {
+        let rejected = http_get(port, &format!("/sub/{secret}/uri"));
+        assert!(
+            rejected.starts_with("HTTP/1.1 404 Not Found"),
+            "a Proxy credential must not authorize subscription retrieval"
+        );
+    }
+    assert!(server.wait().expect("server exits").success());
+}
+
+#[test]
 fn configuration_initialization_checks_generated_sing_box_config_before_persisting() {
     let unchecked = TempDir::new().expect("temporary root is created");
     Command::cargo_bin("sbctl")

@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::{ConfigError, DeploymentConfig, DeploymentStore, ManagedProtocol};
+use crate::config::{ConfigError, DeploymentConfig, DeploymentStore};
 
 const SING_BOX_UNIT: &str = "etc/systemd/system/sing-box.service";
 const SBCTL_UNIT: &str = "etc/systemd/system/sbctl.service";
@@ -262,38 +262,15 @@ pub fn required_firewall_ports(config: &DeploymentConfig) -> Vec<String> {
 }
 
 pub fn enabled_nodes(config: &DeploymentConfig) -> String {
-    config
-        .enabled_protocols
+    crate::canonical::nodes(config)
         .iter()
-        .map(|protocol| match protocol {
-            ManagedProtocol::VlessReality => format!(
-                "vless-reality: TCP {}",
-                config
-                    .vless_reality
-                    .as_ref()
-                    .expect("validated")
-                    .listen_port
-            ),
-            ManagedProtocol::VmessWebsocket => format!(
-                "vmess-websocket: TCP {}",
-                config
-                    .vmess_websocket
-                    .as_ref()
-                    .expect("validated")
-                    .listen_port
-            ),
-            ManagedProtocol::Hysteria2 => format!(
-                "hysteria2: UDP {}",
-                config.hysteria2.as_ref().expect("validated").listen_port
-            ),
-            ManagedProtocol::Tuic => format!(
-                "tuic: UDP {}",
-                config.tuic.as_ref().expect("validated").listen_port
-            ),
-            ManagedProtocol::Anytls => format!(
-                "anytls: TCP {}",
-                config.anytls.as_ref().expect("validated").listen_port
-            ),
+        .map(|node| {
+            format!(
+                "{}: {} {}",
+                node.protocol(),
+                node.transport().to_uppercase(),
+                node.port()
+            )
         })
         .collect::<Vec<_>>()
         .join("\n")

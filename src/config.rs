@@ -287,15 +287,15 @@ impl DeploymentConfig {
             .chain(self.tuic.as_ref().map(|node| node.listen_port))
             .chain(self.anytls.as_ref().map(|node| node.listen_port))
             .collect::<Vec<_>>();
-        if listener_ports.iter().any(|port| *port <= 1024) {
-            return Err(ConfigError::InvalidValue(
-                "Managed protocol ports must be higher than 1024",
-            ));
-        }
         for (index, port) in listener_ports.iter().enumerate() {
+            if !(MIN_PROTOCOL_PORT..=MAX_PROTOCOL_PORT).contains(port) {
+                return Err(ConfigError::InvalidValue(
+                    "Managed protocol ports must be in 10000-65535",
+                ));
+            }
             if listener_ports[..index].contains(port) {
                 return Err(ConfigError::InvalidValue(
-                    "Managed protocol ports must be unique",
+                    "Managed protocol ports must be unique across TCP and UDP",
                 ));
             }
         }
@@ -587,14 +587,14 @@ fn validate_requested_ports(
                     "cannot specify a port for a disabled Managed protocol",
                 ));
             }
-            if port <= 1024 {
+            if !(MIN_PROTOCOL_PORT..=MAX_PROTOCOL_PORT).contains(&port) {
                 return Err(ConfigError::InvalidValue(
-                    "Managed protocol ports must be higher than 1024",
+                    "Managed protocol ports must be in 10000-65535",
                 ));
             }
             if values.contains(&port) {
                 return Err(ConfigError::InvalidValue(
-                    "Managed protocol ports must be unique",
+                    "Managed protocol ports must be unique across TCP and UDP",
                 ));
             }
             values.push(port);
@@ -896,6 +896,13 @@ impl DeploymentStore {
 
     pub fn write_artifact(&self, name: &str, contents: &[u8]) -> Result<(), ConfigError> {
         let _lock = self.operation_lock()?;
+        self.write_artifact_unlocked(name, contents)
+    }
+
+    /// Replaces a cached artifact while an operation lock is already held.
+    /// Callers use the locked write helpers only while the guard from
+    /// `acquire_operation_lock` lives.
+    pub fn write_artifact_locked(&self, name: &str, contents: &[u8]) -> Result<(), ConfigError> {
         self.write_artifact_unlocked(name, contents)
     }
 
@@ -1295,6 +1302,63 @@ mod tests {
             },
         );
         assert!(disabled.is_err());
+    }
+
+    #[test]
+    fn requested_protocol_ports_reject_a_port_below_the_canonical_high_range() {
+        let result = DeploymentConfig::new_with_ports(
+            SubscriptionMode::IpFallback,
+            "203.0.113.7".into(),
+            None,
+            Some(2080),
+            "ens3".into(),
+            vec![ManagedProtocol::VlessReality],
+            Some("www.cloudflare.com".into()),
+            ProtocolPorts {
+                vless_reality: Some(5000),
+                ..ProtocolPorts::default()
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(super::ConfigError::InvalidValue(
+                "Managed protocol ports must be in 10000-65535"
+            ))
+        ));
+    }
+
+    #[test]
+    fn a_hand_edited_config_rejects_an_out_of_range_or_duplicate_protocol_port() {
+        let config = DeploymentConfig::new(
+            SubscriptionMode::Direct,
+            "sub.example.test".into(),
+            None,
+            None,
+            "ens3".into(),
+            vec![ManagedProtocol::VlessReality, ManagedProtocol::Hysteria2],
+            Some("www.cloudflare.com".into()),
+        )
+        .expect("a base deployment is valid");
+
+        let mut low_port = config.clone();
+        low_port.vless_reality.as_mut().unwrap().listen_port = 5000;
+        assert!(matches!(
+            low_port.validate(),
+            Err(super::ConfigError::InvalidValue(
+                "Managed protocol ports must be in 10000-65535"
+            ))
+        ));
+
+        let mut duplicate = config.clone();
+        let hysteria_port = duplicate.hysteria2.as_ref().unwrap().listen_port;
+        duplicate.vless_reality.as_mut().unwrap().listen_port = hysteria_port;
+        assert!(matches!(
+            duplicate.validate(),
+            Err(super::ConfigError::InvalidValue(
+                "Managed protocol ports must be unique across TCP and UDP"
+            ))
+        ));
     }
 
     #[test]

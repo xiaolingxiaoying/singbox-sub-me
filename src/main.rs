@@ -128,6 +128,14 @@ enum Command {
     /// Run the periodic accounting reset task (managed by the systemd timer).
     #[command(name = "accounting-reset", hide = true)]
     AccountingReset,
+    /// Validate and atomically replace the canonical protocol artifacts and
+    /// the active sing-box configuration from the persisted deployment.
+    #[command(name = "regenerate", hide = true)]
+    Regenerate {
+        /// sing-box binary used to validate the regenerated server configuration.
+        #[arg(long, value_name = "PATH")]
+        sing_box_bin: Option<PathBuf>,
+    },
 }
 
 struct InstallOptions {
@@ -414,6 +422,7 @@ fn main() -> ExitCode {
         Command::Certificate { command } => run_certificate(root, command),
         Command::Config { command } => run_config(root, command),
         Command::AccountingReset => run_accounting_reset(root),
+        Command::Regenerate { sing_box_bin } => regenerate(root, sing_box_bin),
     }
 }
 
@@ -1086,6 +1095,31 @@ fn run_accounting_reset(root: &Path) -> ExitCode {
         }
         Err(error) => {
             eprintln!("accounting reset failed: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn regenerate(root: &Path, sing_box_bin: Option<PathBuf>) -> ExitCode {
+    let store = sbctl::config::DeploymentStore::new(root);
+    let update_active_config = root.join("var/lib/sbctl/ownership").is_file();
+    let result = store.load().and_then(|config| {
+        let binary = sing_box_bin.unwrap_or_else(|| root.join("usr/local/bin/sing-box"));
+        sbctl::subscription::regenerate(
+            &store,
+            &config,
+            Some(binary.as_path()),
+            update_active_config,
+        )
+        .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))
+    });
+    match result {
+        Ok(()) => {
+            println!("canonical protocol artifacts regenerated and validated");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("regenerate failed: {error}");
             ExitCode::from(2)
         }
     }

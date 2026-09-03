@@ -12,6 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
+use crate::canonical::CanonicalNode;
 use crate::config::{
     ConfigError, DeploymentConfig, DeploymentStore, ManagedProtocol, SubscriptionMode,
 };
@@ -20,6 +21,8 @@ const SING_BOX_ARTIFACT: &str = "subscription-sing-box.json";
 const CLASH_ARTIFACT: &str = "subscription-clash.yaml";
 const URI_ARTIFACT: &str = "subscription-uri.txt";
 const SING_BOX_SERVER_ARTIFACT: &str = "sing-box-server.json";
+const ARTIFACTS_RELATIVE_DIR: &str = "var/lib/sbctl/artifacts";
+const ACTIVE_CONFIG_RELATIVE_PATH: &str = "etc/sing-box/config.json";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubscriptionFormat {
@@ -74,25 +77,93 @@ pub enum SubscriptionError {
     Storage(#[from] ConfigError),
 }
 
+/// Regenerates the four cached artifacts from the canonical node model and
+/// replaces them atomically under one operation lock. When `sing_box_bin` is
+/// supplied the new server configuration is validated with `sing-box check`
+/// before any file is replaced, so a failed check leaves every existing
+/// artifact untouched. If any replacement fails mid-way, the already-replaced
+/// files are restored to their previous complete versions. `update_active_config`
+/// additionally re-syncs the active sing-box configuration consumed by the
+/// managed service; reload/restart of the service is the caller's step.
 pub fn regenerate(
     store: &DeploymentStore,
     config: &DeploymentConfig,
+    sing_box_bin: Option<&Path>,
+    update_active_config: bool,
 ) -> Result<(), SubscriptionError> {
-    for (name, contents) in generated_artifacts(config)? {
-        store.write_artifact(name, contents.as_bytes())?;
+    let artifacts = generated_artifacts(config)?;
+    if let Some(sing_box_bin) = sing_box_bin {
+        let server = server_artifact(&artifacts)?;
+        check_sing_box_config(sing_box_bin, server)?;
+    }
+    let _lock = store.acquire_operation_lock()?;
+    let prior_artifacts = artifacts
+        .iter()
+        .map(|(name, _)| (*name, read_artifact(store, name)))
+        .collect::<Vec<_>>();
+    let prior_active = if update_active_config {
+        fs::read(store.root().join(ACTIVE_CONFIG_RELATIVE_PATH)).ok()
+    } else {
+        None
+    };
+    for (name, contents) in &artifacts {
+        if let Err(error) = store.write_artifact_locked(name, contents.as_bytes()) {
+            restore_replaced(store, &prior_artifacts, prior_active.as_deref());
+            return Err(SubscriptionError::Storage(error));
+        }
+    }
+    if update_active_config {
+        let server = server_artifact(&artifacts)?;
+        if let Err(error) = store.write_relative_locked(ACTIVE_CONFIG_RELATIVE_PATH, server.as_bytes()) {
+            restore_replaced(store, &prior_artifacts, prior_active.as_deref());
+            return Err(SubscriptionError::Storage(error));
+        }
     }
     Ok(())
+}
+
+fn server_artifact<'a>(
+    artifacts: &'a [(&'static str, String)],
+) -> Result<&'a str, SubscriptionError> {
+    artifacts
+        .iter()
+        .find(|(name, _)| *name == SING_BOX_SERVER_ARTIFACT)
+        .map(|(_, contents)| contents.as_str())
+        .ok_or_else(|| SubscriptionError::Check("no generated sing-box server configuration".to_owned()))
+}
+
+fn read_artifact(store: &DeploymentStore, name: &str) -> Option<Vec<u8>> {
+    fs::read(store.root().join(ARTIFACTS_RELATIVE_DIR).join(name)).ok()
+}
+
+/// Best-effort rollback of already-replaced artifacts and the active
+/// configuration after a mid-transaction write failure. Each write is atomic,
+/// so a failed write leaves its own target on the previous complete version.
+fn restore_replaced(
+    store: &DeploymentStore,
+    prior_artifacts: &[(&'static str, Option<Vec<u8>>)],
+    prior_active: Option<&[u8]>,
+) {
+    for (name, prior) in prior_artifacts.iter().rev() {
+        if let Some(prior) = prior {
+            let _ = store.write_artifact_locked(name, prior);
+        }
+    }
+    if let Some(prior_active) = prior_active {
+        let _ = store.write_relative_locked(ACTIVE_CONFIG_RELATIVE_PATH, prior_active);
+    }
 }
 
 pub fn generated_artifacts(
     config: &DeploymentConfig,
 ) -> Result<Vec<(&'static str, String)>, SubscriptionError> {
     ensure_subscription_nodes(config)?;
+    let nodes = crate::canonical::nodes(config);
     Ok(vec![
-        (SING_BOX_SERVER_ARTIFACT, sing_box_server(config)?),
-        (SING_BOX_ARTIFACT, sing_box(config)?),
-        (CLASH_ARTIFACT, clash(config)?),
-        (URI_ARTIFACT, uri(config)?),
+        (SING_BOX_SERVER_ARTIFACT, sing_box_server(config, &nodes)?),
+        (SING_BOX_ARTIFACT, sing_box(&nodes)?),
+        (CLASH_ARTIFACT, clash(&nodes)?),
+        (URI_ARTIFACT, uri(&nodes)?),
     ])
 }
 
@@ -388,42 +459,58 @@ pub fn ensure_external_proxy_listener_available(port: u16) -> Result<(), Subscri
         .map_err(|_| SubscriptionError::ListenerUnavailable(port))
 }
 
-fn sing_box(config: &DeploymentConfig) -> Result<String, SubscriptionError> {
-    let host = proxy_host(config);
+fn sing_box(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
     let mut outbounds = Vec::new();
-    if let Some(node) = &config.vless_reality {
-        let sni = config.reality_decoy_sni.as_deref().expect("validated SNI");
-        outbounds.push(json!({"type": "vless", "tag": "sbctl-vless-reality", "server": host,
-            "server_port": node.listen_port, "uuid": node.uuid, "flow": "xtls-rprx-vision",
-            "tls": {"enabled": true, "server_name": sni, "utls": {"enabled": true, "fingerprint": "chrome"},
-                "reality": {"enabled": true, "public_key": node.public_key, "short_id": node.short_id}}}));
-    }
-    if let Some(node) = &config.vmess_websocket {
-        outbounds.push(
-            json!({"type": "vmess", "tag": "sbctl-vmess-websocket", "server": host,
-            "server_port": node.listen_port, "uuid": node.uuid, "security": "auto", "alter_id": 0,
-            "transport": {"type": "ws", "path": node.path},
-            "tls": {"enabled": true, "server_name": config.subscription_host}}),
-        );
-    }
-    if let Some(node) = &config.hysteria2 {
-        outbounds.push(
-            json!({"type": "hysteria2", "tag": "sbctl-hysteria2", "server": host,
-            "server_port": node.listen_port, "password": node.password,
-            "tls": {"enabled": true, "server_name": config.subscription_host}}),
-        );
-    }
-    if let Some(node) = &config.tuic {
-        outbounds.push(json!({"type": "tuic", "tag": "sbctl-tuic", "server": host,
-            "server_port": node.listen_port, "uuid": node.uuid, "password": node.password,
-            "tls": {"enabled": true, "server_name": config.subscription_host}}));
-    }
-    if let Some(node) = &config.anytls {
-        outbounds.push(
-            json!({"type": "anytls", "tag": "sbctl-anytls", "server": host,
-            "server_port": node.listen_port, "password": node.password,
-            "tls": {"enabled": true, "server_name": config.subscription_host}}),
-        );
+    for node in nodes {
+        outbounds.push(match &node {
+            CanonicalNode::VlessReality {
+                host,
+                port,
+                uuid,
+                public_key,
+                short_id,
+                decoy_sni,
+                ..
+            } => json!({"type": "vless", "tag": node.tag(), "server": host,
+                "server_port": port, "uuid": uuid, "flow": "xtls-rprx-vision",
+                "tls": {"enabled": true, "server_name": decoy_sni, "utls": {"enabled": true, "fingerprint": "chrome"},
+                    "reality": {"enabled": true, "public_key": public_key, "short_id": short_id}}}),
+            CanonicalNode::VmessWebsocket {
+                host,
+                port,
+                tls_server_name,
+                uuid,
+                path,
+            } => json!({"type": "vmess", "tag": node.tag(), "server": host,
+                "server_port": port, "uuid": uuid, "security": "auto", "alter_id": 0,
+                "transport": {"type": "ws", "path": path},
+                "tls": {"enabled": true, "server_name": tls_server_name}}),
+            CanonicalNode::Hysteria2 {
+                host,
+                port,
+                tls_server_name,
+                password,
+            } => json!({"type": "hysteria2", "tag": node.tag(), "server": host,
+                "server_port": port, "password": password,
+                "tls": {"enabled": true, "server_name": tls_server_name}}),
+            CanonicalNode::Tuic {
+                host,
+                port,
+                tls_server_name,
+                uuid,
+                password,
+            } => json!({"type": "tuic", "tag": node.tag(), "server": host,
+                "server_port": port, "uuid": uuid, "password": password,
+                "tls": {"enabled": true, "server_name": tls_server_name}}),
+            CanonicalNode::Anytls {
+                host,
+                port,
+                tls_server_name,
+                password,
+            } => json!({"type": "anytls", "tag": node.tag(), "server": host,
+                "server_port": port, "password": password,
+                "tls": {"enabled": true, "server_name": tls_server_name}}),
+        });
     }
     Ok(
         serde_json::to_string_pretty(&json!({"outbounds": outbounds}))
@@ -431,36 +518,62 @@ fn sing_box(config: &DeploymentConfig) -> Result<String, SubscriptionError> {
     )
 }
 
-fn sing_box_server(config: &DeploymentConfig) -> Result<String, SubscriptionError> {
-    let mut inbounds = Vec::new();
-    if let Some(node) = &config.vless_reality {
-        let sni = config.reality_decoy_sni.as_deref().expect("validated SNI");
-        inbounds.push(json!({"type": "vless", "tag": "sbctl-vless-reality", "listen": "::",
-            "listen_port": node.listen_port, "users": [{"uuid": node.uuid, "flow": "xtls-rprx-vision"}],
-            "tls": {"enabled": true, "reality": {"enabled": true,
-                "handshake": {"server": sni, "server_port": 443}, "private_key": node.private_key,
-                "short_id": [node.short_id]}}}));
-    }
+fn sing_box_server(
+    config: &DeploymentConfig,
+    nodes: &[CanonicalNode],
+) -> Result<String, SubscriptionError> {
     let certificate = certificate_tls_config(config);
-    if let Some(node) = &config.vmess_websocket {
-        inbounds.push(
-            json!({"type": "vmess", "tag": "sbctl-vmess-websocket", "listen": "::",
-            "listen_port": node.listen_port, "users": [{"uuid": node.uuid, "alter_id": 0}],
-            "transport": {"type": "ws", "path": node.path}, "tls": certificate}),
-        );
-    }
-    if let Some(node) = &config.hysteria2 {
-        inbounds.push(json!({"type": "hysteria2", "tag": "sbctl-hysteria2", "listen": "::",
-            "listen_port": node.listen_port, "users": [{"password": node.password}], "tls": certificate}));
-    }
-    if let Some(node) = &config.tuic {
-        inbounds.push(json!({"type": "tuic", "tag": "sbctl-tuic", "listen": "::",
-            "listen_port": node.listen_port, "users": [{"uuid": node.uuid, "password": node.password}],
-            "tls": certificate}));
-    }
-    if let Some(node) = &config.anytls {
-        inbounds.push(json!({"type": "anytls", "tag": "sbctl-anytls", "listen": "::",
-            "listen_port": node.listen_port, "users": [{"password": node.password}], "tls": certificate}));
+    let mut inbounds = Vec::new();
+    for node in nodes {
+        inbounds.push(match &node {
+            CanonicalNode::VlessReality {
+                port,
+                uuid,
+                private_key,
+                short_id,
+                decoy_sni,
+                ..
+            } => json!({"type": "vless", "tag": node.tag(), "listen": "::",
+                "listen_port": port, "users": [{"uuid": uuid, "flow": "xtls-rprx-vision"}],
+                "tls": {"enabled": true, "reality": {"enabled": true,
+                    "handshake": {"server": decoy_sni, "server_port": 443}, "private_key": private_key,
+                    "short_id": [short_id]}}}),
+            CanonicalNode::VmessWebsocket {
+                port,
+                tls_server_name,
+                uuid,
+                path,
+                ..
+            } => json!({"type": "vmess", "tag": node.tag(), "listen": "::",
+                "listen_port": port, "users": [{"uuid": uuid, "alter_id": 0}],
+                "transport": {"type": "ws", "path": path},
+                "tls": server_tls(tls_server_name, &certificate)}),
+            CanonicalNode::Hysteria2 {
+                port,
+                tls_server_name,
+                password,
+                ..
+            } => json!({"type": "hysteria2", "tag": node.tag(), "listen": "::",
+                "listen_port": port, "users": [{"password": password}],
+                "tls": server_tls(tls_server_name, &certificate)}),
+            CanonicalNode::Tuic {
+                port,
+                tls_server_name,
+                uuid,
+                password,
+                ..
+            } => json!({"type": "tuic", "tag": node.tag(), "listen": "::",
+                "listen_port": port, "users": [{"uuid": uuid, "password": password}],
+                "tls": server_tls(tls_server_name, &certificate)}),
+            CanonicalNode::Anytls {
+                port,
+                tls_server_name,
+                password,
+                ..
+            } => json!({"type": "anytls", "tag": node.tag(), "listen": "::",
+                "listen_port": port, "users": [{"password": password}],
+                "tls": server_tls(tls_server_name, &certificate)}),
+        });
     }
     Ok(
         serde_json::to_string_pretty(&json!({"inbounds": inbounds}))
@@ -468,73 +581,119 @@ fn sing_box_server(config: &DeploymentConfig) -> Result<String, SubscriptionErro
     )
 }
 
-fn clash(config: &DeploymentConfig) -> Result<String, SubscriptionError> {
-    let host = proxy_host(config);
+fn clash(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
     let mut proxies = String::from("proxies:\n");
-    if let Some(node) = &config.vless_reality {
-        let sni = config.reality_decoy_sni.as_deref().expect("validated SNI");
-        proxies.push_str(&format!("  - name: sbctl-vless-reality\n    type: vless\n    server: {host}\n    port: {}\n    uuid: {}\n    network: tcp\n    flow: xtls-rprx-vision\n    tls: true\n    servername: {sni}\n    client-fingerprint: chrome\n    reality-opts:\n      public-key: {}\n      short-id: {}\n", node.listen_port, node.uuid, node.public_key, node.short_id));
-    }
-    if let Some(node) = &config.vmess_websocket {
-        proxies.push_str(&format!("  - name: sbctl-vmess-websocket\n    type: vmess\n    server: {host}\n    port: {}\n    uuid: {}\n    alterId: 0\n    cipher: auto\n    tls: true\n    servername: {}\n    network: ws\n    ws-opts:\n      path: {}\n      headers:\n        Host: {}\n", node.listen_port, node.uuid, config.subscription_host, node.path, config.subscription_host));
-    }
-    if let Some(node) = &config.hysteria2 {
-        proxies.push_str(&format!("  - name: sbctl-hysteria2\n    type: hysteria2\n    server: {host}\n    port: {}\n    password: {}\n    sni: {}\n    skip-cert-verify: false\n", node.listen_port, node.password, config.subscription_host));
-    }
-    if let Some(node) = &config.tuic {
-        proxies.push_str(&format!("  - name: sbctl-tuic\n    type: tuic\n    server: {host}\n    port: {}\n    uuid: {}\n    password: {}\n    sni: {}\n    alpn:\n      - h3\n    skip-cert-verify: false\n", node.listen_port, node.uuid, node.password, config.subscription_host));
-    }
-    if let Some(node) = &config.anytls {
-        proxies.push_str(&format!("  - name: sbctl-anytls\n    type: anytls\n    server: {host}\n    port: {}\n    password: {}\n    tls: true\n    sni: {}\n    skip-cert-verify: false\n", node.listen_port, node.password, config.subscription_host));
+    for node in nodes {
+        let entry = match &node {
+            CanonicalNode::VlessReality {
+                host,
+                port,
+                uuid,
+                public_key,
+                short_id,
+                decoy_sni,
+                ..
+            } => format!("  - name: {}\n    type: vless\n    server: {host}\n    port: {port}\n    uuid: {uuid}\n    network: tcp\n    flow: xtls-rprx-vision\n    tls: true\n    servername: {decoy_sni}\n    client-fingerprint: chrome\n    reality-opts:\n      public-key: {public_key}\n      short-id: {short_id}\n", node.tag()),
+            CanonicalNode::VmessWebsocket {
+                host,
+                port,
+                tls_server_name,
+                uuid,
+                path,
+            } => format!("  - name: {}\n    type: vmess\n    server: {host}\n    port: {port}\n    uuid: {uuid}\n    alterId: 0\n    cipher: auto\n    tls: true\n    servername: {tls_server_name}\n    network: ws\n    ws-opts:\n      path: {path}\n      headers:\n        Host: {tls_server_name}\n", node.tag()),
+            CanonicalNode::Hysteria2 {
+                host,
+                port,
+                tls_server_name,
+                password,
+            } => format!("  - name: {}\n    type: hysteria2\n    server: {host}\n    port: {port}\n    password: {password}\n    sni: {tls_server_name}\n    skip-cert-verify: false\n", node.tag()),
+            CanonicalNode::Tuic {
+                host,
+                port,
+                tls_server_name,
+                uuid,
+                password,
+            } => format!("  - name: {}\n    type: tuic\n    server: {host}\n    port: {port}\n    uuid: {uuid}\n    password: {password}\n    sni: {tls_server_name}\n    alpn:\n      - h3\n    skip-cert-verify: false\n", node.tag()),
+            CanonicalNode::Anytls {
+                host,
+                port,
+                tls_server_name,
+                password,
+            } => format!("  - name: {}\n    type: anytls\n    server: {host}\n    port: {port}\n    password: {password}\n    tls: true\n    sni: {tls_server_name}\n    skip-cert-verify: false\n", node.tag()),
+        };
+        proxies.push_str(&entry);
     }
     Ok(proxies)
 }
 
-fn uri(config: &DeploymentConfig) -> Result<String, SubscriptionError> {
-    let host = proxy_host(config);
+fn uri(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
     let mut uris = String::new();
-    if let Some(node) = &config.vless_reality {
-        let sni = config.reality_decoy_sni.as_deref().expect("validated SNI");
-        uris.push_str(&format!("vless://{}@{}:{}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={sni}&fp=chrome&pbk={}&sid={}&type=tcp#sbctl-vless-reality\n", node.uuid, host, node.listen_port, node.public_key, node.short_id));
-    }
-    if let Some(node) = &config.vmess_websocket {
-        let payload = json!({"v": "2", "ps": "sbctl-vmess-websocket", "add": host, "port": node.listen_port.to_string(), "id": node.uuid, "aid": "0", "scy": "auto", "net": "ws", "type": "none", "host": config.subscription_host, "path": node.path, "tls": "tls", "sni": config.subscription_host});
-        let encoded = base64::engine::general_purpose::STANDARD
-            .encode(serde_json::to_vec(&payload).expect("JSON values serialize"));
-        uris.push_str(&format!("vmess://{encoded}\n"));
-    }
-    if let Some(node) = &config.hysteria2 {
-        uris.push_str(&format!(
-            "hysteria2://{}@{}:{}?insecure=0&sni={}#sbctl-hysteria2\n",
-            node.password, host, node.listen_port, config.subscription_host
-        ));
-    }
-    if let Some(node) = &config.tuic {
-        uris.push_str(&format!(
-            "tuic://{}:{}@{}:{}?congestion_control=bbr&alpn=h3&sni={}#sbctl-tuic\n",
-            node.uuid, node.password, host, node.listen_port, config.subscription_host
-        ));
-    }
-    if let Some(node) = &config.anytls {
-        uris.push_str(&format!(
-            "anytls://{}@{}:{}?security=tls&sni={}#sbctl-anytls\n",
-            node.password, host, node.listen_port, config.subscription_host
-        ));
+    for node in nodes {
+        match &node {
+            CanonicalNode::VlessReality {
+                host,
+                port,
+                uuid,
+                public_key,
+                short_id,
+                decoy_sni,
+                ..
+            } => uris.push_str(&format!("vless://{uuid}@{host}:{port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={decoy_sni}&fp=chrome&pbk={public_key}&sid={short_id}&type=tcp#{}\n", node.tag())),
+            CanonicalNode::VmessWebsocket {
+                host,
+                port,
+                tls_server_name,
+                uuid,
+                path,
+            } => {
+                let payload = json!({"v": "2", "ps": node.tag(), "add": host, "port": port.to_string(), "id": uuid, "aid": "0", "scy": "auto", "net": "ws", "type": "none", "host": tls_server_name, "path": path, "tls": "tls", "sni": tls_server_name});
+                let encoded = base64::engine::general_purpose::STANDARD
+                    .encode(serde_json::to_vec(&payload).expect("JSON values serialize"));
+                uris.push_str(&format!("vmess://{encoded}\n"));
+            }
+            CanonicalNode::Hysteria2 {
+                host,
+                port,
+                tls_server_name,
+                password,
+            } => uris.push_str(&format!(
+                "hysteria2://{password}@{host}:{port}?insecure=0&sni={tls_server_name}#{}\n",
+                node.tag()
+            )),
+            CanonicalNode::Tuic {
+                host,
+                port,
+                tls_server_name,
+                uuid,
+                password,
+            } => uris.push_str(&format!(
+                "tuic://{uuid}:{password}@{host}:{port}?congestion_control=bbr&alpn=h3&sni={tls_server_name}#{}\n",
+                node.tag()
+            )),
+            CanonicalNode::Anytls {
+                host,
+                port,
+                tls_server_name,
+                password,
+            } => uris.push_str(&format!(
+                "anytls://{password}@{host}:{port}?security=tls&sni={tls_server_name}#{}\n",
+                node.tag()
+            )),
+        }
     }
     Ok(uris)
-}
-
-fn proxy_host(config: &DeploymentConfig) -> &str {
-    config
-        .proxy_host
-        .as_deref()
-        .unwrap_or(&config.subscription_host)
 }
 
 fn certificate_tls_config(config: &DeploymentConfig) -> Value {
     json!({"enabled": true, "server_name": config.subscription_host,
         "certificate_path": format!("/etc/letsencrypt/live/{}/fullchain.pem", config.subscription_host),
         "key_path": format!("/etc/letsencrypt/live/{}/privkey.pem", config.subscription_host)})
+}
+
+fn server_tls(tls_server_name: &str, certificate: &Value) -> Value {
+    json!({"enabled": true, "server_name": tls_server_name,
+        "certificate_path": certificate["certificate_path"],
+        "key_path": certificate["key_path"]})
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -547,14 +706,176 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::redact_secret;
+    use std::fs;
+    use std::path::PathBuf;
+
+    use tempfile::TempDir;
+
+    use super::{generated_artifacts, regenerate};
+    use crate::config::{
+        DeploymentConfig, DeploymentStore, ManagedProtocol, SubscriptionMode,
+    };
+
+    fn checker(fixture: &TempDir, accepts: bool) -> PathBuf {
+        let path = fixture.path().join("sing-box-check");
+        fs::write(
+            &path,
+            if accepts { "#!/bin/sh\nexit 0\n" } else { "#!/bin/sh\nexit 1\n" },
+        )
+        .expect("checker is written");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+                .expect("checker is executable");
+        }
+        path
+    }
+
+    fn vless_config() -> DeploymentConfig {
+        DeploymentConfig::new(
+            SubscriptionMode::IpFallback,
+            "203.0.113.7".into(),
+            None,
+            Some(2080),
+            "ens3".into(),
+            vec![ManagedProtocol::VlessReality],
+            Some("www.cloudflare.com".into()),
+        )
+        .expect("an IP fallback VLESS deployment is valid")
+    }
+
+    fn write_old_artifacts(store: &DeploymentStore) {
+        for (name, contents) in [
+            ("sing-box-server.json", "old server".as_bytes()),
+            ("subscription-sing-box.json", "old sing-box".as_bytes()),
+            ("subscription-clash.yaml", "old clash".as_bytes()),
+            ("subscription-uri.txt", "old uri".as_bytes()),
+        ] {
+            store
+                .write_artifact(name, contents)
+                .expect("an old artifact is committed");
+        }
+    }
+
+    fn artifact(store: &DeploymentStore, name: &str) -> Vec<u8> {
+        fs::read(store.root().join("var/lib/sbctl/artifacts").join(name))
+            .expect("artifact is readable")
+    }
+
+    #[test]
+    fn regenerate_with_a_failed_check_leaves_artifacts_and_active_config_unchanged() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let store = DeploymentStore::new(fixture.path());
+        write_old_artifacts(&store);
+        store
+            .write_relative_locked("etc/sing-box/config.json", b"old active config")
+            .expect("old active config is committed");
+        let rejecting = checker(&fixture, false);
+
+        let result = regenerate(&store, &vless_config(), Some(&rejecting), true);
+        assert!(result.is_err(), "a rejected check must fail the regeneration");
+        for (name, old) in [
+            ("sing-box-server.json", "old server".as_bytes()),
+            ("subscription-sing-box.json", "old sing-box".as_bytes()),
+            ("subscription-clash.yaml", "old clash".as_bytes()),
+            ("subscription-uri.txt", "old uri".as_bytes()),
+        ] {
+            assert_eq!(artifact(&store, name), old, "{name} stays on the old complete version");
+        }
+        assert_eq!(
+            fs::read(store.root().join("etc/sing-box/config.json"))
+                .expect("active config is readable"),
+            b"old active config"
+        );
+    }
+
+    #[test]
+    fn regenerate_with_a_passing_check_replaces_all_artifacts_and_active_config() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let store = DeploymentStore::new(fixture.path());
+        write_old_artifacts(&store);
+        store
+            .write_relative_locked("etc/sing-box/config.json", b"old active config")
+            .expect("old active config is committed");
+        let config = vless_config();
+        let accepting = checker(&fixture, true);
+
+        regenerate(&store, &config, Some(&accepting), true)
+            .expect("a passing check allows the regeneration");
+        let expected = generated_artifacts(&config).expect("new artifacts are generated");
+        for (name, contents) in &expected {
+            assert_eq!(
+                artifact(&store, name),
+                contents.as_bytes(),
+                "{name} is replaced by the complete new version"
+            );
+        }
+        let server = expected
+            .iter()
+            .find(|(name, _)| *name == "sing-box-server.json")
+            .map(|(_, contents)| contents)
+            .expect("server artifact is present");
+        assert_eq!(
+            fs::read(store.root().join("etc/sing-box/config.json"))
+                .expect("active config is readable"),
+            server.as_bytes(),
+            "the active sing-box configuration is re-synced"
+        );
+    }
+
+    #[test]
+    fn regenerate_without_active_config_sync_leaves_it_untouched() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let store = DeploymentStore::new(fixture.path());
+        write_old_artifacts(&store);
+        store
+            .write_relative_locked("etc/sing-box/config.json", b"old active config")
+            .expect("old active config is committed");
+        let accepting = checker(&fixture, true);
+
+        regenerate(&store, &vless_config(), Some(&accepting), false)
+            .expect("artifacts are regenerated without the active config");
+        assert_eq!(
+            fs::read(store.root().join("etc/sing-box/config.json"))
+                .expect("active config is readable"),
+            b"old active config"
+        );
+    }
+
+    #[test]
+    fn regenerate_restores_earlier_artifacts_when_a_later_replacement_fails() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let store = DeploymentStore::new(fixture.path());
+        write_old_artifacts(&store);
+        let accepting = checker(&fixture, true);
+
+        let blocked = store
+            .root()
+            .join("var/lib/sbctl/artifacts/subscription-uri.txt");
+        fs::remove_file(&blocked).expect("blocked artifact is removed");
+        fs::create_dir(&blocked).expect("blocked artifact is replaced by a directory");
+
+        let result = regenerate(&store, &vless_config(), Some(&accepting), true);
+        assert!(result.is_err(), "a blocked artifact fails the regeneration");
+        assert_eq!(
+            artifact(&store, "sing-box-server.json"),
+            "old server".as_bytes(),
+            "an earlier replaced artifact is restored after a later write failure"
+        );
+        assert_eq!(
+            artifact(&store, "subscription-sing-box.json"),
+            "old sing-box".as_bytes(),
+            "an earlier replaced artifact is restored after a later write failure"
+        );
+    }
 
     #[test]
     fn redact_secret_replaces_every_occurrence_of_the_credential() {
         let secret = "deadbeef-credential";
         let message = format!("subscription artifact failed: {secret}; retry with {secret}");
         assert_eq!(
-            redact_secret(&message, secret),
+            super::redact_secret(&message, secret),
             "subscription artifact failed: [redacted]; retry with [redacted]"
         );
     }
@@ -562,7 +883,7 @@ mod tests {
     #[test]
     fn redact_secret_leaves_unrelated_text_untouched() {
         assert_eq!(
-            redact_secret("subscription artifact failed: no such file", "secret"),
+            super::redact_secret("subscription artifact failed: no such file", "secret"),
             "subscription artifact failed: no such file"
         );
     }
