@@ -19,7 +19,8 @@ esac
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl jq
 
-manifest_url_template=${SBCTL_MANIFEST_URL:-https://github.com/xiaolingxiaoying/singbox-sub-me/releases/latest/download/manifest-{arch}.json}
+default_manifest_url='https://github.com/xiaolingxiaoying/singbox-sub-me/releases/latest/download/manifest-{arch}.json'
+manifest_url_template=${SBCTL_MANIFEST_URL:-$default_manifest_url}
 case "$(dpkg --print-architecture)" in
   amd64|arm64) arch=$(dpkg --print-architecture) ;;
   *) echo "仅支持 amd64 和 arm64" >&2; exit 2 ;;
