@@ -147,6 +147,7 @@ sbctl 在配置的高位 HTTP 端口提供低安全性的 IP 订阅。该模式�
 ```bash
 # 查看部署状态和 VPS 流量
 sbctl status
+sbctl status --json
 sbctl traffic
 
 # 查看协议监听端口，不显示凭据

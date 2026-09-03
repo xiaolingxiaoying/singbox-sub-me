@@ -63,15 +63,73 @@ contains "$("$sbctl" --root "$root" traffic)" 'total: 90 bytes'
 printf '10\n' > "$root/sys/class/net/ens3/statistics/rx_bytes"
 printf '20\n' > "$root/sys/class/net/ens3/statistics/tx_bytes"
 contains "$("$sbctl" --root "$root" traffic)" 'total: 107 bytes'
-"$sbctl" --root "$root" serve --max-requests 4 &
+state_before=$(stat -c '%Y %s' "$root/var/lib/sbctl/state.json")
+"$sbctl" --root "$root" serve --max-requests 7 &
 sleep 1
 for path in sing-box.json clash.yaml uri; do
   response=$(curl --silent --show-error --include "http://127.0.0.1:2080/sub/$credential/$path")
   contains "$response" 'HTTP/1.1 200 OK'
-  contains "$response" 'subscription-userinfo: upload=36; download=71; total=999; expire='
+  contains "$response" 'subscription-userinfo: upload=36; download=71; total=107; expire='
 done
 query_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2080/sub/$credential/uri?credential=$credential")
 test "$query_status" = 404 || fail 'query-string credential was accepted'
+wrong_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2080/sub/wrong-credential/uri")
+test "$wrong_status" = 404 || fail 'invalid credential was not a uniform 404'
+bogus_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2080/sub/$credential/bogus")
+test "$bogus_status" = 404 || fail 'unknown subscription format path was not a uniform 404'
+trailing_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2080/sub/$credential/uri/extra")
+test "$trailing_status" = 404 || fail 'trailing path segment was not a uniform 404'
+test "$(stat -c '%Y %s' "$root/var/lib/sbctl/state.json")" = "$state_before" || fail 'subscription reads changed accounting state'
+
+# Missing accounting state returns a redacted 503 (not a 200 placeholder) and
+# never logs the full Subscription credential. Invalid credentials stay 404.
+fixture_root_for unavailable "$platform"
+"$sbctl" --root "$root" config init --mode ip-fallback --subscription-host 127.0.0.1 --http-port 2087 --interface ens3 --protocol vless-reality --reality-decoy-sni www.cloudflare.com
+unavailable_credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' "$root/etc/sbctl/config.toml")
+"$sbctl" --root "$root" serve --max-requests 2 >"$work/unavailable.out" 2>"$work/unavailable.err" &
+sleep 1
+unavailable_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2087/sub/$unavailable_credential/uri")
+test "$unavailable_status" = 503 || fail 'missing state did not produce a 503'
+test ! -s "$work/unavailable.out" || fail 'subscription served a body despite missing state'
+unavailable_404=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2087/sub/wrong-credential/uri")
+test "$unavailable_404" = 404 || fail 'invalid credential was not 404 even with missing state'
+grep -F -- "$unavailable_credential" "$work/unavailable.err" >/dev/null && fail '503 diagnostic leaked the Subscription credential'
+wait
+test -s "$work/unavailable.err" || fail 'missing-state 503 did not write a redacted diagnostic'
+
+# Corrupted accounting state is also a redacted 503, never a 200 placeholder.
+fixture_root_for corrupt "$platform"
+"$sbctl" --root "$root" config init --mode ip-fallback --subscription-host 127.0.0.1 --http-port 2088 --interface ens3 --protocol vless-reality --reality-decoy-sni www.cloudflare.com
+corrupt_credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' "$root/etc/sbctl/config.toml")
+mkdir -p "$root/var/lib/sbctl"
+printf 'not json\n' > "$root/var/lib/sbctl/state.json"
+"$sbctl" --root "$root" serve --max-requests 2 >"$work/corrupt.out" 2>"$work/corrupt.err" &
+sleep 1
+corrupt_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2088/sub/$corrupt_credential/uri")
+test "$corrupt_status" = 503 || fail 'corrupt state did not produce a 503'
+curl --silent --output /dev/null "http://127.0.0.1:2088/sub/$corrupt_credential/uri"
+grep -F -- "$corrupt_credential" "$work/corrupt.err" >/dev/null && fail 'corrupt-state diagnostic leaked the Subscription credential'
+wait
+
+# Pending-first-reset is a valid 200 with zero traffic and the first reset, not a 5xx.
+fixture_root_for pending "$platform"
+"$sbctl" --root "$root" config init --mode ip-fallback --subscription-host 127.0.0.1 --http-port 2089 --interface ens3 --protocol vless-reality --reality-decoy-sni www.cloudflare.com --accounting-policy anchored-month --accounting-timezone UTC --anchored-reset-at "$(date -d '+2 months' +%Y-%m-%dT%H:%M)"
+pending_credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' "$root/etc/sbctl/config.toml")
+"$sbctl" --root "$root" serve --max-requests 2 &
+sleep 1
+pending_response=$(curl --silent --show-error --include "http://127.0.0.1:2089/sub/$pending_credential/uri")
+contains "$pending_response" 'HTTP/1.1 200 OK'
+contains "$pending_response" 'subscription-userinfo: upload=0; download=0; total=0; expire='
+curl --silent --output /dev/null "http://127.0.0.1:2089/sub/wrong-credential/uri"
+
+# status --json reports the current period without exposing the credential.
+status_json=$("$sbctl" --root "$root" status --json)
+contains "$status_json" '"configured": true'
+contains "$status_json" '"accounting_period": "pending-first-reset"'
+contains "$status_json" '"total": 0'
+if printf '%s' "$status_json" | grep -F -- "$pending_credential" >/dev/null; then
+  fail 'status --json exposed the Subscription credential'
+fi
 
 # Explicit traffic corrections are administrator-authorized writers: they show a
 # summary, never touch the sysfs counters, and reject invalid targets.

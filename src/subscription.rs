@@ -302,30 +302,54 @@ fn subscription_response(
     config: &DeploymentConfig,
     target: Option<&str>,
 ) -> String {
-    target
-        .and_then(parse_route)
-        .and_then(|(credential, format)| {
-            read_authorized(store, config, credential, format)
-                .ok()
-                .and_then(|body| {
-                    crate::traffic::report(store, config)
-                        .ok()
-                        .map(|traffic| (body, format, traffic))
-                })
-        })
-        .map(|(body, format, traffic)| {
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nsubscription-userinfo: upload={}; download={}; total={}; expire={}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                format.content_type(),
-                traffic.received,
-                traffic.transmitted,
-                traffic.monthly_traffic_limit,
-                traffic.next_reset.timestamp(),
-                body.len(),
-                body
-            )
-        })
-        .unwrap_or_else(not_found_response)
+    let Some((credential, format)) = target.and_then(parse_route) else {
+        return not_found_response();
+    };
+    if !constant_time_eq(
+        credential.as_bytes(),
+        config.subscription_credential.as_bytes(),
+    ) {
+        return not_found_response();
+    }
+    let body = match read_authorized(store, config, credential, format) {
+        Ok(body) => body,
+        Err(error) => return unavailable_response(credential, &error.to_string()),
+    };
+    let traffic = match crate::traffic::report(store, config) {
+        Ok(traffic) => traffic,
+        Err(error) => return unavailable_response(credential, &error.to_string()),
+    };
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nsubscription-userinfo: upload={}; download={}; total={}; expire={}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        format.content_type(),
+        traffic.transmitted,
+        traffic.received,
+        traffic.total(),
+        traffic.next_reset.timestamp(),
+        body.len(),
+        body
+    )
+}
+
+/// Replaces every occurrence of a Subscription credential in a diagnostic so
+/// logs and errors never expose the full secret. ADR-0013.
+pub fn redact_secret(text: &str, secret: &str) -> String {
+    if secret.is_empty() {
+        return text.to_owned();
+    }
+    text.replace(secret, "[redacted]")
+}
+
+/// A redacted 503 for state or artifact failures after a valid Subscription
+/// credential authenticated. The body carries no authorization or deployment
+/// details; the diagnostic log omits the credential.
+fn unavailable_response(credential: &str, message: &str) -> String {
+    eprintln!(
+        "subscription request failed: {}",
+        redact_secret(message, credential)
+    );
+    "HTTP/1.1 503 Service Unavailable\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        .to_owned()
 }
 
 fn not_found_response() -> String {
@@ -519,4 +543,27 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         different |= usize::from(*left.get(index).unwrap_or(&0) ^ *right.get(index).unwrap_or(&0));
     }
     different == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_secret;
+
+    #[test]
+    fn redact_secret_replaces_every_occurrence_of_the_credential() {
+        let secret = "deadbeef-credential";
+        let message = format!("subscription artifact failed: {secret}; retry with {secret}");
+        assert_eq!(
+            redact_secret(&message, secret),
+            "subscription artifact failed: [redacted]; retry with [redacted]"
+        );
+    }
+
+    #[test]
+    fn redact_secret_leaves_unrelated_text_untouched() {
+        assert_eq!(
+            redact_secret("subscription artifact failed: no such file", "secret"),
+            "subscription artifact failed: no such file"
+        );
+    }
 }

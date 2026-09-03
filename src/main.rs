@@ -57,7 +57,11 @@ enum Command {
     #[command(alias = "m")]
     Menu,
     /// Show whether sbctl currently manages a deployment.
-    Status,
+    Status {
+        /// Emit a machine-readable JSON status report.
+        #[arg(long)]
+        json: bool,
+    },
     /// Reconcile and show VPS traffic, or apply an explicit traffic correction.
     Traffic {
         #[command(subcommand)]
@@ -376,7 +380,13 @@ fn main() -> ExitCode {
             },
         ),
         Command::Menu => menu(root),
-        Command::Status => print_status(root),
+        Command::Status { json } => {
+            if json {
+                print_status_json(root)
+            } else {
+                print_status(root)
+            }
+        }
         Command::Traffic { command } => match command {
             None | Some(TrafficCommand::Show) => print_traffic(root),
             Some(TrafficCommand::SetUsed { bytes, rx, tx }) => {
@@ -948,6 +958,66 @@ fn print_status(root: &Path) -> ExitCode {
         }
         Err(sbctl::config::ConfigError::Missing) => {
             println!("sbctl status: unmanaged (not installed)");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("status failed: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn print_status_json(root: &Path) -> ExitCode {
+    let store = sbctl::config::DeploymentStore::new(root);
+    match store.load() {
+        Ok(config) => {
+            let traffic = sbctl::traffic::report(&store, &config)
+                .map(|report| {
+                    serde_json::json!({
+                        "interface": report.interface,
+                        "received": report.received,
+                        "transmitted": report.transmitted,
+                        "total_adjustment": report.total_adjustment,
+                        "total": report.total(),
+                        "monthly_traffic_limit": report.monthly_traffic_limit,
+                        "accounting_period": report.accounting_period,
+                        "next_reset": report.next_reset.to_rfc3339(),
+                    })
+                })
+                .unwrap_or_else(|error| serde_json::json!({ "error": error.to_string() }));
+            let services = sbctl::lifecycle::service_status_entries(root)
+                .into_iter()
+                .map(|(unit, state)| (unit.to_owned(), state))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            let status = serde_json::json!({
+                "configured": true,
+                "mode": config.subscription_mode.to_string(),
+                "subscription_host": config.subscription_host,
+                "proxy_host": config.proxy_host.as_deref().unwrap_or(&config.subscription_host),
+                "interface": config.interface,
+                "monthly_traffic_limit": config.monthly_traffic_limit,
+                "accounting_policy": config.accounting_policy.to_string(),
+                "accounting_timezone": config.accounting_timezone,
+                "enabled_protocols": config
+                    .enabled_protocols
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+                "services": services,
+                "traffic": traffic,
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&status).expect("status JSON serializes")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(sbctl::config::ConfigError::Missing) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({ "configured": false }))
+                    .expect("status JSON serializes")
+            );
             ExitCode::SUCCESS
         }
         Err(error) => {

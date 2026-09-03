@@ -1046,7 +1046,7 @@ fn ip_fallback_http_service_accepts_only_the_exact_credential_path_and_reports_v
             "--bind",
             &format!("127.0.0.1:{port}"),
             "--max-requests",
-            "2",
+            "6",
         ])
         .spawn()
         .expect("subscription service starts");
@@ -1056,13 +1056,30 @@ fn ip_fallback_http_service_accepts_only_the_exact_credential_path_and_reports_v
 
     let response = http_get(port, &format!("/sub/{credential}/uri"));
     assert!(response.starts_with("HTTP/1.1 200 OK"));
-    assert!(response.contains("subscription-userinfo: upload=0; download=0; total=1000; expire="));
+    assert!(response.contains("subscription-userinfo: upload=0; download=0; total=0; expire="));
     assert!(response.contains("Cache-Control: no-store"));
     let rejected = http_get(
         port,
         &format!("/sub/{credential}/uri?credential={credential}"),
     );
     assert!(rejected.starts_with("HTTP/1.1 404 Not Found"));
+    assert!(
+        http_get(port, &format!("/sub/{credential}/bogus")).starts_with("HTTP/1.1 404 Not Found"),
+        "an unknown subscription format path is a uniform 404"
+    );
+    assert!(
+        http_get(port, &format!("/sub/{credential}/uri/extra"))
+            .starts_with("HTTP/1.1 404 Not Found"),
+        "a trailing path segment is a uniform 404"
+    );
+    assert!(
+        http_get(port, "/sub/wrong-credential/uri").starts_with("HTTP/1.1 404 Not Found"),
+        "an invalid Subscription credential is a uniform 404"
+    );
+    assert!(
+        http_get(port, "/sub/uri").starts_with("HTTP/1.1 404 Not Found"),
+        "a missing credential path is a uniform 404"
+    );
     assert_eq!(
         fs::read(&state_path).expect("state remains readable"),
         before,
@@ -1071,9 +1088,229 @@ fn ip_fallback_http_service_accepts_only_the_exact_credential_path_and_reports_v
     assert!(
         server
             .wait()
-            .expect("server exits after two requests")
+            .expect("server exits after the request limit")
             .success()
     );
+}
+
+#[test]
+fn subscription_returns_a_redacted_503_for_missing_state_without_logging_the_credential() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let port = free_high_tcp_port();
+    let credential = initialize_ip_fallback_subscription(&fixture, port);
+    let stderr_log = fixture.path().join("serve.err");
+    let mut server = spawn_sbctl_serve(&fixture, port, 2, &stderr_log);
+
+    let unavailable = http_get(port, &format!("/sub/{credential}/uri"));
+    assert!(unavailable.starts_with("HTTP/1.1 503 Service Unavailable"));
+    assert!(
+        unavailable.ends_with("\r\n\r\n"),
+        "the 503 has an empty redacted body"
+    );
+    let rejected = http_get(port, "/sub/wrong-credential/uri");
+    assert!(
+        rejected.starts_with("HTTP/1.1 404 Not Found"),
+        "an invalid credential stays 404 even when state is missing"
+    );
+    assert!(server.wait().expect("server exits").success());
+
+    let log = fs::read_to_string(&stderr_log).expect("diagnostic log is readable");
+    assert!(
+        log.contains("subscription request failed"),
+        "a redacted diagnostic is written"
+    );
+    assert!(
+        !log.contains(&credential),
+        "the 503 diagnostic must not contain the full Subscription credential"
+    );
+}
+
+#[test]
+fn subscription_returns_a_redacted_503_for_corrupt_state_without_logging_the_credential() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let port = free_high_tcp_port();
+    let credential = initialize_ip_fallback_subscription(&fixture, port);
+    fs::create_dir_all(fixture.path().join("var/lib/sbctl")).expect("state directory is created");
+    fs::write(fixture.path().join("var/lib/sbctl/state.json"), "not json")
+        .expect("corrupt state is written");
+    let stderr_log = fixture.path().join("serve.err");
+    let mut server = spawn_sbctl_serve(&fixture, port, 2, &stderr_log);
+
+    assert!(
+        http_get(port, &format!("/sub/{credential}/uri"))
+            .starts_with("HTTP/1.1 503 Service Unavailable")
+    );
+    http_get(port, "/sub/wrong-credential/uri");
+    assert!(server.wait().expect("server exits").success());
+
+    let log = fs::read_to_string(&stderr_log).expect("diagnostic log is readable");
+    assert!(!log.contains(&credential));
+}
+
+#[test]
+fn subscription_returns_a_redacted_503_for_a_schema_mismatched_state() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let port = free_high_tcp_port();
+    let credential = initialize_ip_fallback_subscription(&fixture, port);
+    fs::create_dir_all(fixture.path().join("var/lib/sbctl")).expect("state directory is created");
+    fs::write(
+        fixture.path().join("var/lib/sbctl/state.json"),
+        r#"{"schema_version":1,"cycle_key":"2024-02-01T00:00:00+00:00","interface":"ens3","baseline_rx":0,"baseline_tx":0,"accumulated_rx":0,"accumulated_tx":0,"boot_id":"boot-a","corrections":[]}"#,
+    )
+    .expect("schema-mismatched state is written");
+    let stderr_log = fixture.path().join("serve.err");
+    let mut server = spawn_sbctl_serve(&fixture, port, 2, &stderr_log);
+
+    assert!(
+        http_get(port, &format!("/sub/{credential}/uri"))
+            .starts_with("HTTP/1.1 503 Service Unavailable")
+    );
+    http_get(port, "/sub/wrong-credential/uri");
+    assert!(server.wait().expect("server exits").success());
+
+    let log = fs::read_to_string(&stderr_log).expect("diagnostic log is readable");
+    assert!(!log.contains(&credential));
+}
+
+#[test]
+fn subscription_returns_a_redacted_503_for_a_missing_artifact() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let port = free_high_tcp_port();
+    let credential = initialize_ip_fallback_subscription(&fixture, port);
+    fs::remove_file(
+        fixture
+            .path()
+            .join("var/lib/sbctl/artifacts/subscription-uri.txt"),
+    )
+    .expect("URI artifact is removed");
+    let stderr_log = fixture.path().join("serve.err");
+    let mut server = spawn_sbctl_serve(&fixture, port, 2, &stderr_log);
+
+    assert!(
+        http_get(port, &format!("/sub/{credential}/uri"))
+            .starts_with("HTTP/1.1 503 Service Unavailable")
+    );
+    http_get(port, "/sub/wrong-credential/uri");
+    assert!(server.wait().expect("server exits").success());
+
+    let log = fs::read_to_string(&stderr_log).expect("diagnostic log is readable");
+    assert!(!log.contains(&credential));
+}
+
+#[test]
+fn subscription_userinfo_total_reflects_a_total_only_correction() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let port = free_high_tcp_port();
+    let credential = initialize_ip_fallback_subscription(&fixture, port);
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "accounting-reset",
+        ])
+        .assert()
+        .success();
+    write_traffic_fixture(&fixture, 130, 260, "boot-a");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "accounting-reset",
+        ])
+        .assert()
+        .success();
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "traffic",
+            "set-used",
+            "--bytes",
+            "5000",
+        ])
+        .assert()
+        .success();
+
+    let stderr_log = fixture.path().join("serve.err");
+    let mut server = spawn_sbctl_serve(&fixture, port, 1, &stderr_log);
+    let response = http_get(port, &format!("/sub/{credential}/uri"));
+    assert!(response.starts_with("HTTP/1.1 200 OK"));
+    assert!(
+        response.contains("subscription-userinfo: upload=60; download=30; total=5000; expire=")
+    );
+    assert!(server.wait().expect("server exits").success());
+}
+
+#[test]
+fn status_json_reports_the_current_period_without_exposing_credentials() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let port = free_high_tcp_port();
+    let credential = initialize_ip_fallback_subscription(&fixture, port);
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "accounting-reset",
+        ])
+        .assert()
+        .success();
+    write_traffic_fixture(&fixture, 130, 260, "boot-a");
+
+    let output = Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "status",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).expect("status JSON is UTF-8");
+    assert!(
+        !stdout.contains(&credential),
+        "status --json must not expose the Subscription credential"
+    );
+    let status: serde_json::Value =
+        serde_json::from_str(&stdout).expect("status --json emits valid JSON");
+    assert_eq!(status["configured"], true);
+    assert_eq!(status["interface"], "ens3");
+    assert_eq!(status["traffic"]["received"], 30);
+    assert_eq!(status["traffic"]["transmitted"], 60);
+    assert_eq!(status["traffic"]["total"], 90);
+    let now = chrono::Utc::now();
+    use chrono::Datelike;
+    assert_eq!(
+        status["traffic"]["accounting_period"],
+        format!("{:04}-{:02}-01T00:00:00+00:00", now.year(), now.month())
+    );
+    assert_eq!(
+        status["services"]["sing-box.service"],
+        "inactive or unavailable"
+    );
+}
+
+#[test]
+fn status_json_reports_an_unmanaged_host() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "status",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"configured\": false"));
 }
 
 #[test]
@@ -2427,6 +2664,64 @@ fn write_traffic_fixture(fixture: &TempDir, rx: u64, tx: u64, boot_id: &str) {
     fs::create_dir_all(boot_path.parent().expect("boot ID has a parent"))
         .expect("boot ID directory is created");
     fs::write(boot_path, boot_id).expect("boot ID is written");
+}
+
+fn spawn_sbctl_serve(
+    fixture: &TempDir,
+    port: u16,
+    max_requests: usize,
+    stderr_log: &PathBuf,
+) -> std::process::Child {
+    let stderr_file = fs::File::create(stderr_log).expect("stderr log is created");
+    ProcessCommand::new(assert_cmd::cargo::cargo_bin!("sbctl"))
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "serve",
+            "--bind",
+            &format!("127.0.0.1:{port}"),
+            "--max-requests",
+            &max_requests.to_string(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(stderr_file))
+        .spawn()
+        .expect("subscription service starts")
+}
+
+fn initialize_ip_fallback_subscription(fixture: &TempDir, port: u16) -> String {
+    write_traffic_fixture(fixture, 100, 200, "boot-a");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "127.0.0.1",
+            "--http-port",
+            &port.to_string(),
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+    fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
+        .expect("configuration is persisted")
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("subscription_credential = \"")
+                .and_then(|value| value.strip_suffix('"'))
+        })
+        .expect("credential is available")
+        .to_owned()
 }
 
 fn free_high_tcp_port() -> u16 {

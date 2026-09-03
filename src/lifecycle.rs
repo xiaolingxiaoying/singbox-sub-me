@@ -210,21 +210,29 @@ pub fn restart_services(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn service_status(root: &Path) -> String {
+pub fn service_status_entries(root: &Path) -> Vec<(&'static str, String)> {
     [
         "sing-box.service",
         "sbctl.service",
         "sbctl-accounting-reset.timer",
     ]
     .into_iter()
-    .map(
-        |unit| match systemctl(root, &["is-active", "--quiet", unit]) {
-            Ok(()) => format!("{unit}: active"),
-            Err(_) => format!("{unit}: inactive or unavailable"),
-        },
-    )
-    .collect::<Vec<_>>()
-    .join("\n")
+    .map(|unit| {
+        let state = match systemctl(root, &["is-active", "--quiet", unit]) {
+            Ok(()) => "active".to_owned(),
+            Err(_) => "inactive or unavailable".to_owned(),
+        };
+        (unit, state)
+    })
+    .collect()
+}
+
+pub fn service_status(root: &Path) -> String {
+    service_status_entries(root)
+        .into_iter()
+        .map(|(unit, state)| format!("{unit}: {state}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn required_firewall_ports(config: &DeploymentConfig) -> Vec<String> {
