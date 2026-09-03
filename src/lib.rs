@@ -3,6 +3,7 @@ pub mod certificate;
 pub mod config;
 pub mod lifecycle;
 pub mod preflight;
+pub mod release;
 pub mod runtime;
 pub mod socket_activation;
 pub mod subscription;

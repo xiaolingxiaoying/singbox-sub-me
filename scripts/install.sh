@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# sbctl bootstrap installer.
+#
+# The only trust decisions this script makes are the sbctl binary download,
+# which it protects by verifying the Ed25519 signature over the canonical JSON
+# of the release manifest BEFORE trusting any URL or digest. Every later trust
+# decision (sing-box download, digest, compatibility matrix, candidate checks)
+# is made by the installed sbctl binary with the same built-in public key, so
+# the script cannot bypass the Rust verification rules.
+
 if [[ "${EUID}" -ne 0 ]]; then
   echo "请使用 root 运行此安装脚本" >&2
   exit 2
@@ -17,7 +26,16 @@ case "${ID}" in
 esac
 
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl jq
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl jq openssl
+
+# The first-release Ed25519 verification key, identical to the one embedded in
+# src/release.rs. The signature in the manifest covers the canonical JSON of
+# every field except `signature`, produced exactly like `jq -S -c 'del(.signature)'`.
+read -r -d '' SBCTL_PUBLIC_KEY_PEM <<'PEM' || true
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAJH+I4WMkKYa3EH63BKmD4SGG0ml6OSe35rQuwrNkJys=
+-----END PUBLIC KEY-----
+PEM
 
 default_manifest_url='https://github.com/xiaolingxiaoying/singbox-sub-me/releases/latest/download/manifest-{arch}.json'
 manifest_url_template=${SBCTL_MANIFEST_URL:-$default_manifest_url}
@@ -30,17 +48,32 @@ work_dir=$(mktemp -d)
 trap 'rm -rf "$work_dir"' EXIT
 
 curl --fail --globoff --location --silent --show-error "$manifest_url" >"$work_dir/manifest.json"
+
+# Verify the manifest signature BEFORE trusting any URL or digest in it. A
+# signature failure stops the install with no artifact accessed.
+jq -S -c 'del(.signature)' "$work_dir/manifest.json" >"$work_dir/canonical.json"
+jq -r '.signature' "$work_dir/manifest.json" | base64 -d >"$work_dir/signature.bin"
+printf '%s\n' "$SBCTL_PUBLIC_KEY_PEM" >"$work_dir/public-key.pem"
+if ! openssl pkeyutl -verify -pubin -inkey "$work_dir/public-key.pem" -rawin \
+  -in "$work_dir/canonical.json" -sigfile "$work_dir/signature.bin" >/dev/null 2>&1; then
+  echo "release manifest 签名校验失败，已中止安装（未访问其中任何下载地址）。" >&2
+  exit 2
+fi
+
+# The manifest is now trusted: fetch the pinned sbctl and check its digest.
 artifact_url=$(jq -er '.sbctl.url' "$work_dir/manifest.json")
 expected_sha=$(jq -er '.sbctl.sha256' "$work_dir/manifest.json")
+# Floating, unsignable references are rejected exactly like the Rust verifier
+# rejects "latest"/"main"/"master" version fields: the artifact path must name
+# a fixed version, never a moving branch or the GitHub "latest" redirect.
+case "$artifact_url" in
+  *"/releases/latest/"* | *"/latest/download/"* | */latest | */main | */master)
+    echo "release manifest 使用了不受支持的 latest/main 引用，已中止安装。" >&2
+    exit 2 ;;
+esac
 curl --fail --location --silent --show-error "$artifact_url" >"$work_dir/sbctl"
 printf '%s  %s\n' "$expected_sha" "$work_dir/sbctl" | sha256sum --check --status
 install -m 0755 "$work_dir/sbctl" /usr/local/bin/sbctl
-
-sing_box_url=$(jq -er '.sing_box.url' "$work_dir/manifest.json")
-sing_box_sha=$(jq -er '.sing_box.sha256' "$work_dir/manifest.json")
-curl --fail --location --silent --show-error "$sing_box_url" >"$work_dir/sing-box"
-printf '%s  %s\n' "$sing_box_sha" "$work_dir/sing-box" | sha256sum --check --status
-chmod 0755 "$work_dir/sing-box"
 
 if [[ "$#" -eq 0 ]]; then
   if [[ -t 0 ]]; then
@@ -105,7 +138,8 @@ if [[ "$#" -eq 0 ]]; then
 
   echo ""
   echo "接下来可逐项选择要启用的协议；直接回车即启用。"
-  exec /usr/local/bin/sbctl install --sing-box-bin "$work_dir/sing-box" "${install_args[@]}" <"$input"
+  # sing-box 下载、摘要、兼容矩阵和配置检查全部由 sbctl 依据同一签名 manifest 完成。
+  exec /usr/local/bin/sbctl install --manifest "$work_dir/manifest.json" "${install_args[@]}" <"$input"
 fi
 
-exec /usr/local/bin/sbctl install --sing-box-bin "$work_dir/sing-box" "$@"
+exec /usr/local/bin/sbctl install --manifest "$work_dir/manifest.json" "$@"

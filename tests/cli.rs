@@ -108,6 +108,14 @@ fn failed_update_health_check_restores_the_known_good_binaries_and_keeps_a_rollb
     let old_sing_box = b"known-good sing-box";
     write_managed_file(&fixture, "usr/local/bin/sbctl", old_sbctl);
     write_managed_file(&fixture, "usr/local/bin/sing-box", old_sing_box);
+    let old_state = b"known-good accounting state";
+    write_managed_file(&fixture, "var/lib/sbctl/state.json", old_state);
+    let old_artifact = fs::read(
+        fixture
+            .path()
+            .join("var/lib/sbctl/artifacts/sing-box-server.json"),
+    )
+    .expect("generated server artifact is readable");
 
     Command::cargo_bin("sbctl")
         .expect("sbctl binary is built")
@@ -134,7 +142,36 @@ fn failed_update_health_check_restores_the_known_good_binaries_and_keeps_a_rollb
         fs::read(fixture.path().join("usr/local/bin/sing-box")).expect("old sing-box is restored"),
         old_sing_box
     );
-    assert!(fixture.path().join("var/lib/sbctl/rollback").is_dir());
+    assert_eq!(
+        fs::read(fixture.path().join("var/lib/sbctl/state.json")).expect("old state is restored"),
+        old_state
+    );
+    assert_eq!(
+        fs::read(
+            fixture
+                .path()
+                .join("var/lib/sbctl/artifacts/sing-box-server.json")
+        )
+        .expect("old artifact is restored"),
+        old_artifact
+    );
+    let rollback_root = fixture.path().join("var/lib/sbctl/rollback");
+    let rollback_point = fs::read_dir(&rollback_root)
+        .expect("rollback directory is readable")
+        .next()
+        .expect("a rollback point exists")
+        .expect("rollback entry is readable")
+        .path();
+    assert_eq!(
+        fs::read(rollback_point.join("var/lib/sbctl/state.json")).expect("state is backed up"),
+        old_state
+    );
+    assert_eq!(
+        fs::read(rollback_point.join("var/lib/sbctl/artifacts/sing-box-server.json"))
+            .expect("artifact is backed up"),
+        old_artifact
+    );
+    assert!(rollback_point.join("etc/sbctl/config.toml").is_file());
 }
 
 #[test]
@@ -182,6 +219,331 @@ fn failed_candidate_configuration_check_leaves_the_known_good_binaries_untouched
         old_sing_box
     );
     assert!(!fixture.path().join("var/lib/sbctl/rollback").exists());
+}
+
+#[test]
+fn update_check_rejects_an_unsigned_manifest_without_trusting_its_urls_or_digests() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let manifest = fixture.path().join("release-manifest.json");
+    write_unsigned_release_manifest(&manifest, b"candidate sing-box");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "update",
+            "--check",
+            "--manifest",
+            manifest.to_str().expect("manifest path is UTF-8"),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unsigned"));
+
+    assert!(!fixture.path().join("var/lib/sbctl/rollback").exists());
+    assert!(!fixture.path().join("usr/local/bin/sbctl").exists());
+}
+
+#[test]
+fn update_rejects_a_corrupted_signature_before_any_download_or_replacement() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let manifest = fixture.path().join("release-manifest.json");
+    write_release_manifest(&manifest, b"candidate sbctl", b"candidate sing-box");
+    corrupt_manifest_signature(&manifest);
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "update",
+            "--manifest",
+            manifest.to_str().expect("manifest path is UTF-8"),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("signature is invalid"))
+        .stderr(predicate::str::contains("download").not());
+
+    assert!(!fixture.path().join("var/lib/sbctl/rollback").exists());
+    assert!(!fixture.path().join("usr/local/bin/sbctl").exists());
+}
+
+#[test]
+fn update_rejects_an_unknown_schema_version() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let manifest = fixture.path().join("release-manifest.json");
+    write_lib_signed_manifest(
+        &manifest,
+        2,
+        "0.1.1",
+        b"candidate sbctl",
+        "1.12.0",
+        b"candidate sing-box",
+        "1.12.0",
+        "1.12.0",
+    );
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "update",
+            "--check",
+            "--manifest",
+            manifest.to_str().expect("manifest path is UTF-8"),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "schema version 2 is not supported",
+        ));
+}
+
+#[test]
+fn update_rejects_a_sing_box_outside_the_compatibility_matrix_before_replacement() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    initialize_update_fixture(&fixture);
+    let manifest = fixture.path().join("release-manifest.json");
+    let sbctl = command_fixture(&fixture, "candidate-sbctl", true, &[]);
+    let sing_box = sing_box_check_fixture(&fixture, true, &["vless"]);
+    let sbctl_contents = fs::read(&sbctl).expect("sbctl candidate is readable");
+    let sing_box_contents = fs::read(&sing_box).expect("sing-box candidate is readable");
+    write_lib_signed_manifest(
+        &manifest,
+        1,
+        "0.1.1",
+        &sbctl_contents,
+        "1.99.0",
+        &sing_box_contents,
+        "1.12.0",
+        "1.12.9",
+    );
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "update",
+            "--manifest",
+            manifest.to_str().expect("manifest path is UTF-8"),
+            "--sbctl-artifact",
+            sbctl.to_str().expect("sbctl candidate path is UTF-8"),
+            "--sing-box-artifact",
+            sing_box.to_str().expect("sing-box candidate path is UTF-8"),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("outside the compatibility matrix"));
+
+    assert!(!fixture.path().join("var/lib/sbctl/rollback").exists());
+    assert!(!fixture.path().join("usr/local/bin/sbctl").exists());
+    assert!(!fixture.path().join("usr/local/bin/sing-box").exists());
+}
+
+#[test]
+fn update_rejects_latest_and_main_floating_versions() {
+    for version in ["latest", "main"] {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let manifest = fixture.path().join("release-manifest.json");
+        write_lib_signed_manifest(
+            &manifest,
+            1,
+            "0.1.1",
+            b"candidate sbctl",
+            version,
+            b"candidate sing-box",
+            "1.12.0",
+            "1.12.0",
+        );
+
+        Command::cargo_bin("sbctl")
+            .expect("sbctl binary is built")
+            .args([
+                "--root",
+                fixture.path().to_str().expect("fixture path is UTF-8"),
+                "update",
+                "--check",
+                "--manifest",
+                manifest.to_str().expect("manifest path is UTF-8"),
+            ])
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("unsupported version"));
+    }
+}
+
+#[test]
+fn release_sign_refuses_to_sign_floating_or_invalid_manifests() {
+    for (schema, sing_box_version, matrix) in [
+        (1, "latest", Some(("1.12.0", "1.12.0"))),
+        (2, "1.12.0", Some(("1.12.0", "1.12.0"))),
+        (1, "1.12.0", None),
+    ] {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let unsigned = fixture.path().join("release-manifest.unsigned.json");
+        let signed = fixture.path().join("release-manifest.json");
+        let digest = |contents: &[u8]| format!("{:x}", Sha256::digest(contents));
+        let matrix = match matrix {
+            Some((min, max)) => {
+                format!(r#","sing_box_compatibility":[{{"min":"{min}","max":"{max}"}}]"#)
+            }
+            None => String::new(),
+        };
+        fs::write(
+            &unsigned,
+            format!(
+                r#"{{"schema":{schema},"sbctl":{{"version":"0.1.1","sha256":"{}"}},"sing_box":{{"version":"{sing_box_version}","sha256":"{}"}}{matrix}}}"#,
+                digest(b"candidate sbctl"),
+                digest(b"candidate sing-box"),
+            ),
+        )
+        .expect("unsigned manifest is written");
+        Command::cargo_bin("sbctl")
+            .expect("sbctl binary is built")
+            .args([
+                "release",
+                "sign",
+                "--manifest",
+                unsigned.to_str().expect("unsigned path is UTF-8"),
+                "--private-key",
+                &format!("{}/scripts/dev-signing-key.hex", env!("CARGO_MANIFEST_DIR")),
+                "--output",
+                signed.to_str().expect("signed path is UTF-8"),
+            ])
+            .assert()
+            .code(2);
+        assert!(!signed.exists());
+    }
+}
+
+#[test]
+fn sing_box_update_rejects_an_unsigned_manifest() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let manifest = fixture.path().join("release-manifest.json");
+    write_unsigned_release_manifest(&manifest, b"candidate sing-box");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "sing-box",
+            "download",
+            "--manifest",
+            manifest.to_str().expect("manifest path is UTF-8"),
+            "--output",
+            fixture
+                .path()
+                .join("downloaded-sing-box")
+                .to_str()
+                .expect("output path is UTF-8"),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unsigned"));
+
+    assert!(!fixture.path().join("downloaded-sing-box").exists());
+}
+
+#[test]
+fn install_with_a_signed_manifest_downloads_and_verifies_sing_box() {
+    let fixture = supported_systemd_host();
+    let sing_box_fixture = sing_box_check_fixture(&fixture, true, &["vless"]);
+    let sing_box_contents = fs::read(&sing_box_fixture).expect("sing-box fixture is readable");
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("an ephemeral port is available");
+    let port = listener.local_addr().expect("address is available").port();
+    let served = sing_box_contents.clone();
+    let server = thread::spawn(move || {
+        for stream in listener.incoming().take(1) {
+            let mut stream = stream.expect("client stream is accepted");
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served.len()
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(&served);
+        }
+    });
+
+    let manifest = fixture.path().join("release-manifest.json");
+    write_manifest_spec(
+        &manifest,
+        1,
+        "0.1.1",
+        "https://example.test/sbctl",
+        b"candidate sbctl",
+        "1.12.0",
+        &format!("http://127.0.0.1:{port}/sing-box"),
+        &sing_box_contents,
+        "1.12.0",
+        "1.12.0",
+    );
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "install",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "203.0.113.7",
+            "--http-port",
+            "2080",
+            "--interface",
+            "ens3",
+            "--disable-protocol",
+            "vmess-websocket",
+            "--disable-protocol",
+            "hysteria2",
+            "--disable-protocol",
+            "tuic",
+            "--disable-protocol",
+            "anytls",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+            "--manifest",
+            manifest.to_str().expect("manifest path is UTF-8"),
+            "--no-start",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("installation completed"));
+
+    server.join().expect("byte server exits");
+    assert_eq!(
+        fs::read(fixture.path().join("usr/local/bin/sing-box")).expect("sing-box is installed"),
+        sing_box_contents
+    );
+}
+
+#[test]
+fn release_verify_accepts_a_manifest_signed_with_the_built_in_key() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let manifest = fixture.path().join("release-manifest.json");
+    write_release_manifest(&manifest, b"candidate sbctl", b"candidate sing-box");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "release",
+            "verify",
+            "--manifest",
+            manifest.to_str().expect("manifest path is UTF-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "verified against the built-in public key",
+        ));
 }
 
 fn initialize_update_fixture(fixture: &TempDir) {
@@ -275,7 +637,10 @@ fn seed_direct_config(fixture: &TempDir) {
 /// `certificate` commands validate against the subscription host.
 fn seed_live_certificate(fixture: &TempDir, names: &[&str]) {
     let certificate = rcgen::generate_simple_self_signed(
-        names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>(),
+        names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>(),
     )
     .expect("a self-signed certificate is generated");
     let directory = fixture.path().join("etc/letsencrypt/live/sub.example.test");
@@ -338,17 +703,163 @@ fn command_fixture(
     }
 }
 
+/// Writes a signed schema-1 release manifest pinned to the given artifact
+/// contents, signed with the development signing key through the real
+/// `sbctl release sign` path so the fixtures exercise the same rules as a
+/// published release.
 fn write_release_manifest(path: &std::path::Path, sbctl: &[u8], sing_box: &[u8]) {
-    let digest = |contents: &[u8]| format!("{:x}", Sha256::digest(contents));
-    fs::write(
+    write_signed_release_manifest(path, "0.1.1", sbctl, "1.12.0", sing_box, "1.12.0", "1.12.0");
+}
+
+fn write_signed_release_manifest(
+    path: &std::path::Path,
+    sbctl_version: &str,
+    sbctl: &[u8],
+    sing_box_version: &str,
+    sing_box: &[u8],
+    matrix_min: &str,
+    matrix_max: &str,
+) {
+    write_manifest_spec(
         path,
+        1,
+        sbctl_version,
+        "https://example.test/sbctl",
+        sbctl,
+        sing_box_version,
+        "https://example.test/sing-box",
+        sing_box,
+        matrix_min,
+        matrix_max,
+    );
+}
+
+/// Writes a manifest with the given schema, versions, and URLs, then signs it
+/// with the development signing key through the real `sbctl release sign` path.
+#[allow(clippy::too_many_arguments)]
+fn write_manifest_spec(
+    path: &std::path::Path,
+    schema: u32,
+    sbctl_version: &str,
+    sbctl_url: &str,
+    sbctl: &[u8],
+    sing_box_version: &str,
+    sing_box_url: &str,
+    sing_box: &[u8],
+    matrix_min: &str,
+    matrix_max: &str,
+) {
+    let digest = |contents: &[u8]| format!("{:x}", Sha256::digest(contents));
+    let unsigned = path.with_extension("unsigned.tmp.json");
+    fs::write(
+        &unsigned,
         format!(
-            r#"{{"sbctl":{{"version":"0.1.1","sha256":"{}"}},"sing_box":{{"version":"1.12.0","sha256":"{}"}}}}"#,
+            r#"{{"schema":{schema},"sbctl":{{"version":"{sbctl_version}","url":"{sbctl_url}","sha256":"{}"}},"sing_box":{{"version":"{sing_box_version}","url":"{sing_box_url}","sha256":"{}"}},"sing_box_compatibility":[{{"min":"{matrix_min}","max":"{matrix_max}"}}]}}"#,
             digest(sbctl),
             digest(sing_box),
         ),
     )
-    .expect("release manifest is written");
+    .expect("unsigned release manifest is written");
+    sign_release_manifest(&unsigned, path);
+}
+
+/// Signs an already-written manifest with the development signing key through
+/// the real `sbctl release sign` CLI path.
+fn sign_release_manifest(unsigned: &std::path::Path, signed: &std::path::Path) {
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "release",
+            "sign",
+            "--manifest",
+            unsigned.to_str().expect("unsigned path is UTF-8"),
+            "--private-key",
+            &format!("{}/scripts/dev-signing-key.hex", env!("CARGO_MANIFEST_DIR")),
+            "--output",
+            signed.to_str().expect("output path is UTF-8"),
+        ])
+        .assert()
+        .success();
+}
+
+/// Rewrites a signed manifest with a corrupted signature value.
+fn corrupt_manifest_signature(path: &std::path::Path) {
+    let contents = fs::read_to_string(path).expect("manifest is readable");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&contents).expect("manifest is valid JSON");
+    manifest["signature"] = serde_json::Value::String(
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+            .to_owned(),
+    );
+    fs::write(
+        path,
+        serde_json::to_string(&manifest).expect("manifest is serialized"),
+    )
+    .expect("corrupted manifest is written");
+}
+
+/// Writes a manifest signed at the library level, bypassing `release sign`
+/// field validation, so the verifier's rejection of otherwise-signed-but-
+/// invalid manifests (wrong schema, floating version, empty matrix) can be
+/// exercised end to end through the CLI.
+#[allow(clippy::too_many_arguments)]
+fn write_lib_signed_manifest(
+    path: &std::path::Path,
+    schema: u32,
+    sbctl_version: &str,
+    sbctl: &[u8],
+    sing_box_version: &str,
+    sing_box: &[u8],
+    matrix_min: &str,
+    matrix_max: &str,
+) {
+    use sbctl::release::{
+        CompatibilityRange, ReleaseArtifact, ReleaseManifest, manifest_json_with_signature,
+        parse_seed_hex, sign_manifest,
+    };
+    let seed_path = format!("{}/scripts/dev-signing-key.hex", env!("CARGO_MANIFEST_DIR"));
+    let seed = parse_seed_hex(&fs::read_to_string(seed_path).expect("dev signing key is readable"))
+        .expect("dev signing key parses");
+    let digest = |contents: &[u8]| format!("{:x}", Sha256::digest(contents));
+    let mut manifest = ReleaseManifest {
+        schema,
+        sbctl: ReleaseArtifact {
+            version: sbctl_version.to_owned(),
+            url: Some("https://example.test/sbctl".to_owned()),
+            sha256: digest(sbctl),
+        },
+        sing_box: ReleaseArtifact {
+            version: sing_box_version.to_owned(),
+            url: Some("https://example.test/sing-box".to_owned()),
+            sha256: digest(sing_box),
+        },
+        sing_box_compatibility: vec![CompatibilityRange {
+            min: Some(matrix_min.to_owned()),
+            max: Some(matrix_max.to_owned()),
+        }],
+        signature: None,
+    };
+    manifest.signature = Some(sign_manifest(&manifest, &seed).expect("manifest is signed"));
+    fs::write(
+        path,
+        manifest_json_with_signature(&manifest).expect("signed manifest serializes"),
+    )
+    .expect("signed manifest is written");
+}
+
+/// Writes an unsigned schema-1 manifest so signature rejection can be tested
+/// without the manifest's URLs or digests ever being trusted.
+fn write_unsigned_release_manifest(path: &std::path::Path, sing_box: &[u8]) {
+    let digest = |contents: &[u8]| format!("{:x}", Sha256::digest(contents));
+    fs::write(
+        path,
+        format!(
+            r#"{{"schema":1,"sbctl":{{"version":"0.1.1","sha256":"{}"}},"sing_box":{{"version":"1.12.0","sha256":"{}"}},"sing_box_compatibility":[{{"min":"1.12.0","max":"1.12.0"}}]}}"#,
+            digest(b"candidate sbctl"),
+            digest(sing_box),
+        ),
+    )
+    .expect("unsigned release manifest is written");
 }
 
 fn filesystem_snapshot(root: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
@@ -1003,13 +1514,11 @@ fn five_protocols_export_the_same_canonical_nodes_across_server_and_subscription
             .find(|inbound| inbound["type"] == outbound["type"])
             .expect("every exported node has a server inbound");
         assert_eq!(
-            outbound["server_port"],
-            inbound["listen_port"],
+            outbound["server_port"], inbound["listen_port"],
             "{kind} keeps one port across the server and the client configuration"
         );
         assert_eq!(
-            outbound["server"],
-            "proxy.example.test",
+            outbound["server"], "proxy.example.test",
             "{kind} uses the proxy host in every client format"
         );
         let expected_sni = if kind == "vless" {
@@ -1018,8 +1527,7 @@ fn five_protocols_export_the_same_canonical_nodes_across_server_and_subscription
             "sub.example.test"
         };
         assert_eq!(
-            outbound["tls"]["server_name"],
-            expected_sni,
+            outbound["tls"]["server_name"], expected_sni,
             "{kind} uses the canonical TLS server name"
         );
         assert!(
@@ -1040,18 +1548,12 @@ fn five_protocols_export_the_same_canonical_nodes_across_server_and_subscription
             .expect("VMess URI payload is JSON");
             assert_eq!(payload["port"], port_text, "URI carries the vmess port");
         } else {
-            assert!(
-                uri.contains(&port_text),
-                "URI carries the {kind} port"
-            );
+            assert!(uri.contains(&port_text), "URI carries the {kind} port");
         }
         assert!(uri.contains("proxy.example.test"));
-        for secret in [
-            outbound["uuid"].as_str(),
-            outbound["password"].as_str(),
-        ]
-        .into_iter()
-        .flatten()
+        for secret in [outbound["uuid"].as_str(), outbound["password"].as_str()]
+            .into_iter()
+            .flatten()
         {
             assert!(
                 clash.contains(secret),
@@ -1196,7 +1698,7 @@ fn regenerate_validates_before_replacing_artifacts_and_the_active_config() {
 
 #[test]
 fn proxy_credentials_cannot_read_the_subscription_and_the_subscription_credential_is_not_a_node_credential()
-{
+ {
     let fixture = TempDir::new().expect("temporary root is created");
     let checker = sing_box_check_fixture(
         &fixture,
@@ -1251,7 +1753,12 @@ fn proxy_credentials_cannot_read_the_subscription_and_the_subscription_credentia
     let subscription_credential = deployment.subscription_credential.clone();
     let node_secrets = sbctl::canonical::nodes(&deployment)
         .into_iter()
-        .flat_map(|node| node.secrets().into_iter().map(str::to_owned).collect::<Vec<_>>())
+        .flat_map(|node| {
+            node.secrets()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
         .collect::<Vec<_>>();
     assert!(
         !node_secrets.contains(&subscription_credential),
@@ -1263,8 +1770,9 @@ fn proxy_credentials_cannot_read_the_subscription_and_the_subscription_credentia
         "subscription-clash.yaml",
         "subscription-uri.txt",
     ] {
-        let contents = fs::read_to_string(fixture.path().join("var/lib/sbctl/artifacts").join(name))
-            .expect("artifact is readable");
+        let contents =
+            fs::read_to_string(fixture.path().join("var/lib/sbctl/artifacts").join(name))
+                .expect("artifact is readable");
         assert!(
             !contents.contains(&subscription_credential),
             "the Subscription credential never appears in {name}"
@@ -2703,10 +3211,9 @@ fn install_defaults_to_all_managed_protocols_writes_services_and_only_lists_fire
         sbctl_unit.contains("Requires=sbctl-http.socket"),
         "the Direct HTTPS service depends on the socket unit that owns 80/443"
     );
-    let http_socket = fs::read_to_string(
-        fixture.path().join("etc/systemd/system/sbctl-http.socket"),
-    )
-    .expect("the Direct HTTPS socket unit is installed");
+    let http_socket =
+        fs::read_to_string(fixture.path().join("etc/systemd/system/sbctl-http.socket"))
+            .expect("the Direct HTTPS socket unit is installed");
     assert!(http_socket.contains("ListenStream=80"));
     assert!(http_socket.contains("ListenStream=443"));
     let reset_timer = fs::read_to_string(
@@ -2954,7 +3461,12 @@ fn external_proxy_install_does_not_install_the_direct_https_socket() {
             .exists(),
         "no socket unit is installed outside Direct subscription mode"
     );
-    assert!(fixture.path().join("etc/systemd/system/sing-box.service").is_file());
+    assert!(
+        fixture
+            .path()
+            .join("etc/systemd/system/sing-box.service")
+            .is_file()
+    );
 }
 
 #[test]
@@ -3133,14 +3645,20 @@ fn direct_install_writes_the_certbot_deploy_hook_but_external_proxy_does_not() {
     let hook = direct
         .path()
         .join("etc/letsencrypt/renewal-hooks/deploy/sbctl-certificate-deploy-hook");
-    assert!(hook.is_file(), "Direct install writes the Certbot deploy hook");
+    assert!(
+        hook.is_file(),
+        "Direct install writes the Certbot deploy hook"
+    );
     let hook_text = fs::read_to_string(&hook).expect("deploy hook is readable");
     assert!(hook_text.contains("sbctl certificate verify"));
     assert!(hook_text.contains("set -eu"));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(&hook).expect("deploy hook has metadata").permissions().mode();
+        let mode = fs::metadata(&hook)
+            .expect("deploy hook has metadata")
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o111, 0o111, "the deploy hook is executable");
     }
 
@@ -3202,11 +3720,22 @@ fn certificate_verify_pins_a_valid_certificate_without_exposing_the_credential()
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("valid until"));
     assert!(stdout.contains("fingerprint:"));
-    assert!(!stdout.contains(&credential), "verify output must not expose the credential");
+    assert!(
+        !stdout.contains(&credential),
+        "verify output must not expose the credential"
+    );
 
-    let pinned = fixture.path().join("var/lib/sbctl/certificates/sub.example.test");
-    assert!(pinned.join("fullchain.pem").is_file(), "the daemon copy is pinned");
-    assert!(pinned.join("privkey.pem").is_file(), "the private key copy is pinned");
+    let pinned = fixture
+        .path()
+        .join("var/lib/sbctl/certificates/sub.example.test");
+    assert!(
+        pinned.join("fullchain.pem").is_file(),
+        "the daemon copy is pinned"
+    );
+    assert!(
+        pinned.join("privkey.pem").is_file(),
+        "the private key copy is pinned"
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -3219,7 +3748,8 @@ fn certificate_verify_pins_a_valid_certificate_without_exposing_the_credential()
 }
 
 #[test]
-fn certificate_verify_rejects_a_certificate_that_does_not_cover_the_host_without_exposing_the_credential() {
+fn certificate_verify_rejects_a_certificate_that_does_not_cover_the_host_without_exposing_the_credential()
+ {
     let fixture = supported_systemd_host();
     write_traffic_fixture(&fixture, 100, 200, "boot-a");
     seed_direct_config(&fixture);
@@ -3239,7 +3769,10 @@ fn certificate_verify_rejects_a_certificate_that_does_not_cover_the_host_without
     assert!(!output.status.success(), "a SAN mismatch is rejected");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("does not cover that host name"));
-    assert!(!stderr.contains(&credential), "the credential must not leak into diagnostics");
+    assert!(
+        !stderr.contains(&credential),
+        "the credential must not leak into diagnostics"
+    );
 }
 
 #[test]
@@ -3909,7 +4442,10 @@ fn credential_rotate_invalidates_the_old_url_and_keeps_proxy_credentials() {
     );
 
     let new_credential = read_subscription_credential(&fixture);
-    assert_ne!(new_credential, old_credential, "rotation generates a fresh credential");
+    assert_ne!(
+        new_credential, old_credential,
+        "rotation generates a fresh credential"
+    );
     assert!(
         !rotate_stdout.contains(&new_credential),
         "rotation output must not print the complete new Subscription credential; run 'sbctl sub' for URLs"
@@ -3983,7 +4519,9 @@ fn config_wizard_with_empty_answers_leaves_an_existing_deployment_unchanged() {
         .write_stdin("\n".repeat(25))
         .assert()
         .success()
-        .stdout(predicate::str::contains("deployment configuration is unchanged"));
+        .stdout(predicate::str::contains(
+            "deployment configuration is unchanged",
+        ));
 
     assert_eq!(
         fs::read(&config_path).expect("configuration remains readable"),
@@ -4208,7 +4746,9 @@ fn config_wizard_commits_a_timezone_change_and_establishes_new_accounting_state(
         .write_stdin(input)
         .assert()
         .success()
-        .stdout(predicate::str::contains("deployment configuration committed"));
+        .stdout(predicate::str::contains(
+            "deployment configuration committed",
+        ));
 
     let config = fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
         .expect("configuration is committed");
@@ -4274,7 +4814,9 @@ fn config_wizard_creates_a_new_deployment_with_secure_defaults() {
         .write_stdin(input)
         .assert()
         .success()
-        .stdout(predicate::str::contains("deployment configuration committed"));
+        .stdout(predicate::str::contains(
+            "deployment configuration committed",
+        ));
 
     let config = fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
         .expect("a fresh wizard deployment is committed");
@@ -4290,7 +4832,10 @@ fn config_wizard_creates_a_new_deployment_with_secure_defaults() {
         "tuic",
         "anytls",
     ] {
-        assert!(config.contains(protocol), "{protocol} is enabled by default");
+        assert!(
+            config.contains(protocol),
+            "{protocol} is enabled by default"
+        );
     }
 }
 

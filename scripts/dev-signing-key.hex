@@ -1,0 +1,9 @@
+# DEVELOPMENT-ONLY Ed25519 signing key seed (hex) for release manifests.
+#
+# This keypair is embedded in src/release.rs (public key) and this private seed
+# is used by scripts/generate-manifest.sh during development. It MUST NOT be
+# used for production releases: generate a fresh key with
+#   sbctl release keygen
+# embed the public key, and keep the secret seed only in the maintainer's
+# secure storage.
+62ac3d5801b52a11da923ebbbccb88a67f154bde4339596f051ee2732e9a365f

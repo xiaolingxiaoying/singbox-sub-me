@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::config::{ConfigError, DeploymentStore};
+use crate::config::{ConfigError, DeploymentConfig, DeploymentStore};
+use crate::release::{ReleaseArtifact, ReleaseError, ReleaseManifest, verify_trusted};
 
 const MANAGED_PATHS: &[&str] = &[
     "usr/local/bin/sbctl",
@@ -15,32 +15,22 @@ const MANAGED_PATHS: &[&str] = &[
     "etc/sbctl/config.toml",
     "var/lib/sbctl/state.json",
     "etc/sing-box/config.json",
+    "var/lib/sbctl/artifacts/sing-box-server.json",
+    "var/lib/sbctl/artifacts/subscription-sing-box.json",
+    "var/lib/sbctl/artifacts/subscription-clash.yaml",
+    "var/lib/sbctl/artifacts/subscription-uri.txt",
+    "etc/systemd/system/sing-box.service",
+    "etc/systemd/system/sbctl.service",
+    "etc/systemd/system/sbctl-http.socket",
+    "etc/systemd/system/sbctl-accounting-reset.service",
+    "etc/systemd/system/sbctl-accounting-reset.timer",
+    "etc/letsencrypt/renewal-hooks/deploy/sbctl-certificate-deploy-hook",
 ];
-
-#[derive(Debug, Deserialize)]
-pub struct ReleaseManifest {
-    pub sbctl: ReleaseArtifact,
-    pub sing_box: ReleaseArtifact,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ReleaseArtifact {
-    pub version: String,
-    pub sha256: String,
-    #[serde(default)]
-    pub url: Option<String>,
-}
 
 #[derive(Debug, Error)]
 pub enum UpdateError {
     #[error("explicit update requires {0}")]
     MissingArtifactArgument(&'static str),
-    #[error("could not read the pinned release manifest: {0}")]
-    ManifestRead(#[from] std::io::Error),
-    #[error("could not parse the pinned release manifest: {0}")]
-    ManifestParse(#[from] serde_json::Error),
-    #[error("pinned release manifest has an invalid SHA-256 for {0}")]
-    InvalidDigest(&'static str),
     #[error("{0} artifact does not match the pinned release manifest")]
     DigestMismatch(&'static str),
     #[error("pinned release manifest has no download URL for {0}")]
@@ -56,14 +46,18 @@ pub enum UpdateError {
     #[error("rollback failed: {0}")]
     Rollback(String),
     #[error(transparent)]
+    Release(#[from] ReleaseError),
+    #[error("release artifact storage failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
     Storage(#[from] ConfigError),
 }
 
+/// Reads and verifies a pinned release manifest. The Ed25519 signature is
+/// verified before any URL or digest in the manifest is trusted, so a failed
+/// signature never leads to a download or replacement.
 pub fn read_manifest(path: &Path) -> Result<ReleaseManifest, UpdateError> {
-    let manifest: ReleaseManifest = serde_json::from_slice(&fs::read(path)?)?;
-    validate_digest("sbctl", &manifest.sbctl.sha256)?;
-    validate_digest("sing-box", &manifest.sing_box.sha256)?;
-    Ok(manifest)
+    Ok(crate::release::verify_manifest(path)?)
 }
 
 pub fn available_versions(manifest: &ReleaseManifest) -> String {
@@ -116,6 +110,13 @@ fn download_artifact(
     let result = verify_artifact(name, &temporary, &artifact.sha256);
     if result.is_ok() {
         fs::rename(&temporary, output)?;
+        // Downloaded artifacts are executables; make them runnable so the
+        // candidate health/config checks can invoke them.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(output, fs::Permissions::from_mode(0o755))?;
+        }
     } else {
         let _ = fs::remove_file(&temporary);
     }
@@ -136,8 +137,10 @@ pub fn apply_sing_box(
     manifest: &ReleaseManifest,
     candidate: &Path,
 ) -> Result<PathBuf, UpdateError> {
+    verify_trusted(manifest)?;
     verify_sing_box_artifact(manifest, candidate)?;
     let _lock = store.acquire_operation_lock()?;
+    let config = store.load()?;
     let server_config = fs::read_to_string(
         store
             .root()
@@ -148,28 +151,11 @@ pub fn apply_sing_box(
         .map_err(|error| UpdateError::SingBoxCheck(error.to_string()))?;
 
     let rollback = rollback_directory(store.root());
-    let old_path = store.root().join("usr/local/bin/sing-box");
-    let old_contents = fs::read(&old_path).ok();
-    if let Some(contents) = &old_contents {
-        store.write_relative_locked(
-            &format!(
-                "var/lib/sbctl/rollback/{}/usr/local/bin/sing-box",
-                rollback
-                    .file_name()
-                    .ok_or_else(|| UpdateError::Rollback("invalid rollback path".to_owned()))?
-                    .to_string_lossy()
-            ),
-            contents,
-        )?;
-    }
+    let backup = backup(store, &rollback, &config)?;
     store.write_relative_locked("usr/local/bin/sing-box", &fs::read(candidate)?)?;
     if let Err(error) = crate::lifecycle::restart_sing_box_service(store.root()) {
-        if old_contents.is_some() {
-            let backup = rollback.join("usr/local/bin/sing-box");
-            store.write_relative_locked("usr/local/bin/sing-box", &fs::read(backup)?)?;
-        } else {
-            let _ = fs::remove_file(&old_path);
-        }
+        restore(store, &backup)
+            .map_err(|rollback_error| UpdateError::Rollback(rollback_error.to_string()))?;
         let _ = crate::lifecycle::restart_sing_box_service(store.root());
         return Err(UpdateError::ServiceHealth(error));
     }
@@ -182,6 +168,7 @@ pub fn apply(
     sbctl_candidate: &Path,
     sing_box_candidate: &Path,
 ) -> Result<PathBuf, UpdateError> {
+    verify_trusted(manifest)?;
     verify_artifact("sbctl", sbctl_candidate, &manifest.sbctl.sha256)?;
     verify_artifact("sing-box", sing_box_candidate, &manifest.sing_box.sha256)?;
     check_sbctl_candidate(sbctl_candidate)?;
@@ -198,7 +185,7 @@ pub fn apply(
         .map_err(|error| UpdateError::SingBoxCheck(error.to_string()))?;
 
     let rollback = rollback_directory(store.root());
-    let backup = backup(store, &rollback)?;
+    let backup = backup(store, &rollback, &config)?;
     store.write_relative_locked("usr/local/bin/sbctl", &fs::read(sbctl_candidate)?)?;
     store.write_relative_locked("usr/local/bin/sing-box", &fs::read(sing_box_candidate)?)?;
 
@@ -214,17 +201,41 @@ pub fn apply(
 }
 
 struct BackupEntry {
-    relative: &'static str,
+    relative: String,
     contents: Option<Vec<u8>>,
 }
 
-fn backup(store: &DeploymentStore, rollback: &Path) -> Result<Vec<BackupEntry>, UpdateError> {
+/// Every managed path an update transaction might touch, plus the pinned
+/// certificate copy for Direct subscription mode, so a rollback point restores
+/// binaries, configuration, artifacts, units, certificate references, and
+/// accounting state together.
+fn rollback_paths(config: &DeploymentConfig) -> Vec<String> {
+    let mut paths = MANAGED_PATHS
+        .iter()
+        .map(|path| (*path).to_owned())
+        .collect::<Vec<_>>();
+    if config.subscription_mode == crate::config::SubscriptionMode::Direct {
+        for name in ["fullchain.pem", "privkey.pem"] {
+            paths.push(format!(
+                "var/lib/sbctl/certificates/{}/{}",
+                config.subscription_host, name
+            ));
+        }
+    }
+    paths
+}
+
+fn backup(
+    store: &DeploymentStore,
+    rollback: &Path,
+    config: &DeploymentConfig,
+) -> Result<Vec<BackupEntry>, UpdateError> {
     let mut entries = Vec::new();
-    for relative in MANAGED_PATHS {
-        let source = store.root().join(relative);
+    for relative in rollback_paths(config) {
+        let source = store.root().join(&relative);
         let contents = match fs::read(&source) {
             Ok(contents) => {
-                let backup_path = rollback.join(relative);
+                let backup_path = rollback.join(&relative);
                 let backup_relative = backup_path
                     .strip_prefix(store.root())
                     .expect("rollback path is inside the managed root")
@@ -243,9 +254,9 @@ fn backup(store: &DeploymentStore, rollback: &Path) -> Result<Vec<BackupEntry>, 
 
 fn restore(store: &DeploymentStore, backup: &[BackupEntry]) -> Result<(), ConfigError> {
     for entry in backup {
-        let path = store.root().join(entry.relative);
+        let path = store.root().join(&entry.relative);
         match &entry.contents {
-            Some(contents) => store.write_relative_locked(entry.relative, contents)?,
+            Some(contents) => store.write_relative_locked(&entry.relative, contents)?,
             None if path.exists() => fs::remove_file(path)?,
             None => {}
         }
@@ -268,12 +279,6 @@ fn verify_artifact(name: &'static str, path: &Path, expected: &str) -> Result<()
     (actual == expected)
         .then_some(())
         .ok_or(UpdateError::DigestMismatch(name))
-}
-
-fn validate_digest(name: &'static str, digest: &str) -> Result<(), UpdateError> {
-    (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then_some(())
-        .ok_or(UpdateError::InvalidDigest(name))
 }
 
 fn check_sbctl_candidate(candidate: &Path) -> Result<(), UpdateError> {

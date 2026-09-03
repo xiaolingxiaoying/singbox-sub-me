@@ -49,6 +49,9 @@ enum Command {
         anytls_port: Option<u16>,
         #[arg(long, value_name = "PATH")]
         sing_box_bin: Option<PathBuf>,
+        /// Signed release manifest used to download and verify the data plane.
+        #[arg(long, value_name = "PATH")]
+        manifest: Option<PathBuf>,
         /// Create units and configuration without starting services (acceptance fixture use).
         #[arg(long, hide = true)]
         no_start: bool,
@@ -80,12 +83,12 @@ enum Command {
         #[arg(long)]
         purge: bool,
     },
-    /// Check or install explicitly selected, hash-verified release artifacts.
+    /// Verify or apply a signed, fixed-version release manifest and its artifacts.
     Update {
-        /// Display versions from the pinned manifest without downloading or changing the host.
+        /// Display versions from the signed manifest without downloading or changing the host.
         #[arg(long)]
         check: bool,
-        /// Fixed release manifest containing the allowed artifact hashes.
+        /// Signed release manifest containing the allowed artifact hashes.
         #[arg(long, value_name = "PATH")]
         manifest: PathBuf,
         /// Optional local sbctl candidate artifact; otherwise download from the manifest.
@@ -100,6 +103,12 @@ enum Command {
     SingBox {
         #[command(subcommand)]
         command: SingBoxCommand,
+    },
+    /// Maintainer tooling for signed release manifests.
+    #[command(hide = true)]
+    Release {
+        #[command(subcommand)]
+        command: ReleaseCommand,
     },
     /// Retrieve a generated subscription representation using its path credential.
     Sub {
@@ -157,6 +166,7 @@ struct InstallOptions {
     tuic_port: Option<u16>,
     anytls_port: Option<u16>,
     sing_box_bin: Option<PathBuf>,
+    manifest: Option<PathBuf>,
     no_start: bool,
 }
 
@@ -270,6 +280,34 @@ enum CertificateCommand {
     /// Validate the certificate and re-pin it for the service accounts. This is
     /// the Certbot deploy hook and the recommended post-renewal check.
     Verify,
+}
+
+#[derive(Debug, Subcommand)]
+enum ReleaseCommand {
+    /// Sign an unsigned manifest with the given Ed25519 signing key seed.
+    Sign {
+        /// Manifest JSON to sign; any existing `signature` field is replaced.
+        #[arg(long, value_name = "PATH")]
+        manifest: PathBuf,
+        /// File containing the hex-encoded Ed25519 signing key seed.
+        #[arg(long, value_name = "PATH")]
+        private_key: PathBuf,
+        /// Where to write the signed manifest.
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+    },
+    /// Verify a manifest against the built-in first-release public key.
+    Verify {
+        #[arg(long, value_name = "PATH")]
+        manifest: PathBuf,
+    },
+    /// Generate a fresh release signing keypair. The secret seed is written to
+    /// a 0600 file and never printed; only the public key is shown.
+    Keygen {
+        /// Directory in which to write `sbctl-release-secret.hex`.
+        #[arg(long, value_name = "DIR", default_value = ".")]
+        output: PathBuf,
+    },
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -387,6 +425,7 @@ fn main() -> ExitCode {
             tuic_port,
             anytls_port,
             sing_box_bin,
+            manifest,
             no_start,
         } => install(
             root,
@@ -404,6 +443,7 @@ fn main() -> ExitCode {
                 tuic_port,
                 anytls_port,
                 sing_box_bin,
+                manifest,
                 no_start,
             },
         ),
@@ -437,6 +477,7 @@ fn main() -> ExitCode {
             sing_box_artifact.as_deref(),
         ),
         Command::SingBox { command } => sing_box(root, command),
+        Command::Release { command } => release(command),
         Command::Sub { format } => print_subscription_urls(root, format.map(Into::into)),
         Command::Credential { command } => run_credential(root, command),
         Command::Serve { bind, max_requests } => serve_subscription(root, bind, max_requests),
@@ -495,6 +536,45 @@ fn sing_box(root: &Path, command: SingBoxCommand) -> ExitCode {
         }
         Err(error) => {
             eprintln!("sing-box operation failed: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn release(command: ReleaseCommand) -> ExitCode {
+    let result: Result<String, String> = match command {
+        ReleaseCommand::Sign {
+            manifest,
+            private_key,
+            output,
+        } => sbctl::release::sign_manifest_file(&manifest, &private_key, &output)
+            .map(|_| format!("signed release manifest written to {}", output.display()))
+            .map_err(|error| error.to_string()),
+        ReleaseCommand::Verify { manifest } => sbctl::release::verify_manifest(&manifest)
+            .map(|_| "release manifest verified against the built-in public key".to_owned())
+            .map_err(|error| error.to_string()),
+        ReleaseCommand::Keygen { output } => (|| {
+            let (public, secret) = sbctl::release::generate_keypair();
+            let secret_path = output.join("sbctl-release-secret.hex");
+            sbctl::release::write_secret_file(&secret_path, &secret)
+                .map_err(|error| error.to_string())?;
+            let hex =
+                |bytes: &[u8; 32]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            Ok(format!(
+                "secret seed written to {} (0600)\npublic key hex: {}\npublic key PEM:\n{}",
+                secret_path.display(),
+                hex(&public),
+                sbctl::release::public_key_pem(&public)
+            ))
+        })(),
+    };
+    match result {
+        Ok(message) => {
+            println!("{message}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("release operation failed: {error}");
             ExitCode::from(2)
         }
     }
@@ -582,6 +662,7 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
         && options.interface.is_none()
         && options.reality_decoy_sni.is_none()
         && options.sing_box_bin.is_none()
+        && options.manifest.is_none()
         && !io::stdin().is_terminal()
     {
         return match sbctl::preflight::preflight(root) {
@@ -635,11 +716,32 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
             ),
         )?;
         config.validate()?;
-        let sing_box_bin = options
-            .sing_box_bin
-            .ok_or(sbctl::config::ConfigError::InvalidValue(
-                "installation requires --sing-box-bin after verified sing-box retrieval",
-            ))?;
+        if options.sing_box_bin.is_some() && options.manifest.is_some() {
+            return Err(sbctl::config::ConfigError::InvalidValue(
+                "installation accepts either --sing-box-bin or a signed --manifest, not both",
+            ));
+        }
+        let sing_box_bin = match options.sing_box_bin {
+            Some(path) => path,
+            None => {
+                let manifest_path =
+                    options
+                        .manifest
+                        .ok_or(sbctl::config::ConfigError::InvalidValue(
+                            "installation requires --sing-box-bin or a signed --manifest",
+                        ))?;
+                let manifest = sbctl::update::read_manifest(&manifest_path)
+                    .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+                let download = tempfile::NamedTempFile::new()
+                    .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+                sbctl::update::download_sing_box(&manifest, download.path())
+                    .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+                download
+                    .keep()
+                    .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?
+                    .1
+            }
+        };
         let artifacts = sbctl::subscription::generated_artifacts(&config)
             .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
         let server = artifacts
@@ -739,7 +841,8 @@ fn menu(root: &Path) -> ExitCode {
                 run_config_wizard(root, None);
             }
             "7" => {
-                if confirm_menu_action("确认轮换 Subscription credential（旧订阅 URL 将立即失效）") {
+                if confirm_menu_action("确认轮换 Subscription credential（旧订阅 URL 将立即失效）")
+                {
                     rotate_subscription_credential(root);
                 }
             }
@@ -906,9 +1009,10 @@ fn run_certificate(root: &Path, command: CertificateCommand) -> ExitCode {
             println!("fingerprint: {}", validated.fingerprint);
         })
         .map_err(|error| {
-            sbctl::config::ConfigError::StateContent(
-                sbctl::subscription::redact_secret(&error.to_string(), &config.subscription_credential),
-            )
+            sbctl::config::ConfigError::StateContent(sbctl::subscription::redact_secret(
+                &error.to_string(),
+                &config.subscription_credential,
+            ))
         })
     });
     match result {
@@ -1050,8 +1154,7 @@ fn print_status_json(root: &Path) -> ExitCode {
                 .into_iter()
                 .map(|(unit, state)| (unit.to_owned(), state))
                 .collect::<std::collections::BTreeMap<_, _>>();
-            let certificate = (config.subscription_mode
-                == sbctl::config::SubscriptionMode::Direct)
+            let certificate = (config.subscription_mode == sbctl::config::SubscriptionMode::Direct)
                 .then(|| sbctl::certificate::status(&store, &config));
             let status = serde_json::json!({
                 "configured": true,
@@ -1529,7 +1632,9 @@ fn rotate_subscription_credential(root: &Path) -> ExitCode {
     });
     match result {
         Ok(_) => {
-            println!("subscription credential rotated; all previous subscription URLs are now invalid");
+            println!(
+                "subscription credential rotated; all previous subscription URLs are now invalid"
+            );
             println!("run 'sbctl sub' to display the new subscription URLs");
             ExitCode::SUCCESS
         }
