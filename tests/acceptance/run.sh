@@ -38,7 +38,6 @@ for image in debian:12-slim ubuntu:22.04 ubuntu:24.04; do
   # Keep the release artifact outside sbctl's managed installation path: a
   # purge deliberately removes /usr/local/bin/sbctl, while this suite needs to
   # verify a subsequent fresh install in the same container.
-  MSYS_NO_PATHCONV=1 docker exec "$container" chmod 0755 /opt/sbctl/sbctl
   MSYS_NO_PATHCONV=1 docker exec "$container" env SBCTL_BIN=/opt/sbctl/sbctl \
     /usr/local/lib/sbctl-acceptance/verify.sh
   MSYS_NO_PATHCONV=1 docker exec "$container" env SBCTL_BIN=/opt/sbctl/sbctl sbctl-acceptance-real
