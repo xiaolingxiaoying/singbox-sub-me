@@ -64,15 +64,16 @@ target/release/sbctl
 
 ## 安装
 
-在 Debian/Ubuntu VPS 上，推荐使用已有 Nginx/Caddy 的 `external-proxy` 模式。将
-`sub.example.com` 替换为你的订阅域名，将 `eth0` 替换为 VPS 的实际网卡：
+在 Debian/Ubuntu VPS 上，首次安装只需运行一个脚本；脚本会先校验发布 manifest 和两个
+二进制，再以中文菜单引导选择订阅模式、域名/IP、网卡和协议：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/xiaolingxiaoying/singbox-sub-me/v0.1.0/scripts/install.sh \
-  | SBCTL_MANIFEST_URL=https://github.com/xiaolingxiaoying/singbox-sub-me/releases/download/v0.1.0/manifest-{arch}.json \
-    bash -s -- --mode external-proxy --subscription-host sub.example.com \
-      --interface eth0 --reality-decoy-sni www.cloudflare.com
+bash <(wget -qO- https://raw.githubusercontent.com/xiaolingxiaoying/singbox-sub-me/main/scripts/install.sh)
 ```
+
+脚本默认从最新 GitHub Release 取得与系统架构匹配的 manifest；可通过
+`SBCTL_MANIFEST_URL` 固定到指定版本。保留传递 `sbctl install` 参数的非交互入口，适合
+自动化部署；交互式安装不会修改防火墙，也不会接管已有 sing-box、sing-box-yg、Nginx 或 Caddy。
 
 安装后检查服务并获取订阅地址：
 
@@ -82,7 +83,7 @@ sbctl status
 sbctl sub
 ```
 
-sbctl 默认监听 `127.0.0.1:2080`，请在 Nginx/Caddy 中将 `/sub/` 反代到该地址。
+选择 `external-proxy` 时，sbctl 默认监听 `127.0.0.1:2080`，请在 Nginx/Caddy 中将 `/sub/` 反代到该地址。
 五个协议端口用 `sbctl node` 查看，并在 VPS 安全组/防火墙中放行；sbctl 不会自动修改防火墙。
 
 ## 配置初始化

@@ -26,6 +26,9 @@ enum Command {
         subscription_host: Option<String>,
         #[arg(long)]
         proxy_host: Option<String>,
+        /// Public HTTP port used only by IP fallback subscription mode.
+        #[arg(long)]
+        http_port: Option<u16>,
         #[arg(long)]
         interface: Option<String>,
         #[arg(long)]
@@ -118,6 +121,7 @@ struct InstallOptions {
     mode: CliSubscriptionMode,
     subscription_host: Option<String>,
     proxy_host: Option<String>,
+    http_port: Option<u16>,
     interface: Option<String>,
     reality_decoy_sni: Option<String>,
     disable_protocol: Vec<CliManagedProtocol>,
@@ -308,6 +312,7 @@ fn main() -> ExitCode {
             mode,
             subscription_host,
             proxy_host,
+            http_port,
             interface,
             reality_decoy_sni,
             disable_protocol,
@@ -324,6 +329,7 @@ fn main() -> ExitCode {
                 mode,
                 subscription_host,
                 proxy_host,
+                http_port,
                 interface,
                 reality_decoy_sni,
                 disable_protocol,
@@ -536,7 +542,7 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
             options.mode.into(),
             subscription_host,
             options.proxy_host,
-            None,
+            options.http_port,
             interface,
             protocols,
             reality_decoy_sni,

@@ -10,9 +10,19 @@
 对应工件均可公开访问。
 
 ```bash
-curl -fsSL https://发布地址/install.sh | SBCTL_MANIFEST_URL=https://发布地址/manifest-{arch}.json bash -s -- \
-  --subscription-host sub.example.com \
-  --reality-decoy-sni www.cloudflare.com
+bash <(wget -qO- https://raw.githubusercontent.com/xiaolingxiaoying/singbox-sub-me/main/scripts/install.sh)
+```
+
+首次无参数运行会进入中文引导菜单：选择 Direct、External proxy 或 IP fallback，再填写订阅
+域名/IP、可选代理连接主机、网卡和 Reality 伪装 SNI；随后逐项确认需要启用的协议。协议端口
+默认自动分配。IP fallback 会自动只启用 VLESS Reality，并询问 HTTP 订阅端口。
+
+脚本默认使用 GitHub Release 的 `latest/download/manifest-{arch}.json`。如需固定版本或使用
+镜像，请设置 `SBCTL_MANIFEST_URL`，例如：
+
+```bash
+SBCTL_MANIFEST_URL=https://发布地址/manifest-{arch}.json \
+  bash <(wget -qO- https://发布地址/install.sh)
 ```
 
 bootstrap 脚本只安装并校验 sbctl；它不会接管已有的 sing-box 部署，也不会修改防火墙。
