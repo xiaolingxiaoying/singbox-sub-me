@@ -74,6 +74,7 @@ pub fn remove_managed_sing_box(root: &Path) -> Result<(), String> {
 
 pub fn start_services(root: &Path) -> Result<(), String> {
     ensure_daemon_account(root)?;
+    prepare_daemon_storage(root)?;
     systemctl(root, &["daemon-reload"])?;
     systemctl(
         root,
@@ -363,5 +364,20 @@ fn ensure_daemon_account(root: &Path) -> Result<(), String> {
         .map_err(|error| format!("could not create sbctl service account: {error}"))?;
     status.success().then_some(()).ok_or_else(|| {
         format!("could not create sbctl service account: useradd exited with {status}")
+    })
+}
+
+fn prepare_daemon_storage(root: &Path) -> Result<(), String> {
+    // Fixture roots intentionally do not have real passwd entries or ownership
+    // metadata. Only change ownership when operating on the live host root.
+    if root != Path::new("/") {
+        return Ok(());
+    }
+    let status = Command::new("chown")
+        .args(["-R", "sbctl:sbctl", "/etc/sbctl", "/var/lib/sbctl"])
+        .status()
+        .map_err(|error| format!("could not prepare sbctl service storage: {error}"))?;
+    status.success().then_some(()).ok_or_else(|| {
+        format!("could not prepare sbctl service storage: chown exited with {status}")
     })
 }

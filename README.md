@@ -64,38 +64,26 @@ target/release/sbctl
 
 ## 安装
 
-安装流程默认启用五种协议，并允许通过 `--disable-protocol` 排除协议。安装前必须确认 VPS 安全组和防火墙放行对应的 TCP/UDP 端口；sbctl 只显示所需端口，不会自动修改防火墙。
+在 Debian/Ubuntu VPS 上，推荐使用已有 Nginx/Caddy 的 `external-proxy` 模式。将
+`sub.example.com` 替换为你的订阅域名，将 `eth0` 替换为 VPS 的实际网卡：
 
 ```bash
-sbctl install \
-  --subscription-host sub.example.com \
-  --interface eth0 \
-  --reality-decoy-sni www.cloudflare.com \
-  --sing-box-bin /usr/local/bin/sing-box
+curl -fsSL https://raw.githubusercontent.com/xiaolingxiaoying/singbox-sub-me/v0.1.0/scripts/install.sh \
+  | SBCTL_MANIFEST_URL=https://github.com/xiaolingxiaoying/singbox-sub-me/releases/download/v0.1.0/manifest-{arch}.json \
+    bash -s -- --mode external-proxy --subscription-host sub.example.com \
+      --interface eth0 --reality-decoy-sni www.cloudflare.com
 ```
 
-也可以为五个协议分别指定端口：
+安装后检查服务并获取订阅地址：
 
 ```bash
-sbctl install \
-  --subscription-host sub.example.com \
-  --interface eth0 \
-  --reality-decoy-sni www.cloudflare.com \
-  --vless-port 12001 \
-  --vmess-port 12002 \
-  --hysteria2-port 12003 \
-  --tuic-port 12004 \
-  --anytls-port 12005 \
-  --sing-box-bin /usr/local/bin/sing-box
+systemctl status sbctl.service sing-box.service
+sbctl status
+sbctl sub
 ```
 
-端口规则：
-
-- 必须位于 `10000–65535`
-- 五个协议不能使用重复端口号
-- TCP 和 UDP 共享同一个端口命名空间
-- 端口已被系统监听时，安装或配置初始化失败
-- 未指定的端口会自动随机分配
+sbctl 默认监听 `127.0.0.1:2080`，请在 Nginx/Caddy 中将 `/sub/` 反代到该地址。
+五个协议端口用 `sbctl node` 查看，并在 VPS 安全组/防火墙中放行；sbctl 不会自动修改防火墙。
 
 ## 配置初始化
 
@@ -217,11 +205,16 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
 
-Debian/Ubuntu 黑盒验收脚本位于 [`tests/acceptance/run.sh`](tests/acceptance/run.sh)，需要 Docker 和 Linux 发布二进制：
+Debian/Ubuntu 黑盒验收脚本位于 [`tests/acceptance/run.sh`](tests/acceptance/run.sh)，需要
+Docker daemon 和 Linux 发布二进制。脚本会分别启动 Debian 12、Ubuntu 24.04 的
+systemd 容器，因此 Docker 运行环境必须允许 `--privileged` 和 cgroup 挂载：
 
 ```bash
 SBCTL_ARTIFACT=/path/to/sbctl-linux-amd64 tests/acceptance/run.sh
 ```
+
+验收使用本地注入的 `sbctl` 发布二进制和容器内的 fake sing-box，不依赖 GitHub
+Release 或公网域名；容器仅用于验收，不代表 sbctl 支持容器作为生产部署环境。
 
 ## 参考项目
 
