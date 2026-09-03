@@ -41,7 +41,7 @@
 
 当前 V0.1 目标平台：
 
-- Debian 或 Ubuntu
+- Debian 12 或 Ubuntu 22.04+
 - systemd
 - amd64；发布流程同时准备 arm64 工件
 - 已安装或可安装经过校验的 sing-box
@@ -206,7 +206,7 @@ cargo test
 ```
 
 Debian/Ubuntu 黑盒验收脚本位于 [`tests/acceptance/run.sh`](tests/acceptance/run.sh)，需要
-Docker daemon 和 Linux 发布二进制。脚本会分别启动 Debian 12、Ubuntu 24.04 的
+Docker daemon 和 Linux 发布二进制。脚本会分别启动 Debian 12、Ubuntu 22.04、Ubuntu 24.04 的
 systemd 容器，因此 Docker 运行环境必须允许 `--privileged` 和 cgroup 挂载：
 
 ```bash

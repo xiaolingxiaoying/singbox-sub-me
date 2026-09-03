@@ -8,7 +8,7 @@ artifact=${SBCTL_ARTIFACT:?set SBCTL_ARTIFACT to the Linux release binary to acc
 test -f "$artifact" || { echo "SBCTL_ARTIFACT is not a file: $artifact" >&2; exit 2; }
 artifact=$(CDPATH= cd -- "$(dirname "$artifact")" && pwd)/$(basename "$artifact")
 
-for image in debian:12-slim ubuntu:24.04; do
+for image in debian:12-slim ubuntu:22.04 ubuntu:24.04; do
   tag="sbctl-acceptance-$(printf '%s' "$image" | tr ':/' '--')"
   docker build --build-arg "BASE_IMAGE=$image" -f "$repository_root/tests/acceptance/Dockerfile" -t "$tag" "$repository_root"
   container="${tag}-$(date +%s)-$$"

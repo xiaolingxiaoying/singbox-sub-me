@@ -4,10 +4,10 @@
 
 发布 manifest 必须同时包含 `sbctl.url`、`sbctl.sha256`、`sing_box.url` 和
 `sing_box.sha256`。GitHub Release 会生成 `manifest-amd64.json` 和
-`manifest-arm64.json`。在 Debian/Ubuntu VPS 上，`{arch}` 会自动替换为系统架构：
+`manifest-arm64.json`。在 Debian 12 或 Ubuntu 22.04+ VPS 上，`{arch}` 会自动替换为系统架构：
 
-> 当前仓库是私有仓库。私有 GitHub Release 不能被 VPS 匿名 `curl` 下载；要使用下面
-> 的无凭证安装方式，需要将仓库/Release 设为公开，或把 release 文件同步到公开下载站。
+公开 GitHub Release 可直接由 VPS 匿名下载；如果使用其他下载站，请确保 manifest 和
+对应工件均可公开访问。
 
 ```bash
 curl -fsSL https://发布地址/install.sh | SBCTL_MANIFEST_URL=https://发布地址/manifest-{arch}.json bash -s -- \
