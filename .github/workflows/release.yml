@@ -52,8 +52,20 @@ jobs:
           name: sbctl-${{ matrix.arch }}
           path: sbctl-linux-${{ matrix.arch }}
 
-  package:
+  acceptance:
     needs: build-sbctl
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sbctl-amd64
+      - run: chmod 0755 sbctl-linux-amd64
+      - name: Validate the Linux release artifact on supported systemd hosts
+        run: SBCTL_ARTIFACT="$GITHUB_WORKSPACE/sbctl-linux-amd64" tests/acceptance/run.sh
+
+  package:
+    needs: [build-sbctl, acceptance]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4

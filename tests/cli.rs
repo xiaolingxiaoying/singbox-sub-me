@@ -1338,6 +1338,16 @@ fn help_lists_the_safe_install_and_status_commands() {
 }
 
 #[test]
+fn install_help_exposes_the_ip_fallback_http_port() {
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(["install", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--http-port"));
+}
+
+#[test]
 fn help_lists_independent_sing_box_lifecycle_commands() {
     Command::cargo_bin("sbctl")
         .expect("binary exists")

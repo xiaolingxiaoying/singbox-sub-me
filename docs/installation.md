@@ -10,7 +10,8 @@
 对应工件均可公开访问。
 
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/xiaolingxiaoying/singbox-sub-me/main/scripts/install.sh)
+wget -O /tmp/sbctl-install.sh https://raw.githubusercontent.com/xiaolingxiaoying/singbox-sub-me/master/scripts/install.sh
+bash /tmp/sbctl-install.sh
 ```
 
 首次无参数运行会进入中文引导菜单：选择 Direct、External proxy 或 IP fallback，再填写订阅

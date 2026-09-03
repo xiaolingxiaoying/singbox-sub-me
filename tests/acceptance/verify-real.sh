@@ -74,4 +74,30 @@ test -d /var/backups/sbctl || fail 'default uninstall did not preserve a backup'
 test "$(cat /etc/ufw/user.rules)" = firewall || fail 'uninstall changed firewall data'
 test "$(cat /etc/nginx.conf)" = proxy || fail 'uninstall changed unrelated data'
 
+# A release artifact must accept the public IP fallback port option advertised by
+# the bootstrap installer and expose its lower-security HTTP subscription.
+$sbctl uninstall --purge >/dev/null
+ip_install_output=$(
+  "$sbctl" install \
+    --mode ip-fallback \
+    --subscription-host 127.0.0.1 \
+    --proxy-host 127.0.0.1 \
+    --http-port 2081 \
+    --interface "$interface" \
+    --reality-decoy-sni www.cloudflare.com \
+    --disable-protocol vmess-websocket \
+    --disable-protocol hysteria2 \
+    --disable-protocol tuic \
+    --disable-protocol anytls \
+    --sing-box-bin "$fake_sing_box"
+)
+contains "$ip_install_output" 'enabled protocols: vless-reality'
+systemctl is-active --quiet sbctl.service || fail 'IP fallback sbctl.service is not active'
+systemctl is-active --quiet sing-box.service || fail 'IP fallback sing-box.service is not active'
+
+credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' /etc/sbctl/config.toml)
+response=$(curl --silent --show-error --include "http://127.0.0.1:2081/sub/$credential/uri")
+contains "$response" 'HTTP/1.1 200 OK'
+contains "$response" 'vless://'
+
 echo "real sbctl acceptance passed on $ID $VERSION_ID"
