@@ -2,6 +2,7 @@
 /.tmp-sing-box-yg-research/
 /.reference-sing-box-yg/
 /.scratch/research/
+/.scratch/upstream/
 
 # Local editor and OS files
 .idea/
