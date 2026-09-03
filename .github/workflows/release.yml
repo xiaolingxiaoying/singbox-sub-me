@@ -62,7 +62,7 @@ jobs:
           name: sbctl-amd64
       - run: chmod 0755 sbctl-linux-amd64
       - name: Validate the Linux release artifact on supported systemd hosts
-        run: SBCTL_ARTIFACT="$GITHUB_WORKSPACE/sbctl-linux-amd64" tests/acceptance/run.sh
+        run: SBCTL_ARTIFACT="$GITHUB_WORKSPACE/sbctl-linux-amd64" sh tests/acceptance/run.sh
 
   package:
     needs: [build-sbctl, acceptance]
