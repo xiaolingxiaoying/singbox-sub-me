@@ -7,7 +7,8 @@ work=$(mktemp -d)
 trap 'jobs -p | xargs -r kill 2>/dev/null || true; rm -rf "$work"' EXIT
 . /etc/os-release
 platform=$ID
-. /usr/local/lib/sbctl-acceptance/fixture.sh
+acceptance_lib=${SBCTL_ACCEPTANCE_LIB:-/usr/local/lib/sbctl-acceptance/fixture.sh}
+. "$acceptance_lib"
 
 fail() { echo "acceptance failure: $*" >&2; exit 1; }
 contains() { printf '%s' "$1" | grep -F -- "$2" >/dev/null || fail "expected output to contain: $2"; }

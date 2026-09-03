@@ -33,3 +33,4 @@ Blocked by:
 - 2026-09-03：流量 reconciliation 增加显式 runtime 入口，保留原有 CLI 与 `reconcile_at` 兼容入口。
 - 2026-09-03：抽出 `tests/acceptance/fixture.sh`，统一构造网卡计数器、boot ID、systemd shim、证书和卸载 fixture；补充 acceptance 边界文档。
 - 2026-09-03：验证通过 `cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`、27 个库测试、31 个 CLI 测试和全部 acceptance shell 的 `sh -n`。当前 WSL2 无 Docker，未执行真实 systemd 容器验收。
+- 2026-09-03：在 Ubuntu 22.04/systemd 环境构建 release binary，并运行隔离 root 黑盒流程，验证配置生成、`status`、网卡/boot fixture 及四个 subscription artifact 完整性均通过。Docker 多发行版验收仍因 Docker 未接入而未执行。
