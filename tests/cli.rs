@@ -1627,6 +1627,7 @@ fn uninstall_purge_removes_only_sbctl_owned_persistent_data() {
     assert!(!fixture.path().join("etc/sbctl/config.toml").exists());
     assert!(!fixture.path().join("var/lib/sbctl").exists());
     assert!(!fixture.path().join("etc/sing-box/config.json").exists());
+    assert!(!fixture.path().join("etc/sing-box").exists());
     assert_eq!(
         fs::read(unrelated_state).expect("unrelated state survives"),
         b"preserve state"

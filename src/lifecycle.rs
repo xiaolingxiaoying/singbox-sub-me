@@ -139,6 +139,7 @@ pub fn uninstall(root: &Path, purge: bool) -> Result<Option<std::path::PathBuf>,
     if purge {
         if sing_box_unit_owned {
             remove_file_if_present(&root.join("etc/sing-box/config.json"))?;
+            remove_empty_directory_if_present(&root.join("etc/sing-box"))?;
         }
         remove_file_if_present(&root.join("etc/sbctl/config.toml"))?;
         remove_directory_if_present(&root.join("var/lib/sbctl"))?;
@@ -287,6 +288,21 @@ fn remove_directory_if_present(path: &Path) -> Result<(), String> {
     match fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("could not remove {}: {error}", path.display())),
+    }
+}
+
+fn remove_empty_directory_if_present(path: &Path) -> Result<(), String> {
+    match fs::remove_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Ok(())
+        }
         Err(error) => Err(format!("could not remove {}: {error}", path.display())),
     }
 }
