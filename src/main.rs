@@ -53,6 +53,9 @@ enum Command {
         #[arg(long, hide = true)]
         no_start: bool,
     },
+    /// Open the interactive management menu for an installed deployment.
+    #[command(alias = "m")]
+    Menu,
     /// Show whether sbctl currently manages a deployment.
     Status,
     /// Reconcile and show VPS traffic for the current accounting period.
@@ -342,6 +345,7 @@ fn main() -> ExitCode {
                 no_start,
             },
         ),
+        Command::Menu => menu(root),
         Command::Status => print_status(root),
         Command::Traffic => print_traffic(root),
         Command::Node => print_nodes(root),
@@ -587,7 +591,7 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
     match result {
         Ok(config) => {
             println!(
-                "installation completed\nenabled protocols: {}\nrequired firewall ports (not changed):\n{}",
+                "installation completed\nenabled protocols: {}\nrequired firewall ports (not changed):\n{}\n\n再次进入管理菜单: sbctl menu",
                 config
                     .enabled_protocols
                     .iter()
@@ -606,6 +610,67 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn menu(root: &Path) -> ExitCode {
+    if !io::stdin().is_terminal() {
+        eprintln!("menu requires an interactive terminal");
+        return ExitCode::from(2);
+    }
+
+    loop {
+        println!(
+            "\nsbctl 管理菜单\n1) 查看部署状态\n2) 查看 VPS 流量\n3) 查看节点端口\n4) 显示订阅地址\n5) 校验配置并重启服务\n6) 卸载 sbctl（保留备份和配置）\n0) 退出"
+        );
+        print!("请选择 [0]: ");
+        if let Err(error) = io::stdout().flush() {
+            eprintln!("menu failed: {error}");
+            return ExitCode::from(2);
+        }
+        let mut choice = String::new();
+        if let Err(error) = io::stdin().read_line(&mut choice) {
+            eprintln!("menu failed: {error}");
+            return ExitCode::from(2);
+        }
+
+        match choice.trim() {
+            "" | "0" => return ExitCode::SUCCESS,
+            "1" => {
+                print_status(root);
+            }
+            "2" => {
+                print_traffic(root);
+            }
+            "3" => {
+                print_nodes(root);
+            }
+            "4" => {
+                print_subscription_urls(root, None);
+            }
+            "5" => {
+                if confirm_menu_action("确认校验配置并重启服务") {
+                    restart(root, None);
+                }
+            }
+            "6" => {
+                if confirm_menu_action("确认卸载 sbctl 服务和二进制（保留备份和配置）")
+                {
+                    return uninstall(root, false);
+                }
+            }
+            _ => eprintln!("无效选择，请输入 0 到 6。"),
+        }
+    }
+}
+
+fn confirm_menu_action(prompt: &str) -> bool {
+    print!("{prompt} [y/N]: ");
+    if io::stdout().flush().is_err() {
+        return false;
+    }
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer).is_ok()
+        && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 fn select_protocols(

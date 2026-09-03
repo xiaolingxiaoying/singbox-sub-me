@@ -24,6 +24,16 @@ fn status_reports_an_unmanaged_host_before_installation() {
 }
 
 #[test]
+fn menu_requires_an_interactive_terminal() {
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .arg("menu")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("requires an interactive terminal"));
+}
+
+#[test]
 fn update_check_reads_a_verified_release_manifest_without_changing_the_host() {
     let fixture = TempDir::new().expect("temporary root is created");
     let manifest = fixture.path().join("release-manifest.json");

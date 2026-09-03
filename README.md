@@ -83,6 +83,9 @@ sbctl status
 sbctl sub
 ```
 
+之后可随时使用 `sbctl menu`（或简写 `sbctl m`）重新进入交互式管理菜单。菜单提供状态、
+VPS 流量、节点端口、订阅地址、服务重启和保留备份的卸载操作；重启和卸载会要求确认。
+
 选择 `external-proxy` 时，sbctl 默认监听 `127.0.0.1:2080`，请在 Nginx/Caddy 中将 `/sub/` 反代到该地址。
 五个协议端口用 `sbctl node` 查看，并在 VPS 安全组/防火墙中放行；sbctl 不会自动修改防火墙。
 

@@ -27,6 +27,9 @@ SBCTL_MANIFEST_URL=https://发布地址/manifest-{arch}.json \
 
 bootstrap 脚本只安装并校验 sbctl；它不会接管已有的 sing-box 部署，也不会修改防火墙。
 
+安装完成后，运行 `sbctl menu`（或 `sbctl m`）可重新打开管理菜单，无需再次下载安装脚本。
+菜单可查看状态、VPS 流量、节点端口和订阅地址，也可在确认后重启服务或卸载 sbctl（默认保留备份和配置）。
+
 安装时可为五个协议分别指定监听端口；端口必须大于 1024，且五个协议之间不能重复：
 
 ```bash
