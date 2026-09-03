@@ -59,7 +59,7 @@ impl TrafficState {
 
     /// Accumulate counter deltas since the established baseline, preserving
     /// accumulated traffic when the boot ID changes or a counter rolls back.
-    pub fn reconcile(mut self, boot_id: &str, rx: u64, tx: u64) -> Self {
+    pub fn accumulate(mut self, boot_id: &str, rx: u64, tx: u64) -> Self {
         if self.boot_id == boot_id {
             if rx >= self.baseline_rx {
                 self.accumulated_rx += rx - self.baseline_rx;
@@ -85,18 +85,47 @@ impl TrafficState {
             })
     }
 
+    /// Apply the latest direction-aware correction: it overrides the measured
+    /// direction values when present, otherwise the measured values are reported.
+    fn apply_correction(&self, measured_rx: u64, measured_tx: u64) -> (u64, u64) {
+        match self.latest_set_direction() {
+            Some((rx, tx)) => (rx, tx),
+            None => (measured_rx, measured_tx),
+        }
+    }
+
     /// The reported RX including the latest direction-aware correction.
     pub fn reported_rx(&self) -> u64 {
-        self.latest_set_direction()
-            .map(|(rx, _)| rx)
-            .unwrap_or(self.accumulated_rx)
+        self.apply_correction(self.accumulated_rx, self.accumulated_tx)
+            .0
     }
 
     /// The reported TX including the latest direction-aware correction.
     pub fn reported_tx(&self) -> u64 {
-        self.latest_set_direction()
-            .map(|(_, tx)| tx)
-            .unwrap_or(self.accumulated_tx)
+        self.apply_correction(self.accumulated_rx, self.accumulated_tx)
+            .1
+    }
+
+    /// The live reported direction values for a read: accumulated traffic plus
+    /// counter deltas since the persisted baseline. A boot ID change or counter
+    /// rollback preserves the accumulated values and keeps the other direction's
+    /// valid delta. A direction-aware correction overrides the measured values.
+    /// This is a pure read and never mutates the state.
+    pub fn live_reported(&self, boot_id: &str, rx: u64, tx: u64) -> (u64, u64) {
+        let delta_rx = if self.boot_id == boot_id && rx >= self.baseline_rx {
+            rx - self.baseline_rx
+        } else {
+            0
+        };
+        let delta_tx = if self.boot_id == boot_id && tx >= self.baseline_tx {
+            tx - self.baseline_tx
+        } else {
+            0
+        };
+        self.apply_correction(
+            self.accumulated_rx + delta_rx,
+            self.accumulated_tx + delta_tx,
+        )
     }
 
     /// The total-only adjustments that add to reported traffic without
@@ -158,60 +187,67 @@ pub enum TrafficError {
     Storage(#[from] ConfigError),
     #[error("invalid accounting schedule: {0}")]
     Schedule(&'static str),
+    #[error("accounting state has not been established for the current period")]
+    StateMissing,
+    #[error(
+        "accounting state belongs to a previous period; the reset task has not run for the current period"
+    )]
+    StateStale,
 }
 
-pub fn reconcile(
+pub fn reset(
     store: &DeploymentStore,
     config: &DeploymentConfig,
 ) -> Result<TrafficReport, TrafficError> {
-    reconcile_with_runtime(store, config, &Runtime::live(store.root()))
+    reset_with_runtime(store, config, &Runtime::live(store.root()))
 }
 
-pub fn reconcile_at(
+pub fn reset_at(
     store: &DeploymentStore,
     config: &DeploymentConfig,
     now: DateTime<Utc>,
 ) -> Result<TrafficReport, TrafficError> {
-    reconcile_with_runtime(store, config, &Runtime::fixture(store.root(), now))
+    reset_with_runtime(store, config, &Runtime::fixture(store.root(), now))
 }
 
-/// Reconcile using an explicit runtime adapter. Production callers use
-/// [`reconcile`]; acceptance and boundary tests use a fixed clock and fixture
-/// root without mocking the accounting algorithm.
-pub fn reconcile_with_runtime<C: crate::runtime::Clock>(
+/// The accounting reset task, the authorized writer for accounting state. It
+/// establishes a new period baseline when the cycle key or interface changes,
+/// and otherwise accumulates measured counter deltas into the persisted state.
+/// Production callers run it from `sbctl-accounting-reset.timer`; tests use a
+/// fixed clock and fixture root without mocking the accounting algorithm.
+pub fn reset_with_runtime<C: crate::runtime::Clock>(
     store: &DeploymentStore,
     config: &DeploymentConfig,
     runtime: &Runtime<C>,
 ) -> Result<TrafficReport, TrafficError> {
-    let (rx, tx) = read_interface_counters(runtime, &config.interface)?;
-    let boot_id = runtime
-        .read_to_string("proc/sys/kernel/random/boot_id")
-        .map_err(TrafficError::BootId)?
-        .trim()
-        .to_owned();
     let period = accounting_period(config, runtime.now_utc())?;
     if period.pending() {
-        return Ok(TrafficReport {
-            interface: config.interface.clone(),
-            received: 0,
-            transmitted: 0,
-            total_adjustment: 0,
-            monthly_traffic_limit: config.monthly_traffic_limit,
-            accounting_period: period.identity().to_owned(),
-            next_reset: period.next_reset,
-        });
+        return Ok(pending_report(config, &period));
     }
+    let measurements = read_measurements(runtime, &config.interface)?;
     let mut reconciled = None;
     store.update_state(|prior| {
         let state = match prior {
             Some(contents) => decode_state(&contents)?,
-            None => TrafficState::new(period.cycle_key(), &config.interface, &boot_id, rx, tx),
+            None => TrafficState::new(
+                period.cycle_key(),
+                &config.interface,
+                &measurements.boot_id,
+                measurements.rx,
+                measurements.tx,
+            ),
         };
         let state = if state.cycle_key != period.cycle_key() || state.interface != config.interface
         {
-            TrafficState::new(period.cycle_key(), &config.interface, &boot_id, rx, tx)
+            TrafficState::new(
+                period.cycle_key(),
+                &config.interface,
+                &measurements.boot_id,
+                measurements.rx,
+                measurements.tx,
+            )
         } else {
-            state.reconcile(&boot_id, rx, tx)
+            state.accumulate(&measurements.boot_id, measurements.rx, measurements.tx)
         };
         let contents = serde_json::to_vec(&state)
             .map_err(|error| ConfigError::StateContent(error.to_string()))?;
@@ -219,15 +255,95 @@ pub fn reconcile_with_runtime<C: crate::runtime::Clock>(
         Ok(contents)
     })?;
     let state = reconciled.expect("active period sets state in the successful state transaction");
-    Ok(TrafficReport {
+    Ok(report_from_state(config, &period, &state, &measurements))
+}
+
+pub fn report(
+    store: &DeploymentStore,
+    config: &DeploymentConfig,
+) -> Result<TrafficReport, TrafficError> {
+    report_with_runtime(store, config, &Runtime::live(store.root()))
+}
+
+pub fn report_at(
+    store: &DeploymentStore,
+    config: &DeploymentConfig,
+    now: DateTime<Utc>,
+) -> Result<TrafficReport, TrafficError> {
+    report_with_runtime(store, config, &Runtime::fixture(store.root(), now))
+}
+
+/// Read the current accounting period without writing accounting state. Used by
+/// `sbctl traffic`, `sbctl status`, and subscription requests; the periodic
+/// accounting reset task is the only writer that keeps the state current.
+pub fn report_with_runtime<C: crate::runtime::Clock>(
+    store: &DeploymentStore,
+    config: &DeploymentConfig,
+    runtime: &Runtime<C>,
+) -> Result<TrafficReport, TrafficError> {
+    let period = accounting_period(config, runtime.now_utc())?;
+    if period.pending() {
+        return Ok(pending_report(config, &period));
+    }
+    let state = store
+        .read_state()?
+        .ok_or(TrafficError::StateMissing)
+        .and_then(|contents| decode_state(&contents).map_err(TrafficError::Storage))?;
+    if state.cycle_key != period.cycle_key() || state.interface != config.interface {
+        return Err(TrafficError::StateStale);
+    }
+    let measurements = read_measurements(runtime, &config.interface)?;
+    Ok(report_from_state(config, &period, &state, &measurements))
+}
+
+fn pending_report(config: &DeploymentConfig, period: &AccountingPeriod) -> TrafficReport {
+    TrafficReport {
         interface: config.interface.clone(),
-        received: state.reported_rx(),
-        transmitted: state.reported_tx(),
+        received: 0,
+        transmitted: 0,
+        total_adjustment: 0,
+        monthly_traffic_limit: config.monthly_traffic_limit,
+        accounting_period: period.identity().to_owned(),
+        next_reset: period.next_reset,
+    }
+}
+
+fn report_from_state(
+    config: &DeploymentConfig,
+    period: &AccountingPeriod,
+    state: &TrafficState,
+    measurements: &Measurements,
+) -> TrafficReport {
+    let (received, transmitted) =
+        state.live_reported(&measurements.boot_id, measurements.rx, measurements.tx);
+    TrafficReport {
+        interface: config.interface.clone(),
+        received,
+        transmitted,
         total_adjustment: state.total_adjustment(),
         monthly_traffic_limit: config.monthly_traffic_limit,
         accounting_period: period.identity().to_owned(),
         next_reset: period.next_reset,
-    })
+    }
+}
+
+struct Measurements {
+    rx: u64,
+    tx: u64,
+    boot_id: String,
+}
+
+fn read_measurements<C: crate::runtime::Clock>(
+    runtime: &Runtime<C>,
+    interface: &str,
+) -> Result<Measurements, TrafficError> {
+    let (rx, tx) = read_interface_counters(runtime, interface)?;
+    let boot_id = runtime
+        .read_to_string("proc/sys/kernel/random/boot_id")
+        .map_err(TrafficError::BootId)?
+        .trim()
+        .to_owned();
+    Ok(Measurements { rx, tx, boot_id })
 }
 
 fn decode_state(contents: &[u8]) -> Result<TrafficState, ConfigError> {
@@ -462,14 +578,14 @@ mod tests {
     };
 
     use super::{
-        CorrectionRecord, TrafficState, accounting_period, reconcile_at, reconcile_with_runtime,
+        CorrectionRecord, TrafficState, accounting_period, report_at, reset_at, reset_with_runtime,
     };
     use crate::runtime::Runtime;
 
     #[test]
-    fn reconciles_rx_and_tx_deltas_without_counting_the_first_observation() {
+    fn accumulates_rx_and_tx_deltas_without_counting_the_first_observation() {
         let initial = TrafficState::new("2024-02-01", "ens3", "boot-a", 100, 200);
-        let reconciled = initial.reconcile("boot-a", 130, 260);
+        let reconciled = initial.accumulate("boot-a", 130, 260);
         assert_eq!(reconciled.accumulated_rx, 30);
         assert_eq!(reconciled.accumulated_tx, 60);
     }
@@ -477,16 +593,16 @@ mod tests {
     #[test]
     fn boot_id_changes_and_counter_decreases_preserve_prior_accumulation() {
         let mut state = TrafficState::new("2024-02-01", "ens3", "boot-a", 100, 200)
-            .reconcile("boot-a", 140, 250);
-        state = state.reconcile("boot-b", 5, 7);
-        state = state.reconcile("boot-b", 8, 12);
+            .accumulate("boot-a", 140, 250);
+        state = state.accumulate("boot-b", 5, 7);
+        state = state.accumulate("boot-b", 8, 12);
         assert_eq!((state.accumulated_rx, state.accumulated_tx), (43, 55));
     }
 
     #[test]
     fn a_counter_decrease_does_not_discard_the_other_direction_delta() {
-        let state =
-            TrafficState::new("2024-02-01", "ens3", "boot-a", 100, 200).reconcile("boot-a", 5, 240);
+        let state = TrafficState::new("2024-02-01", "ens3", "boot-a", 100, 200)
+            .accumulate("boot-a", 5, 240);
 
         assert_eq!((state.accumulated_rx, state.accumulated_tx), (0, 40));
     }
@@ -573,7 +689,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2024, 5, 1, 0, 0, 0).unwrap();
         write_interface_fixture(&fixture, 100, 200, "boot-a");
 
-        let report = reconcile_at(&store, &config, now).unwrap();
+        let report = reset_at(&store, &config, now).unwrap();
 
         assert_eq!(report.received, 0);
         assert_eq!(report.transmitted, 0);
@@ -591,15 +707,22 @@ mod tests {
         let january = Utc.with_ymd_and_hms(2024, 1, 20, 0, 0, 0).unwrap();
         let february = Utc.with_ymd_and_hms(2024, 2, 5, 0, 0, 0).unwrap();
         write_interface_fixture(&fixture, 100, 200, "boot-a");
-        assert_eq!(reconcile_at(&store, &config, january).unwrap().total(), 0);
+        assert_eq!(reset_at(&store, &config, january).unwrap().total(), 0);
         write_interface_fixture(&fixture, 130, 260, "boot-a");
-        assert_eq!(reconcile_at(&store, &config, january).unwrap().total(), 90);
+        assert_eq!(reset_at(&store, &config, january).unwrap().total(), 90);
 
         write_interface_fixture(&fixture, 400, 500, "boot-a");
-        let report = reconcile_at(&store, &config, february).unwrap();
+        let report = reset_at(&store, &config, february).unwrap();
 
         assert_eq!(report.total(), 0);
         assert_eq!(report.accounting_period, "2024-02-01T00:00:00+00:00");
+        let state: TrafficState = serde_json::from_str(
+            &fs::read_to_string(fixture.path().join("var/lib/sbctl/state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(state.cycle_key, "2024-02-01T00:00:00+00:00");
+        assert_eq!((state.baseline_rx, state.baseline_tx), (400, 500));
+        assert_eq!((state.accumulated_rx, state.accumulated_tx), (0, 0));
     }
 
     #[test]
@@ -609,14 +732,14 @@ mod tests {
         let mut config = config();
         let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
         write_interface_fixture(&fixture, 100, 200, "boot-a");
-        assert_eq!(reconcile_at(&store, &config, now).unwrap().total(), 0);
+        assert_eq!(reset_at(&store, &config, now).unwrap().total(), 0);
         write_interface_fixture(&fixture, 130, 260, "boot-a");
-        assert_eq!(reconcile_at(&store, &config, now).unwrap().total(), 90);
+        assert_eq!(reset_at(&store, &config, now).unwrap().total(), 90);
 
         config.interface = "eth1".into();
         write_interface_fixture(&fixture, 1000, 2000, "boot-a");
         write_interface_fixture_named(&fixture, "eth1", 5, 7, "boot-a");
-        let report = reconcile_at(&store, &config, now).unwrap();
+        let report = reset_at(&store, &config, now).unwrap();
 
         assert_eq!(report.total(), 0);
         assert_eq!(report.interface, "eth1");
@@ -633,7 +756,7 @@ mod tests {
             .write_state(br#"{"schema_version":1,"cycle_key":"2024-02-01T00:00:00+00:00","interface":"ens3","baseline_rx":0,"baseline_tx":0,"accumulated_rx":0,"accumulated_tx":0,"boot_id":"boot-a","corrections":[]}"#)
             .unwrap();
 
-        let error = reconcile_at(&store, &config, now).unwrap_err();
+        let error = reset_at(&store, &config, now).unwrap_err();
 
         assert!(matches!(
             error,
@@ -650,7 +773,7 @@ mod tests {
         write_interface_fixture(&fixture, 100, 200, "boot-a");
         store.write_state(b"not json").unwrap();
 
-        let error = reconcile_at(&store, &config, now).unwrap_err();
+        let error = reset_at(&store, &config, now).unwrap_err();
 
         assert!(matches!(
             error,
@@ -662,7 +785,7 @@ mod tests {
     fn correction_records_shape_the_reported_traffic() {
         let when = Utc.with_ymd_and_hms(2024, 2, 15, 12, 0, 0).unwrap();
         let mut state = TrafficState::new("2024-02-01", "ens3", "boot-a", 100, 200)
-            .reconcile("boot-a", 130, 260);
+            .accumulate("boot-a", 130, 260);
 
         state.corrections.push(CorrectionRecord::SetDirection {
             rx: 50,
@@ -687,17 +810,17 @@ mod tests {
         let config = config();
         let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
         write_interface_fixture(&fixture, 100, 200, "boot-a");
-        assert_eq!(reconcile_at(&store, &config, now).unwrap().total(), 0);
+        assert_eq!(reset_at(&store, &config, now).unwrap().total(), 0);
         write_interface_fixture(&fixture, 130, 260, "boot-a");
-        assert_eq!(reconcile_at(&store, &config, now).unwrap().total(), 90);
+        assert_eq!(reset_at(&store, &config, now).unwrap().total(), 90);
         write_interface_fixture(&fixture, 4, 9, "boot-b");
-        assert_eq!(reconcile_at(&store, &config, now).unwrap().total(), 90);
+        assert_eq!(reset_at(&store, &config, now).unwrap().total(), 90);
         write_interface_fixture(&fixture, 10, 20, "boot-b");
-        assert_eq!(reconcile_at(&store, &config, now).unwrap().total(), 107);
+        assert_eq!(reset_at(&store, &config, now).unwrap().total(), 107);
     }
 
     #[test]
-    fn reconciliation_uses_the_fixture_clock_and_host_boundary() {
+    fn reset_uses_the_fixture_clock_and_host_boundary() {
         let fixture = TempDir::new().unwrap();
         let store = DeploymentStore::new(fixture.path());
         let config = config();
@@ -705,10 +828,101 @@ mod tests {
         write_interface_fixture(&fixture, 100, 200, "boot-a");
         let runtime = Runtime::fixture(fixture.path(), now);
 
-        let report = reconcile_with_runtime(&store, &config, &runtime).unwrap();
+        let report = reset_with_runtime(&store, &config, &runtime).unwrap();
 
         assert_eq!(report.accounting_period, "2024-02-01T00:00:00+00:00");
         assert_eq!(report.total(), 0);
+    }
+
+    #[test]
+    fn report_without_established_state_is_a_diagnosable_error() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let config = config();
+        let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+
+        let error = report_at(&store, &config, now).unwrap_err();
+
+        assert!(matches!(error, super::TrafficError::StateMissing));
+    }
+
+    #[test]
+    fn report_reads_live_deltas_without_writing_state() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let config = config();
+        let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+        reset_at(&store, &config, now).unwrap();
+
+        write_interface_fixture(&fixture, 130, 260, "boot-a");
+        let report = report_at(&store, &config, now).unwrap();
+
+        assert_eq!(report.total(), 90);
+        let persisted =
+            fs::read_to_string(fixture.path().join("var/lib/sbctl/state.json")).unwrap();
+        let state: TrafficState = serde_json::from_str(&persisted).unwrap();
+        assert_eq!(state.accumulated_rx, 0);
+        assert_eq!(state.accumulated_tx, 0);
+        assert_eq!((state.baseline_rx, state.baseline_tx), (100, 200));
+    }
+
+    #[test]
+    fn report_preserves_accumulated_across_boot_change_and_adds_the_valid_direction() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let config = config();
+        let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+        assert_eq!(reset_at(&store, &config, now).unwrap().total(), 0);
+        write_interface_fixture(&fixture, 130, 260, "boot-a");
+        assert_eq!(reset_at(&store, &config, now).unwrap().total(), 90);
+        write_interface_fixture(&fixture, 4, 9, "boot-b");
+        assert_eq!(reset_at(&store, &config, now).unwrap().total(), 90);
+
+        write_interface_fixture(&fixture, 10, 20, "boot-b");
+        let before = fs::read(fixture.path().join("var/lib/sbctl/state.json")).unwrap();
+        let report = report_at(&store, &config, now).unwrap();
+        let after = fs::read(fixture.path().join("var/lib/sbctl/state.json")).unwrap();
+
+        assert_eq!((report.received, report.transmitted), (36, 71));
+        assert_eq!(after, before, "a read must not change the persisted state");
+    }
+
+    #[test]
+    fn report_errors_when_state_belongs_to_a_previous_period() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let config = config();
+        let january = Utc.with_ymd_and_hms(2024, 1, 20, 0, 0, 0).unwrap();
+        let february = Utc.with_ymd_and_hms(2024, 2, 5, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+        reset_at(&store, &config, january).unwrap();
+
+        let error = report_at(&store, &config, february).unwrap_err();
+
+        assert!(matches!(error, super::TrafficError::StateStale));
+    }
+
+    #[test]
+    fn a_repeated_reset_for_the_same_cycle_key_does_not_reestablish_the_baseline() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let config = config();
+        let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+        assert_eq!(reset_at(&store, &config, now).unwrap().total(), 0);
+        write_interface_fixture(&fixture, 130, 260, "boot-a");
+        assert_eq!(reset_at(&store, &config, now).unwrap().total(), 90);
+        assert_eq!(reset_at(&store, &config, now).unwrap().total(), 90);
+
+        let state: TrafficState = serde_json::from_str(
+            &fs::read_to_string(fixture.path().join("var/lib/sbctl/state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(state.cycle_key, "2024-02-01T00:00:00+00:00");
+        assert_eq!((state.accumulated_rx, state.accumulated_tx), (30, 60));
     }
 
     fn config() -> DeploymentConfig {

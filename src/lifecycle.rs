@@ -7,9 +7,12 @@ use crate::config::{ConfigError, DeploymentConfig, DeploymentStore, ManagedProto
 
 const SING_BOX_UNIT: &str = "etc/systemd/system/sing-box.service";
 const SBCTL_UNIT: &str = "etc/systemd/system/sbctl.service";
+const ACCOUNTING_RESET_UNIT: &str = "etc/systemd/system/sbctl-accounting-reset.service";
+const ACCOUNTING_RESET_TIMER: &str = "etc/systemd/system/sbctl-accounting-reset.timer";
 const OWNERSHIP_MARKER: &str = "var/lib/sbctl/ownership";
 const SING_BOX_UNIT_MARKER: &str = "Description=sing-box data plane managed by sbctl";
 const SBCTL_UNIT_MARKER: &str = "Description=sbctl private subscription service";
+const ACCOUNTING_RESET_MARKER: &str = "Description=sbctl accounting period reset";
 
 const BACKED_UP_PATHS: &[&str] = &[
     "etc/sbctl/config.toml",
@@ -23,7 +26,12 @@ const BACKED_UP_PATHS: &[&str] = &[
 ];
 
 pub fn install_units(store: &DeploymentStore, server_config: &str) -> Result<(), ConfigError> {
-    for unit in [SING_BOX_UNIT, SBCTL_UNIT] {
+    for unit in [
+        SING_BOX_UNIT,
+        SBCTL_UNIT,
+        ACCOUNTING_RESET_UNIT,
+        ACCOUNTING_RESET_TIMER,
+    ] {
         if store.root().join(unit).exists() {
             return Err(ConfigError::AlreadyExists);
         }
@@ -38,6 +46,16 @@ pub fn install_units(store: &DeploymentStore, server_config: &str) -> Result<(),
         store.root(),
         SBCTL_UNIT,
         "[Unit]\nDescription=sbctl private subscription service\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=sbctl\nGroup=sbctl\nExecStart=/usr/local/bin/sbctl serve\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nReadWritePaths=/var/lib/sbctl\n\n[Install]\nWantedBy=multi-user.target\n",
+    )?;
+    write_unit(
+        store.root(),
+        ACCOUNTING_RESET_UNIT,
+        "[Unit]\nDescription=sbctl accounting period reset task\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nUser=sbctl\nGroup=sbctl\nExecStart=/usr/local/bin/sbctl accounting-reset\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nReadWritePaths=/var/lib/sbctl\n",
+    )?;
+    write_unit(
+        store.root(),
+        ACCOUNTING_RESET_TIMER,
+        "[Unit]\nDescription=sbctl accounting period reset timer\n\n[Timer]\nOnCalendar=minutely\nPersistent=true\nUnit=sbctl-accounting-reset.service\n\n[Install]\nWantedBy=timers.target\n",
     )?;
     store.write_relative_locked(OWNERSHIP_MARKER, b"sbctl-managed-v1\n")
 }
@@ -78,7 +96,13 @@ pub fn start_services(root: &Path) -> Result<(), String> {
     systemctl(root, &["daemon-reload"])?;
     systemctl(
         root,
-        &["enable", "--now", "sing-box.service", "sbctl.service"],
+        &[
+            "enable",
+            "--now",
+            "sing-box.service",
+            "sbctl.service",
+            "sbctl-accounting-reset.timer",
+        ],
     )
 }
 
@@ -87,12 +111,20 @@ pub fn start_services(root: &Path) -> Result<(), String> {
 pub fn rollback_fresh_installation(root: &Path) {
     let _ = systemctl(
         root,
-        &["disable", "--now", "sbctl.service", "sing-box.service"],
+        &[
+            "disable",
+            "--now",
+            "sbctl-accounting-reset.timer",
+            "sbctl.service",
+            "sing-box.service",
+        ],
     );
     let _ = systemctl(root, &["daemon-reload"]);
     for relative in [
         "etc/systemd/system/sbctl.service",
         "etc/systemd/system/sing-box.service",
+        "etc/systemd/system/sbctl-accounting-reset.service",
+        "etc/systemd/system/sbctl-accounting-reset.timer",
         "etc/sing-box/config.json",
         "usr/local/bin/sing-box",
         "etc/sbctl/config.toml",
@@ -117,12 +149,16 @@ pub fn uninstall(root: &Path, purge: bool) -> Result<Option<std::path::PathBuf>,
     let backup = (!purge).then(|| backup_persistent_data(root)).transpose()?;
     let sbctl_unit_owned = unit_has_marker(root, SBCTL_UNIT, SBCTL_UNIT_MARKER)?;
     let sing_box_unit_owned = unit_has_marker(root, SING_BOX_UNIT, SING_BOX_UNIT_MARKER)?;
+    let reset_timer_owned = unit_has_marker(root, ACCOUNTING_RESET_TIMER, ACCOUNTING_RESET_MARKER)?;
     let sing_box_config_owned = sing_box_unit_owned || !root.join(SING_BOX_UNIT).exists();
     if sbctl_unit_owned {
         systemctl(root, &["disable", "--now", "sbctl.service"])?;
     }
     if sing_box_unit_owned {
         systemctl(root, &["disable", "--now", "sing-box.service"])?;
+    }
+    if reset_timer_owned {
+        systemctl(root, &["disable", "--now", "sbctl-accounting-reset.timer"])?;
     }
 
     if sbctl_unit_owned {
@@ -133,7 +169,11 @@ pub fn uninstall(root: &Path, purge: bool) -> Result<Option<std::path::PathBuf>,
         remove_file_if_present(&root.join(SING_BOX_UNIT))?;
         remove_file_if_present(&root.join("usr/local/bin/sing-box"))?;
     }
-    if sbctl_unit_owned || sing_box_unit_owned {
+    if reset_timer_owned {
+        remove_file_if_present(&root.join(ACCOUNTING_RESET_TIMER))?;
+        remove_file_if_present(&root.join(ACCOUNTING_RESET_UNIT))?;
+    }
+    if sbctl_unit_owned || sing_box_unit_owned || reset_timer_owned {
         systemctl(root, &["daemon-reload"])?;
     }
 
@@ -171,16 +211,20 @@ pub fn restart_services(root: &Path) -> Result<(), String> {
 }
 
 pub fn service_status(root: &Path) -> String {
-    ["sing-box.service", "sbctl.service"]
-        .into_iter()
-        .map(
-            |unit| match systemctl(root, &["is-active", "--quiet", unit]) {
-                Ok(()) => format!("{unit}: active"),
-                Err(_) => format!("{unit}: inactive or unavailable"),
-            },
-        )
-        .collect::<Vec<_>>()
-        .join("\n")
+    [
+        "sing-box.service",
+        "sbctl.service",
+        "sbctl-accounting-reset.timer",
+    ]
+    .into_iter()
+    .map(
+        |unit| match systemctl(root, &["is-active", "--quiet", unit]) {
+            Ok(()) => format!("{unit}: active"),
+            Err(_) => format!("{unit}: inactive or unavailable"),
+        },
+    )
+    .collect::<Vec<_>>()
+    .join("\n")
 }
 
 pub fn required_firewall_ports(config: &DeploymentConfig) -> Vec<String> {

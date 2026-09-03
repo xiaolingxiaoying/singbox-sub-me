@@ -855,12 +855,23 @@ impl DeploymentStore {
         self.atomic_write_managed(&self.root.join(STATE_RELATIVE_PATH), contents)
     }
 
+    /// Read the complete accounting state without acquiring the operation lock.
+    /// Writers commit via temporary file and atomic rename, so a concurrent
+    /// reader observes either the previous or the next complete version.
+    pub fn read_state(&self) -> Result<Option<Vec<u8>>, ConfigError> {
+        self.read_state_unlocked()
+    }
+
     pub fn update_state(
         &self,
         update: impl FnOnce(Option<Vec<u8>>) -> Result<Vec<u8>, ConfigError>,
     ) -> Result<(), ConfigError> {
         let _lock = self.operation_lock()?;
-        let contents = update(self.read_state_unlocked()?)?;
+        let prior = self.read_state_unlocked()?;
+        let contents = update(prior.clone())?;
+        if prior.as_deref() == Some(contents.as_slice()) {
+            return Ok(());
+        }
         Ok(atomic_write(
             &self.root.join(STATE_RELATIVE_PATH),
             &contents,
@@ -1069,6 +1080,27 @@ mod tests {
         AccountingPolicy, DeploymentConfig, DeploymentStore, ManagedProtocol, ProtocolPorts,
         SubscriptionMode,
     };
+
+    #[test]
+    fn read_state_returns_the_complete_version_or_none_without_writing() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let store = DeploymentStore::new(fixture.path());
+
+        assert_eq!(
+            store.read_state().expect("missing state reads as None"),
+            None
+        );
+        store
+            .write_state(b"complete state")
+            .expect("state is committed");
+        assert_eq!(
+            store
+                .read_state()
+                .expect("complete state reads as Some")
+                .as_deref(),
+            Some(b"complete state".as_slice())
+        );
+    }
 
     #[test]
     fn state_replacement_exposes_only_the_complete_new_artifact() {

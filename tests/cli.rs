@@ -1029,6 +1029,15 @@ fn ip_fallback_http_service_accepts_only_the_exact_credential_path_and_reports_v
         })
         .expect("credential is available")
         .to_owned();
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "accounting-reset",
+        ])
+        .assert()
+        .success();
     let mut server = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("sbctl"))
         .args([
             "--root",
@@ -1042,6 +1051,9 @@ fn ip_fallback_http_service_accepts_only_the_exact_credential_path_and_reports_v
         .spawn()
         .expect("subscription service starts");
 
+    let state_path = fixture.path().join("var/lib/sbctl/state.json");
+    let before = fs::read(&state_path).expect("state is established before subscription reads");
+
     let response = http_get(port, &format!("/sub/{credential}/uri"));
     assert!(response.starts_with("HTTP/1.1 200 OK"));
     assert!(response.contains("subscription-userinfo: upload=0; download=0; total=1000; expire="));
@@ -1051,6 +1063,11 @@ fn ip_fallback_http_service_accepts_only_the_exact_credential_path_and_reports_v
         &format!("/sub/{credential}/uri?credential={credential}"),
     );
     assert!(rejected.starts_with("HTTP/1.1 404 Not Found"));
+    assert_eq!(
+        fs::read(&state_path).expect("state remains readable"),
+        before,
+        "subscription reads must not write accounting state"
+    );
     assert!(
         server
             .wait()
@@ -1104,6 +1121,16 @@ fn external_proxy_mode_serves_loopback_without_touching_public_ports_or_proxy_co
     assert!(config.contains("subscription_listen_port"));
     assert!(!fixture.path().join("etc/caddy/Caddyfile").exists());
     assert!(!fixture.path().join("etc/nginx/nginx.conf").exists());
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "accounting-reset",
+        ])
+        .assert()
+        .success();
 
     let mut server = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("sbctl"))
         .args([
@@ -1290,6 +1317,16 @@ fn traffic_and_status_report_vps_traffic_for_the_detected_default_route_interfac
         .args([
             "--root",
             fixture.path().to_str().expect("fixture path is UTF-8"),
+            "accounting-reset",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
             "traffic",
         ])
         .assert()
@@ -1324,6 +1361,193 @@ fn traffic_and_status_report_vps_traffic_for_the_detected_default_route_interfac
         .success()
         .stdout(predicate::str::contains("VPS traffic"))
         .stdout(predicate::str::contains("total: 90 bytes"));
+}
+
+#[test]
+fn traffic_and_status_reads_do_not_write_accounting_state() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    fs::create_dir_all(fixture.path().join("proc/net")).expect("route directory is created");
+    fs::write(
+        fixture.path().join("proc/net/route"),
+        "Iface\tDestination\tGateway\tFlags\nens3\t00000000\t00000000\t0003\n",
+    )
+    .expect("default route is written");
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+
+    let root = fixture.path().to_str().expect("fixture path is UTF-8");
+    let init_args = [
+        "--root",
+        root,
+        "config",
+        "init",
+        "--mode",
+        "ip-fallback",
+        "--subscription-host",
+        "203.0.113.7",
+        "--http-port",
+        "2080",
+        "--protocol",
+        "vless-reality",
+        "--reality-decoy-sni",
+        "www.cloudflare.com",
+    ];
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(init_args)
+        .assert()
+        .success();
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "accounting-reset",
+        ])
+        .assert()
+        .success();
+
+    let state_path = fixture.path().join("var/lib/sbctl/state.json");
+    let snapshot = || {
+        let contents = fs::read(&state_path).expect("state is readable");
+        let modified = fs::metadata(&state_path)
+            .expect("state metadata is readable")
+            .modified()
+            .expect("state modification time is readable");
+        (contents, modified)
+    };
+    let before = snapshot();
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "traffic",
+        ])
+        .assert()
+        .success();
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "status",
+        ])
+        .assert()
+        .success();
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "traffic",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(snapshot(), before, "reads must not change accounting state");
+}
+
+#[test]
+fn traffic_without_established_state_is_a_diagnosable_error() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "203.0.113.7",
+            "--http-port",
+            "2080",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "traffic",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "accounting state has not been established for the current period",
+        ));
+    assert!(!fixture.path().join("var/lib/sbctl/state.json").exists());
+}
+
+#[test]
+fn accounting_reset_establishes_state_once_and_repeated_resets_do_not_reestablish_it() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "203.0.113.7",
+            "--http-port",
+            "2080",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "accounting-reset",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("accounting period:"));
+
+    let state_path = fixture.path().join("var/lib/sbctl/state.json");
+    let first = fs::read(&state_path).expect("state is established by the reset task");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "accounting-reset",
+        ])
+        .assert()
+        .success();
+    let second = fs::read(&state_path).expect("state remains readable");
+
+    assert_eq!(
+        first, second,
+        "a repeated reset must not reestablish the period"
+    );
 }
 
 #[test]
@@ -1566,6 +1790,22 @@ fn install_defaults_to_all_managed_protocols_writes_services_and_only_lists_fire
             .contains("ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json")
     );
     assert!(sbctl_unit.contains("User=sbctl"));
+    let reset_timer = fs::read_to_string(
+        fixture
+            .path()
+            .join("etc/systemd/system/sbctl-accounting-reset.timer"),
+    )
+    .expect("accounting reset timer is installed");
+    let reset_service = fs::read_to_string(
+        fixture
+            .path()
+            .join("etc/systemd/system/sbctl-accounting-reset.service"),
+    )
+    .expect("accounting reset service is installed");
+    assert!(reset_timer.contains("Persistent=true"));
+    assert!(reset_timer.contains("OnCalendar=minutely"));
+    assert!(reset_service.contains("ExecStart=/usr/local/bin/sbctl accounting-reset"));
+    assert!(reset_service.contains("User=sbctl"));
     assert!(fixture.path().join("etc/sing-box/config.json").is_file());
     assert!(!fixture.path().join("etc/ufw/user.rules").exists());
 
@@ -1671,6 +1911,18 @@ fn uninstall_stops_and_removes_managed_services_and_binaries_but_preserves_root_
         !fixture
             .path()
             .join("etc/systemd/system/sing-box.service")
+            .exists()
+    );
+    assert!(
+        !fixture
+            .path()
+            .join("etc/systemd/system/sbctl-accounting-reset.timer")
+            .exists()
+    );
+    assert!(
+        !fixture
+            .path()
+            .join("etc/systemd/system/sbctl-accounting-reset.service")
             .exists()
     );
     assert!(fixture.path().join("etc/sbctl/config.toml").is_file());
@@ -1874,6 +2126,16 @@ fn initialize_uninstall_fixture(fixture: &TempDir) {
         fixture,
         "etc/systemd/system/sing-box.service",
         b"Description=sing-box data plane managed by sbctl",
+    );
+    write_managed_file(
+        fixture,
+        "etc/systemd/system/sbctl-accounting-reset.timer",
+        b"Description=sbctl accounting period reset timer\n[Timer]\nPersistent=true\n",
+    );
+    write_managed_file(
+        fixture,
+        "etc/systemd/system/sbctl-accounting-reset.service",
+        b"Description=sbctl accounting period reset task\n[Service]\nExecStart=/usr/local/bin/sbctl accounting-reset\n",
     );
     write_managed_file(
         fixture,

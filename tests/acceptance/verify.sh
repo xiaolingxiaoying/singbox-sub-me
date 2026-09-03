@@ -27,6 +27,7 @@ for protocol in vless-reality vmess-websocket hysteria2 tuic anytls; do
 done
 test ! -e "$root/etc/ufw/user.rules" || fail 'installation changed firewall rules'
 fixture_seed_certificate sub.example.test
+"$sbctl" --root "$root" accounting-reset >/dev/null
 "$sbctl" --root "$root" serve &
 sleep 1
 curl --silent --show-error --insecure --resolve sub.example.test:443:127.0.0.1 "https://sub.example.test/sub/$credential/uri" | grep -F 'vless://' >/dev/null || fail 'direct HTTPS endpoint did not serve the URI subscription'
@@ -46,9 +47,10 @@ fixture_root_for fallback "$platform"
 "$sbctl" --root "$root" config init --mode ip-fallback --subscription-host 127.0.0.1 --http-port 2080 --interface ens3 --protocol vless-reality --reality-decoy-sni www.cloudflare.com --monthly-traffic-limit 999
 credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' "$root/etc/sbctl/config.toml")
 test -n "$credential" || fail 'subscription credential was not persisted'
-"$sbctl" --root "$root" traffic >/dev/null
+"$sbctl" --root "$root" accounting-reset >/dev/null
 printf '130\n' > "$root/sys/class/net/ens3/statistics/rx_bytes"
 printf '260\n' > "$root/sys/class/net/ens3/statistics/tx_bytes"
+"$sbctl" --root "$root" accounting-reset >/dev/null
 traffic=$("$sbctl" --root "$root" traffic)
 contains "$traffic" 'total: 90 bytes'
 contains "$traffic" 'accounting period:'
@@ -56,6 +58,7 @@ contains "$("$sbctl" --root "$root" status)" 'total: 90 bytes'
 printf '4\n' > "$root/sys/class/net/ens3/statistics/rx_bytes"
 printf '9\n' > "$root/sys/class/net/ens3/statistics/tx_bytes"
 printf 'recovered-boot\n' > "$root/proc/sys/kernel/random/boot_id"
+"$sbctl" --root "$root" accounting-reset >/dev/null
 contains "$("$sbctl" --root "$root" traffic)" 'total: 90 bytes'
 printf '10\n' > "$root/sys/class/net/ens3/statistics/rx_bytes"
 printf '20\n' > "$root/sys/class/net/ens3/statistics/tx_bytes"
@@ -88,6 +91,7 @@ contains "$("$sbctl" --root "$root" traffic)" 'total: 0 bytes'
 fixture_root_for reverse "$platform"
 "$sbctl" --root "$root" config init --mode external-proxy --subscription-host sub.example.test --listen-port 2081 --interface ens3 --protocol vless-reality --protocol vmess-websocket --protocol hysteria2 --protocol tuic --protocol anytls --reality-decoy-sni www.cloudflare.com --sing-box-bin "$fake_sing_box"
 reverse_credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' "$root/etc/sbctl/config.toml")
+"$sbctl" --root "$root" accounting-reset >/dev/null
 "$sbctl" --root "$root" serve --max-requests 4 &
 sleep 1
 for format in sing-box.json clash.yaml uri; do

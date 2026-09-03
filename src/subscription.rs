@@ -308,7 +308,7 @@ fn subscription_response(
             read_authorized(store, config, credential, format)
                 .ok()
                 .and_then(|body| {
-                    crate::traffic::reconcile(store, config)
+                    crate::traffic::report(store, config)
                         .ok()
                         .map(|traffic| (body, format, traffic))
                 })

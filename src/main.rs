@@ -118,6 +118,9 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Run the periodic accounting reset task (managed by the systemd timer).
+    #[command(name = "accounting-reset", hide = true)]
+    AccountingReset,
 }
 
 struct InstallOptions {
@@ -368,6 +371,7 @@ fn main() -> ExitCode {
         Command::Serve { bind, max_requests } => serve_subscription(root, bind, max_requests),
         Command::Certificate { command } => run_certificate(root, command),
         Command::Config { command } => run_config(root, command),
+        Command::AccountingReset => run_accounting_reset(root),
     }
 }
 
@@ -904,7 +908,7 @@ fn print_status(root: &Path) -> ExitCode {
         Ok(config) => {
             println!("{}", config.summary());
             println!("\n{}", sbctl::lifecycle::service_status(root));
-            match sbctl::traffic::reconcile(&sbctl::config::DeploymentStore::new(root), &config) {
+            match sbctl::traffic::report(&sbctl::config::DeploymentStore::new(root), &config) {
                 Ok(report) => println!("\n{}", report.summary()),
                 Err(error) => println!("\nVPS traffic: unavailable ({error})"),
             }
@@ -924,7 +928,7 @@ fn print_status(root: &Path) -> ExitCode {
 fn print_traffic(root: &Path) -> ExitCode {
     let store = sbctl::config::DeploymentStore::new(root);
     let result = match store.load() {
-        Ok(config) => sbctl::traffic::reconcile(&store, &config).map_err(|error| error.to_string()),
+        Ok(config) => sbctl::traffic::report(&store, &config).map_err(|error| error.to_string()),
         Err(error) => Err(error.to_string()),
     };
     match result {
@@ -934,6 +938,27 @@ fn print_traffic(root: &Path) -> ExitCode {
         }
         Err(error) => {
             eprintln!("traffic failed: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_accounting_reset(root: &Path) -> ExitCode {
+    let store = sbctl::config::DeploymentStore::new(root);
+    let result = match store.load() {
+        Ok(config) => sbctl::traffic::reset(&store, &config).map_err(|error| error.to_string()),
+        Err(error) => Err(error.to_string()),
+    };
+    match result {
+        Ok(report) => {
+            println!(
+                "accounting period: {}; received: {} bytes; transmitted: {} bytes",
+                report.accounting_period, report.received, report.transmitted
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("accounting reset failed: {error}");
             ExitCode::from(2)
         }
     }
