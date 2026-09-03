@@ -654,9 +654,10 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
             .collect::<Vec<_>>();
         let store = sbctl::config::DeploymentStore::new(root);
         store.initialize_with_artifacts(&config, &references)?;
-        sbctl::lifecycle::install_units(&store, server)?;
+        let direct = config.subscription_mode == sbctl::config::SubscriptionMode::Direct;
+        sbctl::lifecycle::install_units(&store, server, direct)?;
         if !options.no_start {
-            sbctl::lifecycle::start_services(root)
+            sbctl::lifecycle::start_services(root, direct)
                 .map_err(sbctl::config::ConfigError::StateContent)?;
         }
         Ok::<_, sbctl::config::ConfigError>(config)
@@ -917,6 +918,7 @@ fn serve_subscription(root: &Path, bind: Option<String>, max_requests: Option<us
         });
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
+            .enable_time()
             .build()
             .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
         runtime

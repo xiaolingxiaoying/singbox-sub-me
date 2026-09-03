@@ -26,11 +26,27 @@ for protocol in vless-reality vmess-websocket hysteria2 tuic anytls; do
   grep -F -- "$protocol" "$root/etc/sbctl/config.toml" >/dev/null || fail "missing $protocol"
 done
 test ! -e "$root/etc/ufw/user.rules" || fail 'installation changed firewall rules'
+grep -F 'ListenStream=80' "$root/etc/systemd/system/sbctl-http.socket" >/dev/null || fail 'Direct socket unit lacks ListenStream=80'
+grep -F 'ListenStream=443' "$root/etc/systemd/system/sbctl-http.socket" >/dev/null || fail 'Direct socket unit lacks ListenStream=443'
+grep -F 'Requires=sbctl-http.socket' "$root/etc/systemd/system/sbctl.service" >/dev/null || fail 'sbctl.service does not depend on the Direct socket'
+grep -F 'User=sbctl' "$root/etc/systemd/system/sbctl.service" >/dev/null || fail 'sbctl.service does not run as sbctl'
+grep -F 'User=sing-box' "$root/etc/systemd/system/sing-box.service" >/dev/null || fail 'sing-box.service does not run as sing-box'
 fixture_seed_certificate sub.example.test
 "$sbctl" --root "$root" accounting-reset >/dev/null
-"$sbctl" --root "$root" serve &
+# systemd-socket-activate plays the role of the sbctl-http.socket unit: it
+# binds TCP 80 and 443 and passes both listeners to a non-root-required
+# equivalent of the sbctl.service handoff through LISTEN_FDS.
+systemd-socket-activate -l 0.0.0.0:80 -l 0.0.0.0:443 -- "$sbctl" --root "$root" serve >"$work/direct.out" 2>"$work/direct.err" &
 sleep 1
-curl --silent --show-error --insecure --resolve sub.example.test:443:127.0.0.1 "https://sub.example.test/sub/$credential/uri" | grep -F 'vless://' >/dev/null || fail 'direct HTTPS endpoint did not serve the URI subscription'
+curl --silent --show-error --retry 5 --retry-connrefused --retry-delay 1 --insecure --resolve sub.example.test:443:127.0.0.1 "https://sub.example.test/sub/$credential/uri" | grep -F 'vless://' >/dev/null || fail 'direct HTTPS endpoint did not serve the URI subscription'
+token="acceptance-token"
+mkdir -p "$root/var/lib/sbctl/acme-webroot/.well-known/acme-challenge"
+printf 'challenge-body' > "$root/var/lib/sbctl/acme-webroot/.well-known/acme-challenge/$token"
+challenge=$(curl --silent --show-error --retry 5 --retry-connrefused --retry-delay 1 "http://127.0.0.1:80/.well-known/acme-challenge/$token")
+test "$challenge" = 'challenge-body' || fail 'Direct HTTP-01 challenge endpoint did not serve the token'
+jobs -p | xargs -r kill 2>/dev/null || true
+pkill -f "$root" 2>/dev/null || true
+sleep 1
 
 # Existing deployment rejection must not modify the administrator's data.
 fixture_root_for existing "$platform"

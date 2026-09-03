@@ -4,6 +4,7 @@ pub mod config;
 pub mod lifecycle;
 pub mod preflight;
 pub mod runtime;
+pub mod socket_activation;
 pub mod subscription;
 pub mod traffic;
 pub mod update;

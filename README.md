@@ -132,7 +132,7 @@ IP fallback 使用明文 HTTP，仅推荐在没有可用域名时使用，并且
 
 ### Direct
 
-sbctl 直接提供 HTTPS 订阅并使用 Certbot/ACME 管理域名证书。该模式需要域名，并占用公网 TCP `80/443` 用于订阅和 ACME 流程。
+sbctl 直接提供 HTTPS 订阅并使用 Certbot/ACME 管理域名证书。该模式需要域名；公网 TCP `80/443` 由 systemd 的 `sbctl-http.socket` 持有，并通过 `LISTEN_FDS` 交给非 root 的 `sbctl` 服务进程按本地端口区分 HTTP-01 与 TLS 订阅。`sbctl` 与 `sing-box` 分别使用独立的无登录服务账户。
 
 ### External proxy
 

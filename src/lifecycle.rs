@@ -7,11 +7,13 @@ use crate::config::{ConfigError, DeploymentConfig, DeploymentStore};
 
 const SING_BOX_UNIT: &str = "etc/systemd/system/sing-box.service";
 const SBCTL_UNIT: &str = "etc/systemd/system/sbctl.service";
+const SBCTL_HTTP_SOCKET: &str = "etc/systemd/system/sbctl-http.socket";
 const ACCOUNTING_RESET_UNIT: &str = "etc/systemd/system/sbctl-accounting-reset.service";
 const ACCOUNTING_RESET_TIMER: &str = "etc/systemd/system/sbctl-accounting-reset.timer";
 const OWNERSHIP_MARKER: &str = "var/lib/sbctl/ownership";
 const SING_BOX_UNIT_MARKER: &str = "Description=sing-box data plane managed by sbctl";
 const SBCTL_UNIT_MARKER: &str = "Description=sbctl private subscription service";
+const SBCTL_HTTP_SOCKET_MARKER: &str = "Description=sbctl Direct HTTPS public listeners";
 const ACCOUNTING_RESET_MARKER: &str = "Description=sbctl accounting period reset";
 
 const BACKED_UP_PATHS: &[&str] = &[
@@ -25,28 +27,49 @@ const BACKED_UP_PATHS: &[&str] = &[
     "var/lib/sbctl/artifacts/subscription-uri.txt",
 ];
 
-pub fn install_units(store: &DeploymentStore, server_config: &str) -> Result<(), ConfigError> {
-    for unit in [
+fn sing_box_unit() -> &'static str {
+    "[Unit]\nDescription=sing-box data plane managed by sbctl\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=sing-box\nGroup=sing-box\nExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=true\n\n[Install]\nWantedBy=multi-user.target\n"
+}
+
+/// Direct subscription mode runs under systemd socket activation: the
+/// `sbctl-http.socket` unit owns public TCP 80/443 and passes the listeners to
+/// the non-root sbctl service. External-proxy and IP-fallback modes serve only
+/// high ports and never install this socket.
+fn sbctl_unit(direct: bool) -> String {
+    let socket_dependency = if direct {
+        "\nRequires=sbctl-http.socket\nAfter=sbctl-http.socket\nSockets=sbctl-http.socket"
+    } else {
+        ""
+    };
+    format!(
+        "[Unit]\nDescription=sbctl private subscription service\nAfter=network-online.target\nWants=network-online.target{socket_dependency}\n\n[Service]\nType=simple\nUser=sbctl\nGroup=sbctl\nExecStart=/usr/local/bin/sbctl serve\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=true\nReadWritePaths=/var/lib/sbctl\n\n[Install]\nWantedBy=multi-user.target\n"
+    )
+}
+
+const SBCTL_HTTP_SOCKET_CONTENTS: &str = "[Unit]\nDescription=sbctl Direct HTTPS public listeners\n\n[Socket]\nListenStream=80\nListenStream=443\nService=sbctl.service\nAccept=no\n\n[Install]\nWantedBy=sockets.target\n";
+
+pub fn install_units(
+    store: &DeploymentStore,
+    server_config: &str,
+    direct: bool,
+) -> Result<(), ConfigError> {
+    let mut units = vec![
         SING_BOX_UNIT,
         SBCTL_UNIT,
         ACCOUNTING_RESET_UNIT,
         ACCOUNTING_RESET_TIMER,
-    ] {
+    ];
+    if direct {
+        units.push(SBCTL_HTTP_SOCKET);
+    }
+    for unit in units {
         if store.root().join(unit).exists() {
             return Err(ConfigError::AlreadyExists);
         }
     }
     store.write_active_sing_box_config(server_config.as_bytes())?;
-    write_unit(
-        store.root(),
-        SING_BOX_UNIT,
-        "[Unit]\nDescription=sing-box data plane managed by sbctl\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\n\n[Install]\nWantedBy=multi-user.target\n",
-    )?;
-    write_unit(
-        store.root(),
-        SBCTL_UNIT,
-        "[Unit]\nDescription=sbctl private subscription service\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=sbctl\nGroup=sbctl\nExecStart=/usr/local/bin/sbctl serve\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nReadWritePaths=/var/lib/sbctl\n\n[Install]\nWantedBy=multi-user.target\n",
-    )?;
+    write_unit(store.root(), SING_BOX_UNIT, sing_box_unit())?;
+    write_unit(store.root(), SBCTL_UNIT, &sbctl_unit(direct))?;
     write_unit(
         store.root(),
         ACCOUNTING_RESET_UNIT,
@@ -57,6 +80,9 @@ pub fn install_units(store: &DeploymentStore, server_config: &str) -> Result<(),
         ACCOUNTING_RESET_TIMER,
         "[Unit]\nDescription=sbctl accounting period reset timer\n\n[Timer]\nOnCalendar=minutely\nPersistent=true\nUnit=sbctl-accounting-reset.service\n\n[Install]\nWantedBy=timers.target\n",
     )?;
+    if direct {
+        write_unit(store.root(), SBCTL_HTTP_SOCKET, SBCTL_HTTP_SOCKET_CONTENTS)?;
+    }
     store.write_relative_locked(OWNERSHIP_MARKER, b"sbctl-managed-v1\n")
 }
 
@@ -90,20 +116,21 @@ pub fn remove_managed_sing_box(root: &Path) -> Result<(), String> {
     systemctl(root, &["daemon-reload"])
 }
 
-pub fn start_services(root: &Path) -> Result<(), String> {
-    ensure_daemon_account(root)?;
+pub fn start_services(root: &Path, direct: bool) -> Result<(), String> {
+    ensure_daemon_accounts(root)?;
     prepare_daemon_storage(root)?;
     systemctl(root, &["daemon-reload"])?;
-    systemctl(
-        root,
-        &[
-            "enable",
-            "--now",
-            "sing-box.service",
-            "sbctl.service",
-            "sbctl-accounting-reset.timer",
-        ],
-    )
+    let mut units = vec![
+        "sing-box.service",
+        "sbctl.service",
+        "sbctl-accounting-reset.timer",
+    ];
+    if direct {
+        units.push("sbctl-http.socket");
+    }
+    let mut arguments = vec!["enable", "--now"];
+    arguments.extend(units);
+    systemctl(root, &arguments)
 }
 
 /// Removes only files created by a failed fresh installation. Preflight has
@@ -114,6 +141,7 @@ pub fn rollback_fresh_installation(root: &Path) {
         &[
             "disable",
             "--now",
+            "sbctl-http.socket",
             "sbctl-accounting-reset.timer",
             "sbctl.service",
             "sing-box.service",
@@ -121,6 +149,7 @@ pub fn rollback_fresh_installation(root: &Path) {
     );
     let _ = systemctl(root, &["daemon-reload"]);
     for relative in [
+        "etc/systemd/system/sbctl-http.socket",
         "etc/systemd/system/sbctl.service",
         "etc/systemd/system/sing-box.service",
         "etc/systemd/system/sbctl-accounting-reset.service",
@@ -150,6 +179,7 @@ pub fn uninstall(root: &Path, purge: bool) -> Result<Option<std::path::PathBuf>,
     let sbctl_unit_owned = unit_has_marker(root, SBCTL_UNIT, SBCTL_UNIT_MARKER)?;
     let sing_box_unit_owned = unit_has_marker(root, SING_BOX_UNIT, SING_BOX_UNIT_MARKER)?;
     let reset_timer_owned = unit_has_marker(root, ACCOUNTING_RESET_TIMER, ACCOUNTING_RESET_MARKER)?;
+    let http_socket_owned = unit_has_marker(root, SBCTL_HTTP_SOCKET, SBCTL_HTTP_SOCKET_MARKER)?;
     let sing_box_config_owned = sing_box_unit_owned || !root.join(SING_BOX_UNIT).exists();
     if sbctl_unit_owned {
         systemctl(root, &["disable", "--now", "sbctl.service"])?;
@@ -159,6 +189,9 @@ pub fn uninstall(root: &Path, purge: bool) -> Result<Option<std::path::PathBuf>,
     }
     if reset_timer_owned {
         systemctl(root, &["disable", "--now", "sbctl-accounting-reset.timer"])?;
+    }
+    if http_socket_owned {
+        systemctl(root, &["disable", "--now", "sbctl-http.socket"])?;
     }
 
     if sbctl_unit_owned {
@@ -173,7 +206,10 @@ pub fn uninstall(root: &Path, purge: bool) -> Result<Option<std::path::PathBuf>,
         remove_file_if_present(&root.join(ACCOUNTING_RESET_TIMER))?;
         remove_file_if_present(&root.join(ACCOUNTING_RESET_UNIT))?;
     }
-    if sbctl_unit_owned || sing_box_unit_owned || reset_timer_owned {
+    if http_socket_owned {
+        remove_file_if_present(&root.join(SBCTL_HTTP_SOCKET))?;
+    }
+    if sbctl_unit_owned || sing_box_unit_owned || reset_timer_owned || http_socket_owned {
         systemctl(root, &["daemon-reload"])?;
     }
 
@@ -214,6 +250,7 @@ pub fn service_status_entries(root: &Path) -> Vec<(&'static str, String)> {
     [
         "sing-box.service",
         "sbctl.service",
+        "sbctl-http.socket",
         "sbctl-accounting-reset.timer",
     ]
     .into_iter()
@@ -387,11 +424,18 @@ fn systemctl(root: &Path, args: &[&str]) -> Result<(), String> {
         .ok_or_else(|| format!("systemctl {} exited with {status}", args.join(" ")))
 }
 
-fn ensure_daemon_account(root: &Path) -> Result<(), String> {
+fn ensure_daemon_accounts(root: &Path) -> Result<(), String> {
+    for account in ["sbctl", "sing-box"] {
+        ensure_daemon_account(root, account)?;
+    }
+    Ok(())
+}
+
+fn ensure_daemon_account(root: &Path, account: &str) -> Result<(), String> {
     let passwd = root.join("etc/passwd");
     if fs::read_to_string(&passwd)
         .ok()
-        .is_some_and(|contents| contents.lines().any(|line| line.starts_with("sbctl:")))
+        .is_some_and(|contents| contents.lines().any(|line| line.starts_with(&format!("{account}:"))))
     {
         return Ok(());
     }
@@ -407,12 +451,12 @@ fn ensure_daemon_account(root: &Path) -> Result<(), String> {
             "--no-create-home",
             "--shell",
             "/usr/sbin/nologin",
-            "sbctl",
+            account,
         ])
         .status()
-        .map_err(|error| format!("could not create sbctl service account: {error}"))?;
+        .map_err(|error| format!("could not create {account} service account: {error}"))?;
     status.success().then_some(()).ok_or_else(|| {
-        format!("could not create sbctl service account: useradd exited with {status}")
+        format!("could not create {account} service account: useradd exited with {status}")
     })
 }
 
@@ -426,7 +470,34 @@ fn prepare_daemon_storage(root: &Path) -> Result<(), String> {
         .args(["-R", "sbctl:sbctl", "/etc/sbctl", "/var/lib/sbctl"])
         .status()
         .map_err(|error| format!("could not prepare sbctl service storage: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "could not prepare sbctl service storage: chown exited with {status}"
+        ));
+    }
+    // The generated sing-box configuration is written root-only (0600). The
+    // sing-box data plane runs as its own account, so the file must be owned
+    // and readable by that account while staying private to the host.
+    let status = Command::new("chown")
+        .args(["sing-box:sing-box", "/etc/sing-box/config.json"])
+        .status()
+        .map_err(|error| {
+            format!("could not grant sing-box service config access: {error}")
+        })?;
+    if !status.success() {
+        return Err(format!(
+            "could not grant sing-box service config access: chown exited with {status}"
+        ));
+    }
+    let status = Command::new("chmod")
+        .args(["0640", "/etc/sing-box/config.json"])
+        .status()
+        .map_err(|error| {
+            format!("could not restrict sing-box service config: {error}")
+        })?;
     status.success().then_some(()).ok_or_else(|| {
-        format!("could not prepare sbctl service storage: chown exited with {status}")
+        format!(
+            "could not restrict sing-box service config: chmod exited with {status}"
+        )
     })
 }

@@ -984,6 +984,7 @@ pub enum ConfigError {
     StateSchemaMismatch(u32),
 }
 
+#[derive(Clone)]
 pub struct DeploymentStore {
     root: PathBuf,
 }

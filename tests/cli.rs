@@ -1413,7 +1413,7 @@ fn ip_fallback_http_service_accepts_only_the_exact_credential_path_and_reports_v
     let response = http_get(port, &format!("/sub/{credential}/uri"));
     assert!(response.starts_with("HTTP/1.1 200 OK"));
     assert!(response.contains("subscription-userinfo: upload=0; download=0; total=0; expire="));
-    assert!(response.contains("Cache-Control: no-store"));
+    assert!(response.contains("cache-control: no-store"));
     let rejected = http_get(
         port,
         &format!("/sub/{credential}/uri?credential={credential}"),
@@ -2619,7 +2619,23 @@ fn install_defaults_to_all_managed_protocols_writes_services_and_only_lists_fire
         sing_box_unit
             .contains("ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json")
     );
+    assert!(sing_box_unit.contains("User=sing-box"));
+    assert!(sing_box_unit.contains("Group=sing-box"));
+    assert!(
+        !sing_box_unit.contains("User=sbctl"),
+        "the sing-box data plane runs under its own non-root account"
+    );
     assert!(sbctl_unit.contains("User=sbctl"));
+    assert!(
+        sbctl_unit.contains("Requires=sbctl-http.socket"),
+        "the Direct HTTPS service depends on the socket unit that owns 80/443"
+    );
+    let http_socket = fs::read_to_string(
+        fixture.path().join("etc/systemd/system/sbctl-http.socket"),
+    )
+    .expect("the Direct HTTPS socket unit is installed");
+    assert!(http_socket.contains("ListenStream=80"));
+    assert!(http_socket.contains("ListenStream=443"));
     let reset_timer = fs::read_to_string(
         fixture
             .path()
@@ -2651,6 +2667,187 @@ fn install_defaults_to_all_managed_protocols_writes_services_and_only_lists_fire
         .stdout(predicate::str::contains("vless-reality: TCP"))
         .stdout(predicate::str::contains("hysteria2: UDP"))
         .stdout(predicate::str::contains("tuic: UDP"));
+}
+
+#[test]
+fn external_proxy_install_does_not_install_the_direct_https_socket() {
+    let fixture = supported_systemd_host();
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    let checker = sing_box_check_fixture(&fixture, true, &["vless"]);
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "install",
+            "--mode",
+            "external-proxy",
+            "--subscription-host",
+            "sub.example.test",
+            "--interface",
+            "ens3",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+            "--sing-box-bin",
+            checker.to_str().expect("checker path is UTF-8"),
+            "--no-start",
+        ])
+        .assert()
+        .success();
+
+    let sbctl_unit = fs::read_to_string(fixture.path().join("etc/systemd/system/sbctl.service"))
+        .expect("sbctl unit is installed");
+    assert!(
+        !sbctl_unit.contains("sbctl-http.socket"),
+        "an external reverse proxy keeps owning public 80/443"
+    );
+    assert!(
+        !fixture
+            .path()
+            .join("etc/systemd/system/sbctl-http.socket")
+            .exists(),
+        "no socket unit is installed outside Direct subscription mode"
+    );
+    assert!(fixture.path().join("etc/systemd/system/sing-box.service").is_file());
+}
+
+#[test]
+fn direct_serve_refuses_to_bind_public_ports_without_socket_activation() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "direct",
+            "--subscription-host",
+            "sub.example.test",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "serve",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("requires sbctl-http.socket"));
+}
+
+#[test]
+fn external_proxy_serve_rejects_a_non_loopback_bind() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let port = TcpListener::bind("127.0.0.1:0")
+        .expect("an ephemeral port is available")
+        .local_addr()
+        .expect("address is available")
+        .port();
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "external-proxy",
+            "--subscription-host",
+            "sub.example.test",
+            "--listen-port",
+            &port.to_string(),
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "serve",
+            "--bind",
+            &format!("0.0.0.0:{port}"),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("must bind a loopback address"));
+}
+
+#[test]
+fn uninstall_removes_the_direct_https_socket_unit() {
+    let fixture = supported_systemd_host();
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    write_systemctl_fixture(&fixture, true);
+    let checker = sing_box_check_fixture(
+        &fixture,
+        true,
+        &["vless", "vmess", "hysteria2", "tuic", "anytls"],
+    );
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "install",
+            "--subscription-host",
+            "sub.example.test",
+            "--interface",
+            "ens3",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+            "--sing-box-bin",
+            checker.to_str().expect("checker path is UTF-8"),
+            "--no-start",
+        ])
+        .assert()
+        .success();
+    assert!(
+        fixture
+            .path()
+            .join("etc/systemd/system/sbctl-http.socket")
+            .exists()
+    );
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "uninstall",
+        ])
+        .assert()
+        .success();
+
+    assert!(
+        !fixture
+            .path()
+            .join("etc/systemd/system/sbctl-http.socket")
+            .exists(),
+        "uninstall removes the Direct HTTPS socket unit"
+    );
 }
 
 #[test]

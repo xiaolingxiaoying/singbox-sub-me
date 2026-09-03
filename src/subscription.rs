@@ -1,4 +1,10 @@
 use base64::Engine;
+use bytes::Bytes;
+use http_body_util::Full;
+use hyper::body::Incoming;
+use hyper::service::service_fn;
+use hyper::{Method, Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::BufReader;
@@ -7,9 +13,12 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tokio_rustls::TlsAcceptor;
 
 use crate::canonical::CanonicalNode;
@@ -63,6 +72,16 @@ pub enum SubscriptionError {
     ExternalProxyBind,
     #[error("subscription listener port {0} is already in use")]
     ListenerUnavailable(u16),
+    #[error("subscription listener failed: {0}")]
+    ListenerIo(String),
+    #[error("Direct HTTPS requires systemd socket activation: {0}")]
+    SocketActivation(String),
+    #[error("Direct HTTPS received an unexpected listener on port {0}")]
+    UnexpectedDirectListener(u16),
+    #[error("Direct HTTPS is missing the {0} listener")]
+    MissingDirectListener(u16),
+    #[error("HTTP handling failed: {0}")]
+    Http(String),
     #[error("no subscription-capable Managed protocol is enabled")]
     MissingNodes,
     #[error("invalid subscription credential")]
@@ -338,8 +357,10 @@ pub async fn serve(
     max_requests: Option<usize>,
 ) -> Result<(), SubscriptionError> {
     ensure_subscription_nodes(config)?;
+    let store = Arc::new(store.clone());
+    let config = Arc::new(config.clone());
     if config.subscription_mode == SubscriptionMode::Direct {
-        return serve_direct(store, config).await;
+        return serve_direct_socket_activated(&store, &config, max_requests).await;
     }
     if config.subscription_mode == SubscriptionMode::ExternalProxy
         && !bind
@@ -349,98 +370,328 @@ pub async fn serve(
     {
         return Err(SubscriptionError::ExternalProxyBind);
     }
-    let listener = TcpListener::bind(bind).await?;
-    for _ in 0..max_requests.unwrap_or(usize::MAX) {
-        let (mut stream, _) = listener.accept().await?;
-        let mut request = [0_u8; 8192];
-        let length = stream.read(&mut request).await?;
-        let target = request_target(&request[..length]);
-        let response = subscription_response(store, config, target);
-        stream.write_all(response.as_bytes()).await?;
-    }
-    Ok(())
+    let listener = TcpListener::bind(bind)
+        .await
+        .map_err(listener_io)?;
+    serve_http_listener(listener, &store, &config, max_requests).await
 }
 
-async fn serve_direct(
-    store: &DeploymentStore,
-    config: &DeploymentConfig,
+/// Direct subscription mode never binds 80/443 itself. systemd owns those
+/// listeners through `sbctl-http.socket` and hands them to this process via
+/// `LISTEN_FDS`; the two sockets are routed by their local port so TCP 80
+/// serves the ACME challenge and TCP 443 serves the TLS subscription.
+async fn serve_direct_socket_activated(
+    store: &Arc<DeploymentStore>,
+    config: &Arc<DeploymentConfig>,
+    max_requests: Option<usize>,
 ) -> Result<(), SubscriptionError> {
-    let http = match TcpListener::bind("[::]:80").await {
-        Ok(listener) => listener,
-        Err(_) => TcpListener::bind("0.0.0.0:80").await?,
-    };
-    let https = match TcpListener::bind("[::]:443").await {
-        Ok(listener) => listener,
-        Err(_) => TcpListener::bind("0.0.0.0:443").await?,
-    };
+    let listeners = crate::socket_activation::receive_listeners()
+        .map_err(|error| SubscriptionError::SocketActivation(error.to_string()))?;
+    let mut acme = None;
+    let mut tls = None;
+    for (port, listener) in listeners {
+        match crate::socket_activation::direct_listener_role(port) {
+            Some(crate::socket_activation::DirectListenerRole::Acme) => acme = Some(listener),
+            Some(crate::socket_activation::DirectListenerRole::Tls) => tls = Some(listener),
+            None => return Err(SubscriptionError::UnexpectedDirectListener(port)),
+        }
+    }
+    let acme = tokio_listener(acme.ok_or(SubscriptionError::MissingDirectListener(80))?)?;
+    let tls = tokio_listener(tls.ok_or(SubscriptionError::MissingDirectListener(443))?)?;
     tokio::try_join!(
-        serve_acme_webroot(store, http),
-        serve_tls(store, config, https, None)
+        serve_acme_listener(acme, Arc::clone(store), max_requests),
+        serve_tls_listener(tls, Arc::clone(store), Arc::clone(config), max_requests)
     )?;
     Ok(())
 }
 
-async fn serve_acme_webroot(
-    store: &DeploymentStore,
-    listener: TcpListener,
-) -> Result<(), SubscriptionError> {
-    loop {
-        let (mut stream, _) = listener.accept().await?;
-        let mut request = [0_u8; 8192];
-        let length = stream.read(&mut request).await?;
-        let target = request_target(&request[..length]);
-        let body = target
-            .and_then(|target| target.strip_prefix("/.well-known/acme-challenge/"))
-            .filter(|token| !token.is_empty() && !token.contains('/') && !token.contains('?'))
-            .and_then(|token| {
-                fs::read_to_string(
-                    store
-                        .acme_webroot()
-                        .join(".well-known/acme-challenge")
-                        .join(token),
-                )
-                .ok()
-            });
-        let response = body.map(|body| format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body)).unwrap_or_else(not_found_response);
-        stream.write_all(response.as_bytes()).await?;
+fn tokio_listener(listener: std::net::TcpListener) -> Result<TcpListener, SubscriptionError> {
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| SubscriptionError::ListenerIo(error.to_string()))?;
+    TcpListener::from_std(listener)
+        .map_err(|error| SubscriptionError::ListenerIo(error.to_string()))
+}
+
+/// The shared Hyper HTTP/1 builder: a bounded header size, a slow-read
+/// timeout, and a Tokio timer so the timeout applies.
+fn http1_builder() -> hyper::server::conn::http1::Builder {
+    let mut builder = hyper::server::conn::http1::Builder::new();
+    builder.max_buf_size(MAX_REQUEST_HEADER_BYTES);
+    builder.timer(hyper_util::rt::TokioTimer::new());
+    builder.header_read_timeout(MAX_HEADER_READ_TIME);
+    builder
+}
+
+/// Bounds applied to every HTTP connection so an oversized request header, a
+/// slow reader, an idle client, or connection flooding cannot exhaust the
+/// process. Responses set `Connection: close`, so each request is its own
+/// connection and hyper never keeps an idle connection alive.
+const MAX_REQUEST_HEADER_BYTES: usize = 16 * 1024;
+const MAX_HEADER_READ_TIME: Duration = Duration::from_secs(5);
+const MAX_CONNECTION_TIME: Duration = Duration::from_secs(30);
+const MAX_CONCURRENT_CONNECTIONS: usize = 32;
+const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Accepts the next connection, or returns `None` after a short poll when a
+/// test-configured `max_requests` limit may have been reached by a task that
+/// is already serving. Production operation (`max_requests == None`) blocks on
+/// the accept until a connection arrives.
+async fn accept_next(
+    listener: &TcpListener,
+    max_requests: Option<usize>,
+) -> Result<Option<tokio::net::TcpStream>, SubscriptionError> {
+    if max_requests.is_none() {
+        let (stream, _) = listener.accept().await.map_err(listener_io)?;
+        return Ok(Some(stream));
+    }
+    match tokio::time::timeout(ACCEPT_POLL_INTERVAL, listener.accept()).await {
+        Ok(Ok((stream, _))) => Ok(Some(stream)),
+        Ok(Err(error)) => Err(listener_io(error)),
+        Err(_) => Ok(None),
     }
 }
 
-async fn serve_tls(
+fn listener_io(error: std::io::Error) -> SubscriptionError {
+    SubscriptionError::ListenerIo(error.to_string())
+}
+
+/// Accepts connections from one listener, bounding concurrency with a
+/// semaphore and each connection's lifetime with a timeout. Serves at most
+/// `max_requests` connections when a test supplies that limit.
+async fn serve_http_listener(
+    listener: TcpListener,
+    store: &Arc<DeploymentStore>,
+    config: &Arc<DeploymentConfig>,
+    max_requests: Option<usize>,
+) -> Result<(), SubscriptionError> {
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let counter = Arc::new(AtomicUsize::new(0));
+    loop {
+        if max_requests.is_some_and(|max| counter.load(Ordering::Acquire) >= max) {
+            break;
+        }
+        let Some(stream) = accept_next(&listener, max_requests).await? else {
+            continue;
+        };
+        let Ok(permit) = semaphore.clone().try_acquire_owned() else {
+            drop(stream);
+            continue;
+        };
+        let store = Arc::clone(store);
+        let config = Arc::clone(config);
+        let counter = Arc::clone(&counter);
+        tokio::spawn(async move {
+            let _permit = permit;
+            let _ = tokio::time::timeout(
+                MAX_CONNECTION_TIME,
+                serve_http_connection(TokioIo::new(stream), store, config),
+            )
+            .await;
+            counter.fetch_add(1, Ordering::Release);
+        });
+    }
+    Ok(())
+}
+
+/// Serves ACME HTTP-01 challenge responses from the listener on TCP 80 with
+/// the same bounded connection handling as the subscription listener.
+async fn serve_acme_listener(
+    listener: TcpListener,
+    store: Arc<DeploymentStore>,
+    max_requests: Option<usize>,
+) -> Result<(), SubscriptionError> {
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let counter = Arc::new(AtomicUsize::new(0));
+    loop {
+        if max_requests.is_some_and(|max| counter.load(Ordering::Acquire) >= max) {
+            break;
+        }
+        let Some(stream) = accept_next(&listener, max_requests).await? else {
+            continue;
+        };
+        let Ok(permit) = semaphore.clone().try_acquire_owned() else {
+            drop(stream);
+            continue;
+        };
+        let store = Arc::clone(&store);
+        let counter = Arc::clone(&counter);
+        tokio::spawn(async move {
+            let _permit = permit;
+            let _ = tokio::time::timeout(
+                MAX_CONNECTION_TIME,
+                serve_acme_connection(TokioIo::new(stream), store),
+            )
+            .await;
+            counter.fetch_add(1, Ordering::Release);
+        });
+    }
+    Ok(())
+}
+
+/// Serves the TLS subscription listener on TCP 443. The certificate is
+/// reloaded before every accepted connection, so a Certbot renewal takes
+/// effect on the next handshake without signalling or restarting the service.
+async fn serve_tls_listener(
+    listener: TcpListener,
+    store: Arc<DeploymentStore>,
+    config: Arc<DeploymentConfig>,
+    max_requests: Option<usize>,
+) -> Result<(), SubscriptionError> {
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let counter = Arc::new(AtomicUsize::new(0));
+    let mut tls = None;
+    loop {
+        if max_requests.is_some_and(|max| counter.load(Ordering::Acquire) >= max) {
+            break;
+        }
+        let Some(stream) = accept_next(&listener, max_requests).await? else {
+            continue;
+        };
+        match load_tls_config(&store, &config) {
+            Ok(reloaded) => tls = Some(reloaded),
+            Err(error) => eprintln!(
+                "Direct HTTPS certificate unavailable; connection dropped: {}",
+                redact_secret(&error.to_string(), &config.subscription_credential)
+            ),
+        }
+        let Some(tls) = tls.clone() else {
+            drop(stream);
+            continue;
+        };
+        let Ok(permit) = semaphore.clone().try_acquire_owned() else {
+            drop(stream);
+            continue;
+        };
+        let store = Arc::clone(&store);
+        let config = Arc::clone(&config);
+        let counter = Arc::clone(&counter);
+        tokio::spawn(async move {
+            let _permit = permit;
+            let acceptor = TlsAcceptor::from(tls);
+            let Ok(stream) = acceptor.accept(stream).await else {
+                counter.fetch_add(1, Ordering::Release);
+                return;
+            };
+            let _ = tokio::time::timeout(
+                MAX_CONNECTION_TIME,
+                serve_http_connection(TokioIo::new(Box::pin(stream)), store, config),
+            )
+            .await;
+            counter.fetch_add(1, Ordering::Release);
+        });
+    }
+    Ok(())
+}
+
+async fn serve_http_connection<S>(
+    io: TokioIo<S>,
+    store: Arc<DeploymentStore>,
+    config: Arc<DeploymentConfig>,
+) -> Result<(), SubscriptionError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let service = service_fn(move |request: Request<Incoming>| {
+        let response = subscription_http_response(request, &store, &config);
+        async { Ok::<_, std::convert::Infallible>(response) }
+    });
+    http1_builder()
+        .serve_connection(io, service)
+        .await
+        .map_err(|error| SubscriptionError::Http(error.to_string()))
+}
+
+async fn serve_acme_connection<S>(
+    io: TokioIo<S>,
+    store: Arc<DeploymentStore>,
+) -> Result<(), SubscriptionError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let service = service_fn(move |request: Request<Incoming>| {
+        let response = acme_http_response(request, &store);
+        async { Ok::<_, std::convert::Infallible>(response) }
+    });
+    http1_builder()
+        .serve_connection(io, service)
+        .await
+        .map_err(|error| SubscriptionError::Http(error.to_string()))
+}
+
+fn acme_http_response(
+    request: Request<Incoming>,
+    store: &DeploymentStore,
+) -> Response<Full<Bytes>> {
+    let body = request
+        .uri()
+        .path()
+        .strip_prefix("/.well-known/acme-challenge/")
+        .filter(|token| !token.is_empty() && !token.contains('/') && !token.contains('?'))
+        .and_then(|token| {
+            fs::read_to_string(
+                store
+                    .acme_webroot()
+                    .join(".well-known/acme-challenge")
+                    .join(token),
+            )
+            .ok()
+        });
+    match body {
+        Some(body) => Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "text/plain; charset=utf-8")
+            .header("Cache-Control", "no-store")
+            .header("Connection", "close")
+            .body(Full::new(Bytes::from(body)))
+            .expect("valid ACME response"),
+        None => not_found_http_response(),
+    }
+}
+
+fn subscription_http_response(
+    request: Request<Incoming>,
     store: &DeploymentStore,
     config: &DeploymentConfig,
-    listener: TcpListener,
-    mut tls: Option<Arc<rustls::ServerConfig>>,
-) -> Result<(), SubscriptionError> {
-    loop {
-        let (stream, _) = listener.accept().await?;
-        if let Ok(reloaded) = load_tls_config(store, config) {
-            tls = Some(reloaded);
-        }
-        let Some(tls) = &tls else {
-            continue;
-        };
-        let acceptor = TlsAcceptor::from(Arc::clone(tls));
-        let Ok(mut stream) = acceptor.accept(stream).await else {
-            continue;
-        };
-        let mut request = [0_u8; 8192];
-        if let Ok(length) = stream.read(&mut request).await {
-            let target = request_target(&request[..length]);
-            let _ = stream
-                .write_all(subscription_response(store, config, target).as_bytes())
-                .await;
-        }
+) -> Response<Full<Bytes>> {
+    if request.method() != Method::GET || request.uri().query().is_some() {
+        return not_found_http_response();
     }
-}
-
-fn request_target(request: &[u8]) -> Option<&str> {
-    std::str::from_utf8(request)
-        .ok()
-        .and_then(|request| request.lines().next())
-        .and_then(|line| line.strip_prefix("GET "))
-        .and_then(|line| line.split_once(' '))
-        .map(|(target, _)| target)
+    let Some((credential, format)) = parse_route(request.uri().path()) else {
+        return not_found_http_response();
+    };
+    if !constant_time_eq(
+        credential.as_bytes(),
+        config.subscription_credential.as_bytes(),
+    ) {
+        return not_found_http_response();
+    }
+    let body = match read_authorized(store, config, credential, format) {
+        Ok(body) => body,
+        Err(error) => return unavailable_http_response(credential, &error.to_string()),
+    };
+    let traffic = match crate::traffic::report(store, config) {
+        Ok(traffic) => traffic,
+        Err(error) => return unavailable_http_response(credential, &error.to_string()),
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", format.content_type())
+        .header("Cache-Control", "no-store")
+        .header("X-Content-Type-Options", "nosniff")
+        .header(
+            "subscription-userinfo",
+            format!(
+                "upload={}; download={}; total={}; expire={}",
+                traffic.transmitted,
+                traffic.received,
+                traffic.total(),
+                traffic.next_reset.timestamp()
+            ),
+        )
+        .header("Connection", "close")
+        .body(Full::new(Bytes::from(body)))
+        .expect("valid subscription response")
 }
 
 fn load_tls_config(
@@ -466,40 +717,6 @@ fn load_tls_config(
         .map_err(|error| SubscriptionError::Tls(error.to_string()))
 }
 
-fn subscription_response(
-    store: &DeploymentStore,
-    config: &DeploymentConfig,
-    target: Option<&str>,
-) -> String {
-    let Some((credential, format)) = target.and_then(parse_route) else {
-        return not_found_response();
-    };
-    if !constant_time_eq(
-        credential.as_bytes(),
-        config.subscription_credential.as_bytes(),
-    ) {
-        return not_found_response();
-    }
-    let body = match read_authorized(store, config, credential, format) {
-        Ok(body) => body,
-        Err(error) => return unavailable_response(credential, &error.to_string()),
-    };
-    let traffic = match crate::traffic::report(store, config) {
-        Ok(traffic) => traffic,
-        Err(error) => return unavailable_response(credential, &error.to_string()),
-    };
-    format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nsubscription-userinfo: upload={}; download={}; total={}; expire={}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        format.content_type(),
-        traffic.transmitted,
-        traffic.received,
-        traffic.total(),
-        traffic.next_reset.timestamp(),
-        body.len(),
-        body
-    )
-}
-
 /// Replaces every occurrence of a Subscription credential in a diagnostic so
 /// logs and errors never expose the full secret. ADR-0013.
 pub fn redact_secret(text: &str, secret: &str) -> String {
@@ -512,17 +729,26 @@ pub fn redact_secret(text: &str, secret: &str) -> String {
 /// A redacted 503 for state or artifact failures after a valid Subscription
 /// credential authenticated. The body carries no authorization or deployment
 /// details; the diagnostic log omits the credential.
-fn unavailable_response(credential: &str, message: &str) -> String {
+fn unavailable_http_response(credential: &str, message: &str) -> Response<Full<Bytes>> {
     eprintln!(
         "subscription request failed: {}",
         redact_secret(message, credential)
     );
-    "HTTP/1.1 503 Service Unavailable\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        .to_owned()
+    Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header("Cache-Control", "no-store")
+        .header("Connection", "close")
+        .body(Full::new(Bytes::new()))
+        .expect("valid unavailable response")
 }
 
-fn not_found_response() -> String {
-    "HTTP/1.1 404 Not Found\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
+fn not_found_http_response() -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header("Cache-Control", "no-store")
+        .header("Connection", "close")
+        .body(Full::new(Bytes::new()))
+        .expect("valid not-found response")
 }
 
 fn parse_route(target: &str) -> Option<(&str, SubscriptionFormat)> {
@@ -806,13 +1032,229 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 mod tests {
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use tempfile::TempDir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::{generated_artifacts, regenerate};
     use crate::config::{
         DeploymentConfig, DeploymentStore, ManagedProtocol, SubscriptionMode,
     };
+
+    async fn http_get(port: u16, path: &str) -> String {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("subscription service accepts connections");
+        stream
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+            .await
+            .expect("request is sent");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .await
+            .expect("response is readable");
+        response
+    }
+
+    /// Establishes the minimal traffic fixture so a subscription response can
+    /// read a legal accounting state and the generated URI artifact.
+    fn seed_direct_subscription(
+        fixture: &TempDir,
+    ) -> (DeploymentStore, DeploymentConfig, String) {
+        let statistics = fixture.path().join("sys/class/net/ens3/statistics");
+        fs::create_dir_all(&statistics).expect("statistics directory is created");
+        fs::write(statistics.join("rx_bytes"), "100\n").expect("RX counter is written");
+        fs::write(statistics.join("tx_bytes"), "200\n").expect("TX counter is written");
+        let boot_path = fixture.path().join("proc/sys/kernel/random/boot_id");
+        fs::create_dir_all(boot_path.parent().expect("boot ID has a parent"))
+            .expect("boot ID directory is created");
+        fs::write(boot_path, "boot-a").expect("boot ID is written");
+        let store = DeploymentStore::new(fixture.path());
+        let config = DeploymentConfig::new(
+            SubscriptionMode::Direct,
+            "sub.example.test".into(),
+            None,
+            None,
+            "ens3".into(),
+            vec![ManagedProtocol::VlessReality],
+            Some("www.cloudflare.com".into()),
+        )
+        .expect("a Direct VLESS deployment is valid");
+        let artifacts = generated_artifacts(&config).expect("artifacts generate");
+        let references = artifacts
+            .iter()
+            .map(|(name, contents)| (*name, contents.as_bytes()))
+            .collect::<Vec<_>>();
+        store
+            .initialize_with_artifacts(&config, &references)
+            .expect("subscription deployment is initialized");
+        crate::traffic::reset(&store, &config).expect("accounting state is established");
+        let credential = config.subscription_credential.clone();
+        (store, config, credential)
+    }
+
+    #[tokio::test]
+    async fn acme_listener_serves_the_challenge_and_rejects_every_other_path() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let store = DeploymentStore::new(fixture.path());
+        let challenge = store.acme_webroot().join(".well-known/acme-challenge");
+        fs::create_dir_all(&challenge).expect("challenge directory is created");
+        fs::write(challenge.join("token-1"), "challenge-body").expect("challenge is written");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral listener is available");
+        let port = listener.local_addr().expect("listener address").port();
+
+        let handler = tokio::spawn(super::serve_acme_listener(listener, Arc::new(store), Some(1)));
+
+        let served = http_get(port, "/.well-known/acme-challenge/token-1").await;
+        assert!(served.starts_with("HTTP/1.1 200 OK"), "challenge is served");
+        assert!(served.contains("challenge-body"));
+        handler.await.expect("handler completes").expect("no error");
+    }
+
+    #[tokio::test]
+    async fn acme_listener_returns_404_for_a_foreign_or_malformed_challenge_path() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let store = DeploymentStore::new(fixture.path());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral listener is available");
+        let port = listener.local_addr().expect("listener address").port();
+
+        let handler = tokio::spawn(super::serve_acme_listener(
+            listener,
+            Arc::new(store),
+            Some(3),
+        ));
+
+        let missing = http_get(port, "/.well-known/acme-challenge/unknown").await;
+        assert!(missing.starts_with("HTTP/1.1 404 Not Found"));
+        let traversal = http_get(port, "/.well-known/acme-challenge/../config.toml").await;
+        assert!(traversal.starts_with("HTTP/1.1 404 Not Found"));
+        let wrong_root = http_get(port, "/sub/anything/uri").await;
+        assert!(wrong_root.starts_with("HTTP/1.1 404 Not Found"));
+        handler.await.expect("handler completes").expect("no error");
+    }
+
+    #[tokio::test]
+    async fn direct_tls_listener_serves_the_subscription_after_a_real_handshake() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let (store, config, credential) = seed_direct_subscription(&fixture);
+        let certificate_directory =
+            fixture.path().join("etc/letsencrypt/live/sub.example.test");
+        fs::create_dir_all(&certificate_directory).expect("certificate directory is created");
+        let certificate = rcgen::generate_simple_self_signed(vec!["sub.example.test".into()])
+            .expect("a self-signed certificate is generated");
+        fs::write(
+            certificate_directory.join("fullchain.pem"),
+            certificate.cert.pem(),
+        )
+        .expect("fullchain is written");
+        fs::write(
+            certificate_directory.join("privkey.pem"),
+            certificate.signing_key.serialize_pem(),
+        )
+        .expect("private key is written");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral listener is available");
+        let port = listener.local_addr().expect("listener address").port();
+
+        let handler = tokio::spawn(super::serve_tls_listener(
+            listener,
+            Arc::new(store),
+            Arc::new(config),
+            Some(1),
+        ));
+
+        let response = tls_get(port, &format!("/sub/{credential}/uri")).await;
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "TLS subscription is served");
+        assert!(response.contains("vless://"));
+        assert!(response.contains("subscription-userinfo:"));
+        handler.await.expect("handler completes").expect("no error");
+    }
+
+    /// Opens a TLS connection that accepts any certificate and returns the
+    /// response to a single GET request. Certificates are verified separately
+    /// by the deploy hook and the certificate ticket; this test exercises the
+    /// listener's TLS termination path, not certificate trust.
+    async fn tls_get(port: u16, path: &str) -> String {
+        use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+        use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+        use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
+        use tokio_rustls::TlsConnector;
+
+        #[derive(Debug)]
+        struct AcceptsEverything;
+        impl ServerCertVerifier for AcceptsEverything {
+            fn verify_server_cert(
+                &self,
+                _end_entity: &CertificateDer<'_>,
+                _intermediates: &[CertificateDer<'_>],
+                _server_name: &ServerName<'_>,
+                _ocsp_response: &[u8],
+                _now: UnixTime,
+            ) -> Result<ServerCertVerified, rustls::Error> {
+                Ok(ServerCertVerified::assertion())
+            }
+            fn verify_tls12_signature(
+                &self,
+                _message: &[u8],
+                _cert: &CertificateDer<'_>,
+                _dss: &DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+            fn verify_tls13_signature(
+                &self,
+                _message: &[u8],
+                _cert: &CertificateDer<'_>,
+                _dss: &DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+            fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+                vec![
+                    SignatureScheme::ECDSA_NISTP256_SHA256,
+                    SignatureScheme::ECDSA_NISTP384_SHA384,
+                    SignatureScheme::ED25519,
+                    SignatureScheme::RSA_PSS_SHA256,
+                    SignatureScheme::RSA_PSS_SHA384,
+                    SignatureScheme::RSA_PSS_SHA512,
+                    SignatureScheme::RSA_PKCS1_SHA256,
+                    SignatureScheme::RSA_PKCS1_SHA384,
+                    SignatureScheme::RSA_PKCS1_SHA512,
+                ]
+            }
+        }
+
+        let config = ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptsEverything))
+            .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(config));
+        let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("TLS listener accepts connections");
+        let server_name = ServerName::try_from("sub.example.test").expect("valid server name");
+        let mut stream = connector
+            .connect(server_name, stream)
+            .await
+            .expect("TLS handshake completes");
+        stream
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: sub.example.test\r\n\r\n").as_bytes())
+            .await
+            .expect("request is sent");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .await
+            .expect("response is readable");
+        response
+    }
 
     fn checker(fixture: &TempDir, accepts: bool) -> PathBuf {
         let path = fixture.path().join("sing-box-check");
