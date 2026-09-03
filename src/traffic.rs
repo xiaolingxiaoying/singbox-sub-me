@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::config::{AccountingPolicy, ConfigError, DeploymentConfig, DeploymentStore};
+use crate::runtime::Runtime;
 
 const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -103,7 +104,7 @@ pub fn reconcile(
     store: &DeploymentStore,
     config: &DeploymentConfig,
 ) -> Result<TrafficReport, TrafficError> {
-    reconcile_at(store, config, Utc::now())
+    reconcile_with_runtime(store, config, &Runtime::live(store.root()))
 }
 
 pub fn reconcile_at(
@@ -111,12 +112,24 @@ pub fn reconcile_at(
     config: &DeploymentConfig,
     now: DateTime<Utc>,
 ) -> Result<TrafficReport, TrafficError> {
-    let (rx, tx) = read_interface_counters(store.root(), &config.interface)?;
-    let boot_id = fs::read_to_string(store.root().join("proc/sys/kernel/random/boot_id"))
+    reconcile_with_runtime(store, config, &Runtime::fixture(store.root(), now))
+}
+
+/// Reconcile using an explicit runtime adapter. Production callers use
+/// [`reconcile`]; acceptance and boundary tests use a fixed clock and fixture
+/// root without mocking the accounting algorithm.
+pub fn reconcile_with_runtime<C: crate::runtime::Clock>(
+    store: &DeploymentStore,
+    config: &DeploymentConfig,
+    runtime: &Runtime<C>,
+) -> Result<TrafficReport, TrafficError> {
+    let (rx, tx) = read_interface_counters(runtime, &config.interface)?;
+    let boot_id = runtime
+        .read_to_string("proc/sys/kernel/random/boot_id")
         .map_err(TrafficError::BootId)?
         .trim()
         .to_owned();
-    let period = accounting_period(config, now)?;
+    let period = accounting_period(config, runtime.now_utc())?;
     let mut reconciled = None;
     store.update_state(|prior| {
         let mut state = match prior {
@@ -167,23 +180,30 @@ pub fn detect_default_route_interface(root: &Path) -> Result<String, TrafficErro
         ))
 }
 
-fn read_interface_counters(root: &Path, interface: &str) -> Result<(u64, u64), TrafficError> {
-    let statistics = root
-        .join("sys/class/net")
+fn read_interface_counters<C: crate::runtime::Clock>(
+    runtime: &Runtime<C>,
+    interface: &str,
+) -> Result<(u64, u64), TrafficError> {
+    let statistics = Path::new("sys/class/net")
         .join(interface)
         .join("statistics");
     Ok((
-        read_counter(&statistics.join("rx_bytes"))?,
-        read_counter(&statistics.join("tx_bytes"))?,
+        read_counter(
+            &runtime.read_to_string(statistics.join("rx_bytes"))?,
+            "rx_bytes",
+        )?,
+        read_counter(
+            &runtime.read_to_string(statistics.join("tx_bytes"))?,
+            "tx_bytes",
+        )?,
     ))
 }
 
-fn read_counter(path: &Path) -> Result<u64, TrafficError> {
-    let contents = fs::read_to_string(path)?;
+fn read_counter(contents: &str, name: &str) -> Result<u64, TrafficError> {
     contents
         .trim()
         .parse()
-        .map_err(|_| TrafficError::InvalidCounter(path.display().to_string()))
+        .map_err(|_| TrafficError::InvalidCounter(name.to_owned()))
 }
 
 struct AccountingPeriod {
@@ -329,7 +349,8 @@ mod tests {
 
     use crate::config::{AccountingPolicy, DeploymentConfig, ManagedProtocol, SubscriptionMode};
 
-    use super::{TrafficState, accounting_period, reconcile_at};
+    use super::{TrafficState, accounting_period, reconcile_at, reconcile_with_runtime};
+    use crate::runtime::Runtime;
 
     #[test]
     fn reconciles_rx_and_tx_deltas_without_counting_the_first_observation() {
@@ -389,6 +410,21 @@ mod tests {
         assert_eq!(reconcile_at(&store, &config, now).unwrap().total(), 90);
         write_interface_fixture(&fixture, 10, 20, "boot-b");
         assert_eq!(reconcile_at(&store, &config, now).unwrap().total(), 107);
+    }
+
+    #[test]
+    fn reconciliation_uses_the_fixture_clock_and_host_boundary() {
+        let fixture = TempDir::new().unwrap();
+        let store = crate::config::DeploymentStore::new(fixture.path());
+        let config = config();
+        let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+        let runtime = Runtime::fixture(fixture.path(), now);
+
+        let report = reconcile_with_runtime(&store, &config, &runtime).unwrap();
+
+        assert_eq!(report.accounting_period, "2024-02-01T00:00:00+00:00");
+        assert_eq!(report.total(), 0);
     }
 
     fn config() -> DeploymentConfig {

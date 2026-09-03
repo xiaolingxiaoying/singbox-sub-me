@@ -218,6 +218,10 @@ systemd 容器，因此 Docker 运行环境必须允许 `--privileged` 和 cgrou
 SBCTL_ARTIFACT=/path/to/sbctl-linux-amd64 tests/acceptance/run.sh
 ```
 
+验收 fixture 的边界和可复用 helper 见 [`tests/acceptance/README.md`](tests/acceptance/README.md)。
+WSL2 只属于 Development host，可用于编译、Rust 单测和隔离 root 的 CLI 检查；真实
+systemd Debian/Ubuntu VM 或等价环境才属于 Production host 验收依据。
+
 验收使用本地注入的 `sbctl` 发布二进制和容器内的 fake sing-box，不依赖 GitHub
 Release 或公网域名；容器仅用于验收，不代表 sbctl 支持容器作为生产部署环境。
 
