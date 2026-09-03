@@ -2,7 +2,7 @@ ARG BASE_IMAGE=debian:12-slim
 FROM ${BASE_IMAGE}
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates curl openssl iproute2 python3 python3-yaml systemd systemd-sysv dbus \
+        ca-certificates curl jq openssl iproute2 python3 python3-yaml systemd systemd-sysv dbus \
     && rm -rf /var/lib/apt/lists/*
 COPY tests/acceptance/verify.sh /usr/local/lib/sbctl-acceptance/verify.sh
 COPY tests/acceptance/verify-real.sh /usr/local/lib/sbctl-acceptance/verify-real.sh
