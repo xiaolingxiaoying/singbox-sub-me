@@ -137,10 +137,11 @@ pub fn uninstall(root: &Path, purge: bool) -> Result<Option<std::path::PathBuf>,
     }
 
     if purge {
-        if sing_box_unit_owned {
-            remove_file_if_present(&root.join("etc/sing-box/config.json"))?;
-            remove_empty_directory_if_present(&root.join("etc/sing-box"))?;
-        }
+        // A prior non-purge uninstall removes the unit but deliberately keeps
+        // persistent configuration. Ownership was validated before removing
+        // anything, so purge must not depend on the unit still being present.
+        remove_file_if_present(&root.join("etc/sing-box/config.json"))?;
+        remove_empty_directory_if_present(&root.join("etc/sing-box"))?;
         remove_file_if_present(&root.join("etc/sbctl/config.toml"))?;
         remove_directory_if_present(&root.join("var/lib/sbctl"))?;
     }

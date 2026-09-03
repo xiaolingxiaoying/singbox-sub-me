@@ -1600,6 +1600,19 @@ fn uninstall_stops_and_removes_managed_services_and_binaries_but_preserves_root_
         fs::read(firewall_rules).expect("firewall rules survive"),
         b"preserve firewall"
     );
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "uninstall",
+            "--purge",
+        ])
+        .assert()
+        .success();
+    assert!(!fixture.path().join("etc/sing-box/config.json").exists());
+    assert!(!fixture.path().join("etc/sing-box").exists());
 }
 
 #[test]
