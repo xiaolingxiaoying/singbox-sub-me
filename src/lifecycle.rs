@@ -117,6 +117,7 @@ pub fn uninstall(root: &Path, purge: bool) -> Result<Option<std::path::PathBuf>,
     let backup = (!purge).then(|| backup_persistent_data(root)).transpose()?;
     let sbctl_unit_owned = unit_has_marker(root, SBCTL_UNIT, SBCTL_UNIT_MARKER)?;
     let sing_box_unit_owned = unit_has_marker(root, SING_BOX_UNIT, SING_BOX_UNIT_MARKER)?;
+    let sing_box_config_owned = sing_box_unit_owned || !root.join(SING_BOX_UNIT).exists();
     if sbctl_unit_owned {
         systemctl(root, &["disable", "--now", "sbctl.service"])?;
     }
@@ -138,10 +139,12 @@ pub fn uninstall(root: &Path, purge: bool) -> Result<Option<std::path::PathBuf>,
 
     if purge {
         // A prior non-purge uninstall removes the unit but deliberately keeps
-        // persistent configuration. Ownership was validated before removing
-        // anything, so purge must not depend on the unit still being present.
-        remove_file_if_present(&root.join("etc/sing-box/config.json"))?;
-        remove_empty_directory_if_present(&root.join("etc/sing-box"))?;
+        // persistent configuration. Conversely, a replacement non-sbctl unit
+        // signals a hand-managed deployment and must leave its config alone.
+        if sing_box_config_owned {
+            remove_file_if_present(&root.join("etc/sing-box/config.json"))?;
+            remove_empty_directory_if_present(&root.join("etc/sing-box"))?;
+        }
         remove_file_if_present(&root.join("etc/sbctl/config.toml"))?;
         remove_directory_if_present(&root.join("var/lib/sbctl"))?;
     }
