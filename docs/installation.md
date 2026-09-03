@@ -17,6 +17,21 @@ curl -fsSL https://发布地址/install.sh | SBCTL_MANIFEST_URL=https://发布�
 
 bootstrap 脚本只安装并校验 sbctl；它不会接管已有的 sing-box 部署，也不会修改防火墙。
 
+安装时可为五个协议分别指定监听端口；端口必须大于 1024，且五个协议之间不能重复：
+
+```bash
+sbctl install \
+  --subscription-host sub.example.com \
+  --reality-decoy-sni www.cloudflare.com \
+  --vless-port 12001 \
+  --vmess-port 12002 \
+  --hysteria2-port 12003 \
+  --tuic-port 12004 \
+  --anytls-port 12005
+```
+
+`sbctl config init` 使用同样的五个参数。未指定的协议端口仍会自动分配高端口；指定了未启用协议的端口会直接报错。请同时在 VPS 安全组/防火墙中放行对应的 TCP 或 UDP 端口。
+
 ## 独立管理 sing-box
 
 ```bash

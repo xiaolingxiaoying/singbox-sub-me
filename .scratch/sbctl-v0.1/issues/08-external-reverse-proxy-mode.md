@@ -4,8 +4,8 @@
 
 **Blocked by:** 04: VLESS Reality 的 IP fallback 私密订阅.
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] 外部反代模式不绑定公网 80/443，订阅和流量头在 loopback 后端保持可用。
-- [ ] sbctl 不生成、覆写或接管任何 Caddy、Nginx 或其他反向代理配置。
-- [ ] 模式切换验证端口冲突并保留最后一个已知良好订阅服务。
+- [x] 外部反代模式不绑定公网 80/443，订阅和流量头在 loopback 后端保持可用。
+- [x] sbctl 不生成、覆写或接管任何 Caddy、Nginx 或其他反向代理配置。
+- [x] 模式切换验证端口冲突并保留最后一个已知良好订阅服务。

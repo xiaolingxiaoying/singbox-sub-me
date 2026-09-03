@@ -1,0 +1,3 @@
+# Validate protocol ports before committing deployment changes
+
+Protocol listener ports follow the `sing-box-yg` behavior: an administrator may select each port, otherwise sbctl allocates a distinct port from `10000–65535`. Port numbers are treated as one shared namespace across TCP and UDP, and existing listeners are checked before a configuration is accepted. A protocol or subscription listener change is committed only after generated artifacts pass `sing-box check`; the configuration and artifacts are replaced atomically, services are restarted, and a failed health check leaves the previous known-good deployment active. This makes port changes recoverable and prevents a partially applied node set.

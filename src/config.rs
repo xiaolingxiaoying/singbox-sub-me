@@ -15,6 +15,8 @@ const CONFIG_RELATIVE_PATH: &str = "etc/sbctl/config.toml";
 const STATE_RELATIVE_PATH: &str = "var/lib/sbctl/state.json";
 const ARTIFACTS_RELATIVE_PATH: &str = "var/lib/sbctl/artifacts";
 const ACME_WEBROOT_RELATIVE_PATH: &str = "var/lib/sbctl/acme-webroot";
+const MIN_PROTOCOL_PORT: u16 = 10_000;
+const MAX_PROTOCOL_PORT: u16 = 65_535;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -82,6 +84,17 @@ pub struct TuicCredentials {
 pub struct AnytlsCredentials {
     pub listen_port: u16,
     pub password: String,
+}
+
+/// Optional administrator-selected listener ports for the Managed protocols.
+/// A missing value keeps the existing random high-port allocation behavior.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProtocolPorts {
+    pub vless_reality: Option<u16>,
+    pub vmess_websocket: Option<u16>,
+    pub hysteria2: Option<u16>,
+    pub tuic: Option<u16>,
+    pub anytls: Option<u16>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -164,30 +177,58 @@ impl DeploymentConfig {
         enabled_protocols: Vec<ManagedProtocol>,
         reality_decoy_sni: Option<String>,
     ) -> Result<Self, ConfigError> {
+        Self::new_with_ports(
+            subscription_mode,
+            subscription_host,
+            proxy_host,
+            http_port,
+            interface,
+            enabled_protocols,
+            reality_decoy_sni,
+            ProtocolPorts::default(),
+        )
+    }
+
+    // Keep the compatibility constructor's positional shape explicit while the
+    // protocol port bundle remains grouped in `ProtocolPorts`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_ports(
+        subscription_mode: SubscriptionMode,
+        subscription_host: String,
+        proxy_host: Option<String>,
+        http_port: Option<u16>,
+        interface: String,
+        enabled_protocols: Vec<ManagedProtocol>,
+        reality_decoy_sni: Option<String>,
+        ports: ProtocolPorts,
+    ) -> Result<Self, ConfigError> {
         let mut bytes = [0_u8; 32];
         getrandom::fill(&mut bytes).map_err(|error| ConfigError::Randomness(error.to_string()))?;
         let subscription_credential =
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
         let mut allocated_ports = Vec::new();
+        validate_requested_ports(&enabled_protocols, &ports)?;
         let vless_reality = enabled_protocols
             .contains(&ManagedProtocol::VlessReality)
-            .then(|| generate_vless_reality_credentials(&mut allocated_ports))
+            .then(|| generate_vless_reality_credentials(&mut allocated_ports, ports.vless_reality))
             .transpose()?;
         let vmess_websocket = enabled_protocols
             .contains(&ManagedProtocol::VmessWebsocket)
-            .then(|| generate_vmess_websocket_credentials(&mut allocated_ports))
+            .then(|| {
+                generate_vmess_websocket_credentials(&mut allocated_ports, ports.vmess_websocket)
+            })
             .transpose()?;
         let hysteria2 = enabled_protocols
             .contains(&ManagedProtocol::Hysteria2)
-            .then(|| generate_hysteria2_credentials(&mut allocated_ports))
+            .then(|| generate_hysteria2_credentials(&mut allocated_ports, ports.hysteria2))
             .transpose()?;
         let tuic = enabled_protocols
             .contains(&ManagedProtocol::Tuic)
-            .then(|| generate_tuic_credentials(&mut allocated_ports))
+            .then(|| generate_tuic_credentials(&mut allocated_ports, ports.tuic))
             .transpose()?;
         let anytls = enabled_protocols
             .contains(&ManagedProtocol::Anytls)
-            .then(|| generate_anytls_credentials(&mut allocated_ports))
+            .then(|| generate_anytls_credentials(&mut allocated_ports, ports.anytls))
             .transpose()?;
         let subscription_listen_port =
             (subscription_mode == SubscriptionMode::ExternalProxy).then_some(2080);
@@ -234,6 +275,28 @@ impl DeploymentConfig {
             return Err(ConfigError::InvalidValue(
                 "at least one Managed protocol must be enabled",
             ));
+        }
+        let listener_ports = self
+            .vless_reality
+            .as_ref()
+            .map(|node| node.listen_port)
+            .into_iter()
+            .chain(self.vmess_websocket.as_ref().map(|node| node.listen_port))
+            .chain(self.hysteria2.as_ref().map(|node| node.listen_port))
+            .chain(self.tuic.as_ref().map(|node| node.listen_port))
+            .chain(self.anytls.as_ref().map(|node| node.listen_port))
+            .collect::<Vec<_>>();
+        if listener_ports.iter().any(|port| *port <= 1024) {
+            return Err(ConfigError::InvalidValue(
+                "Managed protocol ports must be higher than 1024",
+            ));
+        }
+        for (index, port) in listener_ports.iter().enumerate() {
+            if listener_ports[..index].contains(port) {
+                return Err(ConfigError::InvalidValue(
+                    "Managed protocol ports must be unique",
+                ));
+            }
         }
         for (index, protocol) in self.enabled_protocols.iter().enumerate() {
             if self.enabled_protocols[..index].contains(protocol) {
@@ -344,6 +407,11 @@ impl DeploymentConfig {
                         "IP fallback HTTP port must be higher than 1024",
                     ));
                 }
+                if self.protocol_listener_ports().contains(&port) {
+                    return Err(ConfigError::InvalidValue(
+                        "IP fallback HTTP port must not conflict with a Managed protocol port",
+                    ));
+                }
                 if self.enabled_protocols.iter().any(|protocol| {
                     matches!(
                         protocol,
@@ -396,7 +464,7 @@ impl DeploymentConfig {
                         "external reverse-proxy listener port must be higher than 1024",
                     ));
                 }
-                if self.tcp_protocol_listener_ports().contains(&port) {
+                if self.protocol_listener_ports().contains(&port) {
                     return Err(ConfigError::InvalidValue(
                         "external reverse-proxy listener port must not conflict with a Managed protocol port",
                     ));
@@ -448,10 +516,12 @@ impl DeploymentConfig {
         lines.join("\n")
     }
 
-    fn tcp_protocol_listener_ports(&self) -> Vec<u16> {
+    fn protocol_listener_ports(&self) -> Vec<u16> {
         [
             self.vless_reality.as_ref().map(|node| node.listen_port),
             self.vmess_websocket.as_ref().map(|node| node.listen_port),
+            self.hysteria2.as_ref().map(|node| node.listen_port),
+            self.tuic.as_ref().map(|node| node.listen_port),
             self.anytls.as_ref().map(|node| node.listen_port),
         ]
         .into_iter()
@@ -472,15 +542,51 @@ fn validate_enabled_credentials(
     Ok(())
 }
 
+fn validate_requested_ports(
+    enabled_protocols: &[ManagedProtocol],
+    ports: &ProtocolPorts,
+) -> Result<(), ConfigError> {
+    let requested = [
+        (ManagedProtocol::VlessReality, ports.vless_reality),
+        (ManagedProtocol::VmessWebsocket, ports.vmess_websocket),
+        (ManagedProtocol::Hysteria2, ports.hysteria2),
+        (ManagedProtocol::Tuic, ports.tuic),
+        (ManagedProtocol::Anytls, ports.anytls),
+    ];
+    let mut values = Vec::new();
+    for (protocol, port) in requested {
+        if let Some(port) = port {
+            if !enabled_protocols.contains(&protocol) {
+                return Err(ConfigError::InvalidValue(
+                    "cannot specify a port for a disabled Managed protocol",
+                ));
+            }
+            if port <= 1024 {
+                return Err(ConfigError::InvalidValue(
+                    "Managed protocol ports must be higher than 1024",
+                ));
+            }
+            if values.contains(&port) {
+                return Err(ConfigError::InvalidValue(
+                    "Managed protocol ports must be unique",
+                ));
+            }
+            values.push(port);
+        }
+    }
+    Ok(())
+}
+
 fn generate_vless_reality_credentials(
     allocated_ports: &mut Vec<u16>,
+    requested_port: Option<u16>,
 ) -> Result<VlessRealityCredentials, ConfigError> {
     let mut private = [0_u8; 32];
     let mut short_id = [0_u8; 8];
     getrandom::fill(&mut private).map_err(|error| ConfigError::Randomness(error.to_string()))?;
     getrandom::fill(&mut short_id).map_err(|error| ConfigError::Randomness(error.to_string()))?;
     let public = x25519(private, X25519_BASEPOINT_BYTES);
-    let listen_port = allocate_port(allocated_ports)?;
+    let listen_port = allocate_port(allocated_ports, requested_port)?;
     Ok(VlessRealityCredentials {
         listen_port,
         uuid: generate_uuid()?,
@@ -492,11 +598,12 @@ fn generate_vless_reality_credentials(
 
 fn generate_vmess_websocket_credentials(
     allocated_ports: &mut Vec<u16>,
+    requested_port: Option<u16>,
 ) -> Result<VmessWebsocketCredentials, ConfigError> {
     let mut path = [0_u8; 16];
     getrandom::fill(&mut path).map_err(|error| ConfigError::Randomness(error.to_string()))?;
     Ok(VmessWebsocketCredentials {
-        listen_port: allocate_port(allocated_ports)?,
+        listen_port: allocate_port(allocated_ports, requested_port)?,
         uuid: generate_uuid()?,
         path: format!(
             "/{}",
@@ -507,22 +614,24 @@ fn generate_vmess_websocket_credentials(
 
 fn generate_hysteria2_credentials(
     allocated_ports: &mut Vec<u16>,
+    requested_port: Option<u16>,
 ) -> Result<Hysteria2Credentials, ConfigError> {
     let mut password = [0_u8; 32];
     getrandom::fill(&mut password).map_err(|error| ConfigError::Randomness(error.to_string()))?;
     Ok(Hysteria2Credentials {
-        listen_port: allocate_udp_port(allocated_ports)?,
+        listen_port: allocate_udp_port(allocated_ports, requested_port)?,
         password: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(password),
     })
 }
 
 fn generate_tuic_credentials(
     allocated_ports: &mut Vec<u16>,
+    requested_port: Option<u16>,
 ) -> Result<TuicCredentials, ConfigError> {
     let mut password = [0_u8; 32];
     getrandom::fill(&mut password).map_err(|error| ConfigError::Randomness(error.to_string()))?;
     Ok(TuicCredentials {
-        listen_port: allocate_udp_port(allocated_ports)?,
+        listen_port: allocate_udp_port(allocated_ports, requested_port)?,
         uuid: generate_uuid()?,
         password: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(password),
     })
@@ -530,11 +639,12 @@ fn generate_tuic_credentials(
 
 fn generate_anytls_credentials(
     allocated_ports: &mut Vec<u16>,
+    requested_port: Option<u16>,
 ) -> Result<AnytlsCredentials, ConfigError> {
     let mut password = [0_u8; 32];
     getrandom::fill(&mut password).map_err(|error| ConfigError::Randomness(error.to_string()))?;
     Ok(AnytlsCredentials {
-        listen_port: allocate_port(allocated_ports)?,
+        listen_port: allocate_port(allocated_ports, requested_port)?,
         password: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(password),
     })
 }
@@ -563,30 +673,69 @@ fn generate_uuid() -> Result<String, ConfigError> {
     ))
 }
 
-fn allocate_port(allocated_ports: &mut Vec<u16>) -> Result<u16, ConfigError> {
+fn allocate_port(
+    allocated_ports: &mut Vec<u16>,
+    requested_port: Option<u16>,
+) -> Result<u16, ConfigError> {
+    if let Some(port) = requested_port {
+        if allocated_ports.contains(&port) {
+            return Err(ConfigError::InvalidValue(
+                "Managed protocol ports must be unique",
+            ));
+        }
+        ensure_protocol_port_available(port)?;
+        allocated_ports.push(port);
+        return Ok(port);
+    }
     loop {
-        let port = std::net::TcpListener::bind("[::]:0")
-            .or_else(|_| std::net::TcpListener::bind("0.0.0.0:0"))?
-            .local_addr()?
-            .port();
-        if !allocated_ports.contains(&port) {
+        let port = random_protocol_port()?;
+        if !allocated_ports.contains(&port) && ensure_protocol_port_available(port).is_ok() {
             allocated_ports.push(port);
             return Ok(port);
         }
     }
 }
 
-fn allocate_udp_port(allocated_ports: &mut Vec<u16>) -> Result<u16, ConfigError> {
+fn allocate_udp_port(
+    allocated_ports: &mut Vec<u16>,
+    requested_port: Option<u16>,
+) -> Result<u16, ConfigError> {
+    if let Some(port) = requested_port {
+        if allocated_ports.contains(&port) {
+            return Err(ConfigError::InvalidValue(
+                "Managed protocol ports must be unique",
+            ));
+        }
+        ensure_protocol_port_available(port)?;
+        allocated_ports.push(port);
+        return Ok(port);
+    }
     loop {
-        let port = std::net::UdpSocket::bind("[::]:0")
-            .or_else(|_| std::net::UdpSocket::bind("0.0.0.0:0"))?
-            .local_addr()?
-            .port();
-        if !allocated_ports.contains(&port) {
+        let port = random_protocol_port()?;
+        if !allocated_ports.contains(&port) && ensure_protocol_port_available(port).is_ok() {
             allocated_ports.push(port);
             return Ok(port);
         }
     }
+}
+
+fn random_protocol_port() -> Result<u16, ConfigError> {
+    let mut bytes = [0_u8; 4];
+    getrandom::fill(&mut bytes).map_err(|error| ConfigError::Randomness(error.to_string()))?;
+    let span = u32::from(MAX_PROTOCOL_PORT - MIN_PROTOCOL_PORT) + 1;
+    Ok(MIN_PROTOCOL_PORT + (u32::from_le_bytes(bytes) % span) as u16)
+}
+
+fn ensure_protocol_port_available(port: u16) -> Result<(), ConfigError> {
+    let tcp_available = std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port));
+    if tcp_available.is_err() {
+        return Err(ConfigError::PortUnavailable(port));
+    }
+    let udp_available = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port));
+    if udp_available.is_err() {
+        return Err(ConfigError::PortUnavailable(port));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -603,6 +752,8 @@ pub enum ConfigError {
     Serialize(#[from] toml::ser::Error),
     #[error("could not obtain secure randomness: {0}")]
     Randomness(String),
+    #[error("Managed protocol port {0} is already in use")]
+    PortUnavailable(u16),
     #[error("configuration storage failed: {0}")]
     Storage(#[from] io::Error),
     #[error("could not update deployment state: {0}")]
@@ -878,12 +1029,15 @@ fn validate_hostname(label: &'static str, value: &str) -> Result<(), ConfigError
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::net::TcpListener;
     use std::sync::{Arc, Barrier};
     use std::thread;
 
     use tempfile::TempDir;
 
-    use super::DeploymentStore;
+    use super::{
+        DeploymentConfig, DeploymentStore, ManagedProtocol, ProtocolPorts, SubscriptionMode,
+    };
 
     #[test]
     fn state_replacement_exposes_only_the_complete_new_artifact() {
@@ -1006,5 +1160,138 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(permissions & 0o777, 0o600);
+    }
+
+    #[test]
+    fn requested_protocol_ports_are_preserved_in_the_generated_credentials() {
+        let vless_port = free_port();
+        let vmess_port = free_port();
+        let hysteria2_port = free_port();
+        let tuic_port = free_port();
+        let anytls_port = free_port();
+        let config = DeploymentConfig::new_with_ports(
+            SubscriptionMode::Direct,
+            "sub.example.test".into(),
+            None,
+            None,
+            "ens3".into(),
+            vec![
+                ManagedProtocol::VlessReality,
+                ManagedProtocol::VmessWebsocket,
+                ManagedProtocol::Hysteria2,
+                ManagedProtocol::Tuic,
+                ManagedProtocol::Anytls,
+            ],
+            Some("www.cloudflare.com".into()),
+            ProtocolPorts {
+                vless_reality: Some(vless_port),
+                vmess_websocket: Some(vmess_port),
+                hysteria2: Some(hysteria2_port),
+                tuic: Some(tuic_port),
+                anytls: Some(anytls_port),
+            },
+        )
+        .expect("explicit protocol ports are valid");
+
+        assert_eq!(config.vless_reality.unwrap().listen_port, vless_port);
+        assert_eq!(config.vmess_websocket.unwrap().listen_port, vmess_port);
+        assert_eq!(config.hysteria2.unwrap().listen_port, hysteria2_port);
+        assert_eq!(config.tuic.unwrap().listen_port, tuic_port);
+        assert_eq!(config.anytls.unwrap().listen_port, anytls_port);
+    }
+
+    #[test]
+    fn requested_protocol_ports_reject_duplicates_and_disabled_protocols() {
+        let duplicate = DeploymentConfig::new_with_ports(
+            SubscriptionMode::IpFallback,
+            "203.0.113.7".into(),
+            None,
+            Some(2080),
+            "ens3".into(),
+            vec![ManagedProtocol::VlessReality, ManagedProtocol::Hysteria2],
+            Some("www.cloudflare.com".into()),
+            ProtocolPorts {
+                vless_reality: Some(12001),
+                hysteria2: Some(12001),
+                ..ProtocolPorts::default()
+            },
+        );
+        assert!(duplicate.is_err());
+
+        let disabled = DeploymentConfig::new_with_ports(
+            SubscriptionMode::IpFallback,
+            "203.0.113.7".into(),
+            None,
+            Some(2080),
+            "ens3".into(),
+            vec![ManagedProtocol::VlessReality],
+            Some("www.cloudflare.com".into()),
+            ProtocolPorts {
+                vmess_websocket: Some(12002),
+                ..ProtocolPorts::default()
+            },
+        );
+        assert!(disabled.is_err());
+    }
+
+    #[test]
+    fn automatically_allocated_protocol_ports_are_in_the_upstream_high_port_range() {
+        let config = DeploymentConfig::new(
+            SubscriptionMode::IpFallback,
+            "203.0.113.7".into(),
+            None,
+            Some(2080),
+            "ens3".into(),
+            vec![ManagedProtocol::VlessReality],
+            Some("www.cloudflare.com".into()),
+        )
+        .expect("automatic port allocation succeeds");
+
+        let port = config.vless_reality.expect("VLESS node exists").listen_port;
+        assert!((10000..=65535).contains(&port));
+    }
+
+    #[test]
+    fn an_explicitly_requested_port_is_rejected_when_already_listening() {
+        let listener = TcpListener::bind("0.0.0.0:0").expect("test listener binds");
+        let port = listener
+            .local_addr()
+            .expect("test listener has an address")
+            .port();
+        if port < 10000 {
+            return;
+        }
+
+        let result = DeploymentConfig::new_with_ports(
+            SubscriptionMode::IpFallback,
+            "203.0.113.7".into(),
+            None,
+            Some(2080),
+            "ens3".into(),
+            vec![ManagedProtocol::VlessReality],
+            Some("www.cloudflare.com".into()),
+            ProtocolPorts {
+                vless_reality: Some(port),
+                ..ProtocolPorts::default()
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(super::ConfigError::PortUnavailable(_))
+        ));
+    }
+
+    fn free_port() -> u16 {
+        loop {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("test port binds");
+            let port = listener
+                .local_addr()
+                .expect("test port has an address")
+                .port();
+            if port >= 10000 {
+                return port;
+            }
+        }
     }
 }

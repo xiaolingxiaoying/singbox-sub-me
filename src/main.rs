@@ -33,6 +33,17 @@ enum Command {
         /// Explicitly omit a Managed protocol; all five are enabled by default.
         #[arg(long, value_enum)]
         disable_protocol: Vec<CliManagedProtocol>,
+        /// Optional listener ports for the five Managed protocols.
+        #[arg(long)]
+        vless_port: Option<u16>,
+        #[arg(long)]
+        vmess_port: Option<u16>,
+        #[arg(long)]
+        hysteria2_port: Option<u16>,
+        #[arg(long)]
+        tuic_port: Option<u16>,
+        #[arg(long)]
+        anytls_port: Option<u16>,
         #[arg(long, value_name = "PATH")]
         sing_box_bin: Option<PathBuf>,
         /// Create units and configuration without starting services (acceptance fixture use).
@@ -110,6 +121,11 @@ struct InstallOptions {
     interface: Option<String>,
     reality_decoy_sni: Option<String>,
     disable_protocol: Vec<CliManagedProtocol>,
+    vless_port: Option<u16>,
+    vmess_port: Option<u16>,
+    hysteria2_port: Option<u16>,
+    tuic_port: Option<u16>,
+    anytls_port: Option<u16>,
     sing_box_bin: Option<PathBuf>,
     no_start: bool,
 }
@@ -135,6 +151,17 @@ enum ConfigCommand {
         interface: Option<String>,
         #[arg(long = "protocol", value_enum, required = true)]
         protocols: Vec<CliManagedProtocol>,
+        /// Optional listener ports for the five Managed protocols.
+        #[arg(long)]
+        vless_port: Option<u16>,
+        #[arg(long)]
+        vmess_port: Option<u16>,
+        #[arg(long)]
+        hysteria2_port: Option<u16>,
+        #[arg(long)]
+        tuic_port: Option<u16>,
+        #[arg(long)]
+        anytls_port: Option<u16>,
         #[arg(long)]
         reality_decoy_sni: Option<String>,
         #[arg(long, default_value_t = 0)]
@@ -284,6 +311,11 @@ fn main() -> ExitCode {
             interface,
             reality_decoy_sni,
             disable_protocol,
+            vless_port,
+            vmess_port,
+            hysteria2_port,
+            tuic_port,
+            anytls_port,
             sing_box_bin,
             no_start,
         } => install(
@@ -295,6 +327,11 @@ fn main() -> ExitCode {
                 interface,
                 reality_decoy_sni,
                 disable_protocol,
+                vless_port,
+                vmess_port,
+                hysteria2_port,
+                tuic_port,
+                anytls_port,
                 sing_box_bin,
                 no_start,
             },
@@ -495,7 +532,7 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
         } else {
             None
         };
-        let config = sbctl::config::DeploymentConfig::new(
+        let config = sbctl::config::DeploymentConfig::new_with_ports(
             options.mode.into(),
             subscription_host,
             options.proxy_host,
@@ -503,6 +540,13 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
             interface,
             protocols,
             reality_decoy_sni,
+            protocol_ports(
+                options.vless_port,
+                options.vmess_port,
+                options.hysteria2_port,
+                options.tuic_port,
+                options.anytls_port,
+            ),
         )?;
         config.validate()?;
         let sing_box_bin = options
@@ -578,6 +622,22 @@ fn select_protocols(
         }
     }
     Ok(selected)
+}
+
+fn protocol_ports(
+    vless_reality: Option<u16>,
+    vmess_websocket: Option<u16>,
+    hysteria2: Option<u16>,
+    tuic: Option<u16>,
+    anytls: Option<u16>,
+) -> sbctl::config::ProtocolPorts {
+    sbctl::config::ProtocolPorts {
+        vless_reality,
+        vmess_websocket,
+        hysteria2,
+        tuic,
+        anytls,
+    }
 }
 
 fn confirm_protocol(protocol: &CliManagedProtocol) -> Result<bool, sbctl::config::ConfigError> {
@@ -825,6 +885,11 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
             accounting_timezone,
             anchored_reset_at,
             sing_box_bin,
+            vless_port,
+            vmess_port,
+            hysteria2_port,
+            tuic_port,
+            anytls_port,
         } => {
             let interface = interface.map(Ok).unwrap_or_else(|| {
                 sbctl::traffic::detect_default_route_interface(root).map_err(|_| {
@@ -834,7 +899,7 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
                 })
             });
             interface.and_then(|interface| {
-                let mut config = sbctl::config::DeploymentConfig::new(
+                let mut config = sbctl::config::DeploymentConfig::new_with_ports(
                     mode.into(),
                     subscription_host,
                     proxy_host,
@@ -842,6 +907,7 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
                     interface,
                     protocols.into_iter().map(Into::into).collect(),
                     reality_decoy_sni,
+                    protocol_ports(vless_port, vmess_port, hysteria2_port, tuic_port, anytls_port),
                 )?;
                 config.subscription_listen_port = listen_port;
                 config.monthly_traffic_limit = monthly_traffic_limit;

@@ -610,6 +610,75 @@ fn domain_nodes_export_vmess_websocket_and_hysteria2_with_independent_tls_creden
 }
 
 #[test]
+fn config_init_persists_explicit_ports_for_all_five_managed_protocols() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let checker = sing_box_check_fixture(
+        &fixture,
+        true,
+        &["vless", "vmess", "hysteria2", "tuic", "anytls"],
+    );
+    let ports = [
+        free_high_tcp_port(),
+        free_high_tcp_port(),
+        free_high_tcp_port(),
+        free_high_tcp_port(),
+        free_high_tcp_port(),
+    ];
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "direct",
+            "--subscription-host",
+            "sub.example.test",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--protocol",
+            "vmess-websocket",
+            "--protocol",
+            "hysteria2",
+            "--protocol",
+            "tuic",
+            "--protocol",
+            "anytls",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+            "--vless-port",
+            &ports[0].to_string(),
+            "--vmess-port",
+            &ports[1].to_string(),
+            "--hysteria2-port",
+            &ports[2].to_string(),
+            "--tuic-port",
+            &ports[3].to_string(),
+            "--anytls-port",
+            &ports[4].to_string(),
+            "--sing-box-bin",
+            checker.to_str().expect("checker path is UTF-8"),
+        ])
+        .assert()
+        .success();
+
+    let persisted: sbctl::config::DeploymentConfig = toml::from_str(
+        &fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
+            .expect("configuration is persisted"),
+    )
+    .expect("persisted configuration is valid TOML");
+    assert_eq!(persisted.vless_reality.unwrap().listen_port, ports[0]);
+    assert_eq!(persisted.vmess_websocket.unwrap().listen_port, ports[1]);
+    assert_eq!(persisted.hysteria2.unwrap().listen_port, ports[2]);
+    assert_eq!(persisted.tuic.unwrap().listen_port, ports[3]);
+    assert_eq!(persisted.anytls.unwrap().listen_port, ports[4]);
+}
+
+#[test]
 fn domain_nodes_export_tuic_and_anytls_with_independent_tls_credentials() {
     let fixture = TempDir::new().expect("temporary root is created");
     let checker = sing_box_check_fixture(&fixture, true, &["tuic", "anytls"]);
@@ -1695,6 +1764,19 @@ fn write_traffic_fixture(fixture: &TempDir, rx: u64, tx: u64, boot_id: &str) {
     fs::create_dir_all(boot_path.parent().expect("boot ID has a parent"))
         .expect("boot ID directory is created");
     fs::write(boot_path, boot_id).expect("boot ID is written");
+}
+
+fn free_high_tcp_port() -> u16 {
+    loop {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("an ephemeral port is available");
+        let port = listener
+            .local_addr()
+            .expect("ephemeral listener has an address")
+            .port();
+        if port >= 10000 {
+            return port;
+        }
+    }
 }
 
 fn assert_existing_deployment_is_preserved(
