@@ -24,7 +24,8 @@ case "$(dpkg --print-architecture)" in
   amd64|arm64) arch=$(dpkg --print-architecture) ;;
   *) echo "仅支持 amd64 和 arm64" >&2; exit 2 ;;
 esac
-manifest_url=${manifest_url_template//\{arch\}/$arch}
+placeholder='{arch}'
+manifest_url=${manifest_url_template//$placeholder/$arch}
 work_dir=$(mktemp -d)
 trap 'rm -rf "$work_dir"' EXIT
 
