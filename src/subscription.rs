@@ -7,7 +7,6 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use std::fs;
-use std::io::BufReader;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -550,10 +549,17 @@ async fn serve_tls_listener(
         };
         match load_tls_config(&store, &config) {
             Ok(reloaded) => tls = Some(reloaded),
-            Err(error) => eprintln!(
-                "Direct HTTPS certificate unavailable; connection dropped: {}",
-                redact_secret(&error.to_string(), &config.subscription_credential)
-            ),
+            Err(error) => {
+                // A TLS-terminating listener cannot emit an HTTP 5xx: the
+                // certificate is needed before the first HTTP byte. The failure
+                // is instead diagnosed with a redacted log line, and the last
+                // known-good configuration keeps serving until a valid
+                // certificate is pinned again.
+                eprintln!(
+                    "Direct HTTPS certificate unavailable; connection dropped: {}",
+                    redact_secret(&error.to_string(), &config.subscription_credential)
+                )
+            }
         }
         let Some(tls) = tls.clone() else {
             drop(stream);
@@ -694,27 +700,23 @@ fn subscription_http_response(
         .expect("valid subscription response")
 }
 
+/// Loads and validates the pinned certificate for Direct HTTPS. Every loading
+/// check — validity period, SAN coverage, private-key match — runs before the
+/// TLS acceptor is built, and the acceptor refuses connections whose SNI does
+/// not equal the subscription host. The daemon reloads before every handshake,
+/// so a Certbot renewal pinned by the deploy hook takes effect on the next
+/// connection without a service restart.
 fn load_tls_config(
     store: &DeploymentStore,
     config: &DeploymentConfig,
 ) -> Result<Arc<rustls::ServerConfig>, SubscriptionError> {
-    let directory = store
-        .root()
-        .join("etc/letsencrypt/live")
-        .join(&config.subscription_host);
-    let mut certificates = BufReader::new(fs::File::open(directory.join("fullchain.pem"))?);
-    let certificates = rustls_pemfile::certs(&mut certificates)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| SubscriptionError::Tls(error.to_string()))?;
-    let mut key = BufReader::new(fs::File::open(directory.join("privkey.pem"))?);
-    let key = rustls_pemfile::private_key(&mut key)
-        .map_err(|error| SubscriptionError::Tls(error.to_string()))?
-        .ok_or_else(|| SubscriptionError::Tls("private key file contains no key".to_owned()))?;
-    rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certificates, key)
-        .map(Arc::new)
+    crate::certificate::load_pinned(store, config)
         .map_err(|error| SubscriptionError::Tls(error.to_string()))
+        .and_then(|validated| {
+            validated
+                .server_config()
+                .map_err(|error| SubscriptionError::Tls(error.to_string()))
+        })
 }
 
 /// Replaces every occurrence of a Subscription credential in a diagnostic so
@@ -1008,10 +1010,29 @@ fn uri(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
     Ok(uris)
 }
 
+/// The certificate path written into the sing-box server configuration for the
+/// TLS-terminating Managed protocols. Direct subscription mode uses the pinned
+/// copy that the deploy hook grants to the `sbctl` and `sing-box` accounts.
+/// External proxy mode leaves certificate management entirely to the existing
+/// reverse proxy and its own Certbot setup.
 fn certificate_tls_config(config: &DeploymentConfig) -> Value {
+    let (certificate_path, key_path) = if config.subscription_mode == SubscriptionMode::Direct {
+        let directory = crate::config::DeploymentStore::certificate_directory_absolute(
+            &config.subscription_host,
+        );
+        (
+            directory.join("fullchain.pem").to_string_lossy().into_owned(),
+            directory.join("privkey.pem").to_string_lossy().into_owned(),
+        )
+    } else {
+        (
+            format!("/etc/letsencrypt/live/{}/fullchain.pem", config.subscription_host),
+            format!("/etc/letsencrypt/live/{}/privkey.pem", config.subscription_host),
+        )
+    };
     json!({"enabled": true, "server_name": config.subscription_host,
-        "certificate_path": format!("/etc/letsencrypt/live/{}/fullchain.pem", config.subscription_host),
-        "key_path": format!("/etc/letsencrypt/live/{}/privkey.pem", config.subscription_host)})
+        "certificate_path": certificate_path,
+        "key_path": key_path})
 }
 
 fn server_tls(tls_server_name: &str, certificate: &Value) -> Value {
@@ -1143,21 +1164,7 @@ mod tests {
     async fn direct_tls_listener_serves_the_subscription_after_a_real_handshake() {
         let fixture = TempDir::new().expect("temporary root is created");
         let (store, config, credential) = seed_direct_subscription(&fixture);
-        let certificate_directory =
-            fixture.path().join("etc/letsencrypt/live/sub.example.test");
-        fs::create_dir_all(&certificate_directory).expect("certificate directory is created");
-        let certificate = rcgen::generate_simple_self_signed(vec!["sub.example.test".into()])
-            .expect("a self-signed certificate is generated");
-        fs::write(
-            certificate_directory.join("fullchain.pem"),
-            certificate.cert.pem(),
-        )
-        .expect("fullchain is written");
-        fs::write(
-            certificate_directory.join("privkey.pem"),
-            certificate.signing_key.serialize_pem(),
-        )
-        .expect("private key is written");
+        seed_direct_certificate(&fixture, &store, &config);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("an ephemeral listener is available");
@@ -1177,12 +1184,113 @@ mod tests {
         handler.await.expect("handler completes").expect("no error");
     }
 
+    #[tokio::test]
+    async fn direct_tls_listener_rejects_a_handshake_whose_sni_is_not_the_subscription_host() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let (store, config, _) = seed_direct_subscription(&fixture);
+        seed_direct_certificate(&fixture, &store, &config);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral listener is available");
+        let port = listener.local_addr().expect("listener address").port();
+
+        let handler = tokio::spawn(super::serve_tls_listener(
+            listener,
+            Arc::new(store),
+            Arc::new(config),
+            Some(1),
+        ));
+
+        let handshake =
+            tls_handshake_sni(port, "attacker.example.test").await;
+        assert!(handshake.is_err(), "an SNI mismatch is rejected before any HTTP request");
+        handler.await.expect("handler completes").expect("no error");
+    }
+
+    #[tokio::test]
+    async fn direct_tls_listener_rejects_a_handshake_without_an_sni() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let (store, config, _) = seed_direct_subscription(&fixture);
+        seed_direct_certificate(&fixture, &store, &config);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral listener is available");
+        let port = listener.local_addr().expect("listener address").port();
+
+        let handler = tokio::spawn(super::serve_tls_listener(
+            listener,
+            Arc::new(store),
+            Arc::new(config),
+            Some(1),
+        ));
+
+        let handshake = tls_handshake_sni(port, "").await;
+        assert!(handshake.is_err(), "a missing SNI is rejected before any HTTP request");
+        handler.await.expect("handler completes").expect("no error");
+    }
+
+    /// Writes a valid certificate into the Certbot live directory and pins it
+    /// into the sbctl-owned copy that the daemon actually serves.
+    fn seed_direct_certificate(
+        fixture: &TempDir,
+        store: &DeploymentStore,
+        config: &DeploymentConfig,
+    ) {
+        let certificate_directory =
+            fixture.path().join("etc/letsencrypt/live/sub.example.test");
+        fs::create_dir_all(&certificate_directory).expect("certificate directory is created");
+        let certificate = rcgen::generate_simple_self_signed(vec!["sub.example.test".into()])
+            .expect("a self-signed certificate is generated");
+        fs::write(
+            certificate_directory.join("fullchain.pem"),
+            certificate.cert.pem(),
+        )
+        .expect("fullchain is written");
+        fs::write(
+            certificate_directory.join("privkey.pem"),
+            certificate.signing_key.serialize_pem(),
+        )
+        .expect("private key is written");
+        let validated = crate::certificate::load(store, config)
+            .expect("the fixture certificate is valid");
+        crate::certificate::pin(store, config, &validated)
+            .expect("the certificate is pinned for the daemon");
+    }
+
     /// Opens a TLS connection that accepts any certificate and returns the
     /// response to a single GET request. Certificates are verified separately
     /// by the deploy hook and the certificate ticket; this test exercises the
     /// listener's TLS termination path, not certificate trust.
     async fn tls_get(port: u16, path: &str) -> String {
-        use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+        let mut stream = tls_connect(port, "sub.example.test")
+            .await
+            .expect("TLS handshake completes");
+        stream
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: sub.example.test\r\n\r\n").as_bytes())
+            .await
+            .expect("request is sent");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .await
+            .expect("response is readable");
+        response
+    }
+
+    /// Opens a TLS connection with a caller-supplied SNI and returns whether
+    /// the handshake completed. An empty `sni` connects without a DNS SNI (an
+    /// IP server name is used, which rustls omits from the ClientHello).
+    async fn tls_handshake_sni(port: u16, sni: &str) -> Result<(), std::io::Error> {
+        tls_connect(port, sni).await.map(|_| ())
+    }
+
+    async fn tls_connect(
+        port: u16,
+        sni: &str,
+    ) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, std::io::Error> {
+        use rustls::client::danger::{
+            HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+        };
         use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
         use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
         use tokio_rustls::TlsConnector;
@@ -1239,21 +1347,12 @@ mod tests {
         let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .expect("TLS listener accepts connections");
-        let server_name = ServerName::try_from("sub.example.test").expect("valid server name");
-        let mut stream = connector
-            .connect(server_name, stream)
-            .await
-            .expect("TLS handshake completes");
-        stream
-            .write_all(format!("GET {path} HTTP/1.1\r\nHost: sub.example.test\r\n\r\n").as_bytes())
-            .await
-            .expect("request is sent");
-        let mut response = String::new();
-        stream
-            .read_to_string(&mut response)
-            .await
-            .expect("response is readable");
-        response
+        let server_name = if sni.is_empty() {
+            ServerName::try_from("203.0.113.7".to_owned()).expect("a valid IP server name")
+        } else {
+            ServerName::try_from(sni.to_owned()).expect("valid server name")
+        };
+        connector.connect(server_name, stream).await
     }
 
     fn checker(fixture: &TempDir, accepts: bool) -> PathBuf {

@@ -220,6 +220,75 @@ fn write_systemctl_fixture(fixture: &TempDir, succeeds: bool) {
     let _ = command_fixture(fixture, "usr/bin/systemctl", succeeds, &[]);
 }
 
+/// Writes an executable host command that exits with the given status and,
+/// when non-empty, emits `stderr_text` so diagnostics can be asserted.
+fn write_command_fixture(fixture: &TempDir, name: &str, status: u8, stderr_text: &str) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = fixture.path().join(name);
+        fs::create_dir_all(path.parent().expect("command path has a parent"))
+            .expect("command directory is created");
+        fs::write(
+            &path,
+            format!("#!/bin/sh\n{}\nexit {status}\n", {
+                if stderr_text.is_empty() {
+                    String::new()
+                } else {
+                    format!("echo {stderr_text} >&2")
+                }
+            }),
+        )
+        .expect("command fixture is written");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+            .expect("command fixture is executable");
+    }
+    #[cfg(not(unix))]
+    let _ = (fixture, name, status, stderr_text);
+}
+
+/// Persists a Direct subscription configuration without starting services.
+fn seed_direct_config(fixture: &TempDir) {
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "direct",
+            "--subscription-host",
+            "sub.example.test",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+}
+
+/// Writes a self-signed certificate into the Certbot live directory that the
+/// `certificate` commands validate against the subscription host.
+fn seed_live_certificate(fixture: &TempDir, names: &[&str]) {
+    let certificate = rcgen::generate_simple_self_signed(
+        names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>(),
+    )
+    .expect("a self-signed certificate is generated");
+    let directory = fixture.path().join("etc/letsencrypt/live/sub.example.test");
+    fs::create_dir_all(&directory).expect("certificate directory is created");
+    fs::write(directory.join("fullchain.pem"), certificate.cert.pem())
+        .expect("fullchain is written");
+    fs::write(
+        directory.join("privkey.pem"),
+        certificate.signing_key.serialize_pem(),
+    )
+    .expect("private key is written");
+}
+
 fn command_fixture(
     fixture: &TempDir,
     name: &str,
@@ -2847,6 +2916,259 @@ fn uninstall_removes_the_direct_https_socket_unit() {
             .join("etc/systemd/system/sbctl-http.socket")
             .exists(),
         "uninstall removes the Direct HTTPS socket unit"
+    );
+    assert!(
+        !fixture
+            .path()
+            .join("etc/letsencrypt/renewal-hooks/deploy/sbctl-certificate-deploy-hook")
+            .exists(),
+        "uninstall removes the sbctl-owned Certbot deploy hook"
+    );
+}
+
+#[test]
+fn direct_install_writes_the_certbot_deploy_hook_but_external_proxy_does_not() {
+    let direct = supported_systemd_host();
+    write_traffic_fixture(&direct, 100, 200, "boot-a");
+    let checker = sing_box_check_fixture(&direct, true, &["vless"]);
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            direct.path().to_str().expect("fixture path is UTF-8"),
+            "install",
+            "--subscription-host",
+            "sub.example.test",
+            "--interface",
+            "ens3",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+            "--sing-box-bin",
+            checker.to_str().expect("checker path is UTF-8"),
+            "--no-start",
+        ])
+        .assert()
+        .success();
+    let hook = direct
+        .path()
+        .join("etc/letsencrypt/renewal-hooks/deploy/sbctl-certificate-deploy-hook");
+    assert!(hook.is_file(), "Direct install writes the Certbot deploy hook");
+    let hook_text = fs::read_to_string(&hook).expect("deploy hook is readable");
+    assert!(hook_text.contains("sbctl certificate verify"));
+    assert!(hook_text.contains("set -eu"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&hook).expect("deploy hook has metadata").permissions().mode();
+        assert_eq!(mode & 0o111, 0o111, "the deploy hook is executable");
+    }
+
+    let external = supported_systemd_host();
+    write_traffic_fixture(&external, 100, 200, "boot-a");
+    let checker = sing_box_check_fixture(&external, true, &["vless"]);
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            external.path().to_str().expect("fixture path is UTF-8"),
+            "install",
+            "--mode",
+            "external-proxy",
+            "--subscription-host",
+            "sub.example.test",
+            "--interface",
+            "ens3",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+            "--sing-box-bin",
+            checker.to_str().expect("checker path is UTF-8"),
+            "--no-start",
+        ])
+        .assert()
+        .success();
+    assert!(
+        !external
+            .path()
+            .join("etc/letsencrypt/renewal-hooks/deploy/sbctl-certificate-deploy-hook")
+            .exists(),
+        "External proxy mode never installs or touches the sbctl deploy hook"
+    );
+}
+
+#[test]
+fn certificate_verify_pins_a_valid_certificate_without_exposing_the_credential() {
+    let fixture = supported_systemd_host();
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    seed_direct_config(&fixture);
+    let credential = read_subscription_credential(&fixture);
+    seed_live_certificate(&fixture, &["sub.example.test"]);
+
+    let output = Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "certificate",
+            "verify",
+        ])
+        .output()
+        .expect("verify output is captured");
+    assert!(
+        output.status.success(),
+        "a valid certificate verifies: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("valid until"));
+    assert!(stdout.contains("fingerprint:"));
+    assert!(!stdout.contains(&credential), "verify output must not expose the credential");
+
+    let pinned = fixture.path().join("var/lib/sbctl/certificates/sub.example.test");
+    assert!(pinned.join("fullchain.pem").is_file(), "the daemon copy is pinned");
+    assert!(pinned.join("privkey.pem").is_file(), "the private key copy is pinned");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(pinned.join("privkey.pem"))
+            .expect("pinned key has metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o640, "the pinned key is group-readable only");
+    }
+}
+
+#[test]
+fn certificate_verify_rejects_a_certificate_that_does_not_cover_the_host_without_exposing_the_credential() {
+    let fixture = supported_systemd_host();
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    seed_direct_config(&fixture);
+    let credential = read_subscription_credential(&fixture);
+    seed_live_certificate(&fixture, &["other.example.test"]);
+
+    let output = Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "certificate",
+            "verify",
+        ])
+        .output()
+        .expect("verify output is captured");
+    assert!(!output.status.success(), "a SAN mismatch is rejected");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("does not cover that host name"));
+    assert!(!stderr.contains(&credential), "the credential must not leak into diagnostics");
+}
+
+#[test]
+fn certificate_obtain_fails_with_a_redacted_diagnostic_when_certbot_fails() {
+    let fixture = supported_systemd_host();
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    seed_direct_config(&fixture);
+    let credential = read_subscription_credential(&fixture);
+    write_command_fixture(&fixture, "usr/bin/certbot", 1, "certbot boom\n");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "certificate",
+            "obtain",
+            "--email",
+            "admin@example.test",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("Certbot failed: certbot boom"))
+        .stderr(predicate::str::contains("certificate operation failed"))
+        .stderr(predicate::str::contains(&credential).not())
+        .stdout(predicate::str::contains(&credential).not());
+    assert!(
+        !fixture
+            .path()
+            .join("var/lib/sbctl/certificates/sub.example.test/privkey.pem")
+            .exists(),
+        "a failed obtain must not pin a certificate"
+    );
+}
+
+#[test]
+fn certificate_obtain_runs_certbot_and_pins_the_renewed_certificate() {
+    let fixture = supported_systemd_host();
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    seed_direct_config(&fixture);
+    let credential = read_subscription_credential(&fixture);
+    seed_live_certificate(&fixture, &["sub.example.test"]);
+    write_command_fixture(&fixture, "usr/bin/certbot", 0, "");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "certificate",
+            "obtain",
+            "--email",
+            "admin@example.test",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("certificate operation completed"));
+    assert!(
+        fixture
+            .path()
+            .join("var/lib/sbctl/certificates/sub.example.test/privkey.pem")
+            .is_file(),
+        "obtain pins the certificate for the daemon"
+    );
+    let _ = credential;
+}
+
+#[test]
+fn certificate_commands_refuse_non_direct_modes_without_touching_any_certificate_path() {
+    let fixture = supported_systemd_host();
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "external-proxy",
+            "--subscription-host",
+            "sub.example.test",
+            "--listen-port",
+            "2080",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "certificate",
+            "verify",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "managed only in direct subscription mode",
+        ));
+    assert!(
+        !fixture.path().join("etc/letsencrypt").exists(),
+        "External proxy mode never writes the Certificate-managed tree"
     );
 }
 

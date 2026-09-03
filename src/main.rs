@@ -267,6 +267,9 @@ enum CertificateCommand {
     },
     /// Renew certificates and safely reload the sbctl service if they changed.
     Renew,
+    /// Validate the certificate and re-pin it for the service accounts. This is
+    /// the Certbot deploy hook and the recommended post-renewal check.
+    Verify,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -883,9 +886,24 @@ fn run_certificate(root: &Path, command: CertificateCommand) -> ExitCode {
             CertificateCommand::Obtain { email } => {
                 sbctl::certificate::obtain(&store, &config, &email)
             }
-            CertificateCommand::Renew => sbctl::certificate::renew(&config),
+            CertificateCommand::Renew => sbctl::certificate::renew(&store, &config),
+            CertificateCommand::Verify => sbctl::certificate::deploy_hook(&store, &config),
         }
-        .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))
+        .map(|validated| {
+            println!(
+                "certificate for {} is valid until {}",
+                validated.host,
+                chrono::DateTime::from_timestamp(validated.not_after, 0)
+                    .map(|when| when.to_rfc3339())
+                    .unwrap_or_else(|| "unknown".to_owned())
+            );
+            println!("fingerprint: {}", validated.fingerprint);
+        })
+        .map_err(|error| {
+            sbctl::config::ConfigError::StateContent(
+                sbctl::subscription::redact_secret(&error.to_string(), &config.subscription_credential),
+            )
+        })
     });
     match result {
         Ok(()) => {
@@ -1026,6 +1044,9 @@ fn print_status_json(root: &Path) -> ExitCode {
                 .into_iter()
                 .map(|(unit, state)| (unit.to_owned(), state))
                 .collect::<std::collections::BTreeMap<_, _>>();
+            let certificate = (config.subscription_mode
+                == sbctl::config::SubscriptionMode::Direct)
+                .then(|| sbctl::certificate::status(&store, &config));
             let status = serde_json::json!({
                 "configured": true,
                 "mode": config.subscription_mode.to_string(),
@@ -1042,6 +1063,7 @@ fn print_status_json(root: &Path) -> ExitCode {
                     .collect::<Vec<_>>(),
                 "services": services,
                 "traffic": traffic,
+                "certificate": certificate,
             });
             println!(
                 "{}",

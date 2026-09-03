@@ -77,6 +77,25 @@ impl<C: Clock> Runtime<C> {
     /// Run a host command. A fixture can provide `usr/bin/<program>` under its
     /// root; live operation falls back to the system command when absent.
     pub fn run_command(&self, program: &str, args: &[&str]) -> io::Result<ExitStatus> {
+        self.command(program, args)?.status()
+    }
+
+    /// Run a host command and capture its standard output and error. Used when
+    /// a diagnostic is needed without printing secrets; the captured text is
+    /// returned separately so callers can redact or summarize it.
+    pub fn run_command_output(
+        &self,
+        program: &str,
+        args: &[&str],
+    ) -> io::Result<(ExitStatus, String)> {
+        let output = self.command(program, args)?.output()?;
+        let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+        combined.push('\n');
+        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+        Ok((output.status, combined))
+    }
+
+    fn command(&self, program: &str, args: &[&str]) -> io::Result<Command> {
         if program.is_empty()
             || Path::new(program).is_absolute()
             || Path::new(program)
@@ -99,7 +118,9 @@ impl<C: Clock> Runtime<C> {
                 format!("fixture command is missing: {program}"),
             ));
         };
-        Command::new(executable).args(args).status()
+        let mut command = Command::new(executable);
+        command.args(args);
+        Ok(command)
     }
 
     fn host_path(&self, relative: impl AsRef<Path>) -> io::Result<PathBuf> {

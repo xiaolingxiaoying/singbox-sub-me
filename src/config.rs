@@ -16,6 +16,11 @@ pub const CONFIG_RELATIVE_PATH: &str = "etc/sbctl/config.toml";
 pub const STATE_RELATIVE_PATH: &str = "var/lib/sbctl/state.json";
 const ARTIFACTS_RELATIVE_PATH: &str = "var/lib/sbctl/artifacts";
 const ACME_WEBROOT_RELATIVE_PATH: &str = "var/lib/sbctl/acme-webroot";
+/// The sbctl-owned pinned certificate copy relative to the deployment root.
+pub const CERTIFICATES_RELATIVE_PATH: &str = "var/lib/sbctl/certificates";
+/// The same directory on the live host, used by the generated sing-box
+/// configuration and the deploy hook diagnostics.
+pub const CERTIFICATES_ABSOLUTE_PATH: &str = "/var/lib/sbctl/certificates";
 const MIN_PROTOCOL_PORT: u16 = 10_000;
 const MAX_PROTOCOL_PORT: u16 = 65_535;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -1100,6 +1105,20 @@ impl DeploymentStore {
 
     pub fn acme_webroot(&self) -> PathBuf {
         self.root.join(ACME_WEBROOT_RELATIVE_PATH)
+    }
+
+    /// The sbctl-owned directory holding the pinned certificate copy for a
+    /// subscription host. Both the sbctl daemon and the sing-box data plane
+    /// read the certificate from here; the deploy hook refreshes it after each
+    /// Certbot renewal.
+    pub fn certificate_directory(&self, host: &str) -> PathBuf {
+        self.root.join(CERTIFICATES_RELATIVE_PATH).join(host)
+    }
+
+    /// The live-host path of the pinned certificate copy for a subscription
+    /// host, used when generating the sing-box server configuration.
+    pub fn certificate_directory_absolute(host: &str) -> PathBuf {
+        PathBuf::from(CERTIFICATES_ABSOLUTE_PATH).join(host)
     }
 
     pub fn write_artifact(&self, name: &str, contents: &[u8]) -> Result<(), ConfigError> {

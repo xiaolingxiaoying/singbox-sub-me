@@ -134,6 +134,8 @@ IP fallback 使用明文 HTTP，仅推荐在没有可用域名时使用，并且
 
 sbctl 直接提供 HTTPS 订阅并使用 Certbot/ACME 管理域名证书。该模式需要域名；公网 TCP `80/443` 由 systemd 的 `sbctl-http.socket` 持有，并通过 `LISTEN_FDS` 交给非 root 的 `sbctl` 服务进程按本地端口区分 HTTP-01 与 TLS 订阅。`sbctl` 与 `sing-box` 分别使用独立的无登录服务账户。
 
+证书在加载前校验有效期、SAN、私钥匹配与 SNI；安装时写入 Certbot 的 renewal deploy hook（`sbctl certificate verify`），续期后重新校验并把证书固定到 `sbctl`/`sing-box` 两个服务账户可读的私有副本，下一次 TLS 连接自动使用新证书。续期由 Debian/Ubuntu 的 `certbot.timer`（或手动 `sbctl certificate renew`）触发，首次用 `sbctl certificate obtain --email <EMAIL>` 签发。
+
 ### External proxy
 
 sbctl 只监听 loopback，由管理员维护的 Nginx、Caddy 或其他反向代理负责公网入口、TLS 和证书。sbctl 不会生成、修改或接管反向代理配置。
