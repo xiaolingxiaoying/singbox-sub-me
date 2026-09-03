@@ -13,7 +13,7 @@ use thiserror::Error;
 use x25519_dalek::{X25519_BASEPOINT_BYTES, x25519};
 
 const CONFIG_RELATIVE_PATH: &str = "etc/sbctl/config.toml";
-const STATE_RELATIVE_PATH: &str = "var/lib/sbctl/state.json";
+pub const STATE_RELATIVE_PATH: &str = "var/lib/sbctl/state.json";
 const ARTIFACTS_RELATIVE_PATH: &str = "var/lib/sbctl/artifacts";
 const ACME_WEBROOT_RELATIVE_PATH: &str = "var/lib/sbctl/acme-webroot";
 const MIN_PROTOCOL_PORT: u16 = 10_000;

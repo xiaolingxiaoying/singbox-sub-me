@@ -74,43 +74,24 @@ impl TrafficState {
         self
     }
 
-    /// The latest direction-aware correction, if one was applied.
-    fn latest_set_direction(&self) -> Option<(u64, u64)> {
-        self.corrections
-            .iter()
-            .rev()
-            .find_map(|correction| match correction {
-                CorrectionRecord::SetDirection { rx, tx, .. } => Some((*rx, *tx)),
-                CorrectionRecord::TotalAdjustment { .. } => None,
-            })
-    }
-
-    /// Apply the latest direction-aware correction: it overrides the measured
-    /// direction values when present, otherwise the measured values are reported.
-    fn apply_correction(&self, measured_rx: u64, measured_tx: u64) -> (u64, u64) {
-        match self.latest_set_direction() {
-            Some((rx, tx)) => (rx, tx),
-            None => (measured_rx, measured_tx),
-        }
-    }
-
-    /// The reported RX including the latest direction-aware correction.
+    /// The reported RX accumulated in the current period, including any
+    /// direction-aware correction reconciled into the accumulated baseline.
     pub fn reported_rx(&self) -> u64 {
-        self.apply_correction(self.accumulated_rx, self.accumulated_tx)
-            .0
+        self.accumulated_rx
     }
 
-    /// The reported TX including the latest direction-aware correction.
+    /// The reported TX accumulated in the current period, including any
+    /// direction-aware correction reconciled into the accumulated baseline.
     pub fn reported_tx(&self) -> u64 {
-        self.apply_correction(self.accumulated_rx, self.accumulated_tx)
-            .1
+        self.accumulated_tx
     }
 
     /// The live reported direction values for a read: accumulated traffic plus
     /// counter deltas since the persisted baseline. A boot ID change or counter
     /// rollback preserves the accumulated values and keeps the other direction's
-    /// valid delta. A direction-aware correction overrides the measured values.
-    /// This is a pure read and never mutates the state.
+    /// valid delta. A direction-aware correction is reconciled into the
+    /// accumulated baseline, so later counter deltas continue to accumulate on
+    /// top of the corrected value. This is a pure read and never mutates state.
     pub fn live_reported(&self, boot_id: &str, rx: u64, tx: u64) -> (u64, u64) {
         let delta_rx = if self.boot_id == boot_id && rx >= self.baseline_rx {
             rx - self.baseline_rx
@@ -122,7 +103,7 @@ impl TrafficState {
         } else {
             0
         };
-        self.apply_correction(
+        (
             self.accumulated_rx + delta_rx,
             self.accumulated_tx + delta_tx,
         )
@@ -175,6 +156,47 @@ impl TrafficReport {
     }
 }
 
+/// The administrator-authored correction requested by `sbctl traffic set-used`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CorrectionTarget {
+    /// Set the reported total VPS traffic; stored as a total-only adjustment
+    /// that never fabricates RX/TX direction values.
+    Total(u64),
+    /// Set the reported RX and TX direction values independently, reconciling
+    /// the accounting baseline so later counter deltas accumulate on top.
+    Directions { rx: u64, tx: u64 },
+}
+
+/// The change summary shown before a traffic correction is committed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CorrectionPreview {
+    pub accounting_period: String,
+    pub next_reset: DateTime<Utc>,
+    pub current_received: u64,
+    pub current_transmitted: u64,
+    pub current_total: u64,
+    pub target_received: u64,
+    pub target_transmitted: u64,
+    pub target_total: u64,
+}
+
+impl CorrectionPreview {
+    pub fn summary(&self) -> String {
+        [
+            "VPS traffic correction".to_owned(),
+            format!("accounting period: {}", self.accounting_period),
+            format!("current received: {} bytes", self.current_received),
+            format!("current transmitted: {} bytes", self.current_transmitted),
+            format!("current total: {} bytes", self.current_total),
+            format!("target received: {} bytes", self.target_received),
+            format!("target transmitted: {} bytes", self.target_transmitted),
+            format!("target total: {} bytes", self.target_total),
+            format!("next reset: {}", self.next_reset.to_rfc3339()),
+        ]
+        .join("\n")
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum TrafficError {
     #[error("could not read VPS traffic interface counters: {0}")]
@@ -193,6 +215,14 @@ pub enum TrafficError {
         "accounting state belongs to a previous period; the reset task has not run for the current period"
     )]
     StateStale,
+    #[error("traffic correction cannot apply before the first reset")]
+    PendingFirstReset,
+    #[error(
+        "total correction target {target} bytes is below the currently reported total {current} bytes"
+    )]
+    TotalTooLow { target: u64, current: u64 },
+    #[error("reported traffic would overflow a byte count: {0}")]
+    Overflow(&'static str),
 }
 
 pub fn reset(
@@ -294,6 +324,124 @@ pub fn report_with_runtime<C: crate::runtime::Clock>(
     }
     let measurements = read_measurements(runtime, &config.interface)?;
     Ok(report_from_state(config, &period, &state, &measurements))
+}
+
+pub fn set_used(
+    store: &DeploymentStore,
+    config: &DeploymentConfig,
+    target: CorrectionTarget,
+) -> Result<CorrectionPreview, TrafficError> {
+    set_used_with_runtime(store, config, &Runtime::live(store.root()), target)
+}
+
+pub fn set_used_at(
+    store: &DeploymentStore,
+    config: &DeploymentConfig,
+    now: DateTime<Utc>,
+    target: CorrectionTarget,
+) -> Result<CorrectionPreview, TrafficError> {
+    set_used_with_runtime(store, config, &Runtime::fixture(store.root(), now), target)
+}
+
+/// An explicit administrator traffic correction, one of the two authorized
+/// writers for accounting state. It shows the change summary, then commits the
+/// correction atomically under the same operation lock as the accounting reset
+/// task so a concurrent reset and correction are serialized. A total-only
+/// correction appends a total adjustment; a direction-aware correction
+/// reconciles the accumulated baseline to the requested RX/TX so later counter
+/// deltas accumulate on top. Any validation failure leaves the old state
+/// untouched.
+pub fn set_used_with_runtime<C: crate::runtime::Clock>(
+    store: &DeploymentStore,
+    config: &DeploymentConfig,
+    runtime: &Runtime<C>,
+    target: CorrectionTarget,
+) -> Result<CorrectionPreview, TrafficError> {
+    let period = accounting_period(config, runtime.now_utc())?;
+    if period.pending() {
+        return Err(TrafficError::PendingFirstReset);
+    }
+    let _lock = store
+        .acquire_operation_lock()
+        .map_err(TrafficError::Storage)?;
+    let prior = store.read_state()?.ok_or(TrafficError::StateMissing)?;
+    let state = decode_state(&prior).map_err(TrafficError::Storage)?;
+    if state.cycle_key != period.cycle_key() || state.interface != config.interface {
+        return Err(TrafficError::StateStale);
+    }
+    let measurements = read_measurements(runtime, &config.interface)?;
+    let plan = plan_correction(&state, &period, &measurements, runtime.now_utc(), target)?;
+    println!("{}", plan.preview.summary());
+    let contents = serde_json::to_vec(&plan.state)
+        .map_err(|error| ConfigError::StateContent(error.to_string()))?;
+    store.write_relative_locked(crate::config::STATE_RELATIVE_PATH, &contents)?;
+    Ok(plan.preview)
+}
+
+struct CorrectionPlan {
+    state: TrafficState,
+    preview: CorrectionPreview,
+}
+
+fn plan_correction(
+    state: &TrafficState,
+    period: &AccountingPeriod,
+    measurements: &Measurements,
+    now: DateTime<Utc>,
+    target: CorrectionTarget,
+) -> Result<CorrectionPlan, TrafficError> {
+    let (current_received, current_transmitted) =
+        state.live_reported(&measurements.boot_id, measurements.rx, measurements.tx);
+    let current_total = current_received
+        .checked_add(current_transmitted)
+        .and_then(|total| total.checked_add(state.total_adjustment()))
+        .ok_or(TrafficError::Overflow("current reported total"))?;
+    let mut corrected = state.clone();
+    let (target_received, target_transmitted, target_total) = match target {
+        CorrectionTarget::Total(total) => {
+            if total < current_total {
+                return Err(TrafficError::TotalTooLow {
+                    target: total,
+                    current: current_total,
+                });
+            }
+            corrected
+                .corrections
+                .push(CorrectionRecord::TotalAdjustment {
+                    bytes: total - current_total,
+                    at: now,
+                });
+            (current_received, current_transmitted, total)
+        }
+        CorrectionTarget::Directions { rx, tx } => {
+            corrected.accumulated_rx = rx;
+            corrected.accumulated_tx = tx;
+            corrected.baseline_rx = measurements.rx;
+            corrected.baseline_tx = measurements.tx;
+            corrected.boot_id = measurements.boot_id.clone();
+            corrected
+                .corrections
+                .push(CorrectionRecord::SetDirection { rx, tx, at: now });
+            let target_total = rx
+                .checked_add(tx)
+                .and_then(|total| total.checked_add(corrected.total_adjustment()))
+                .ok_or(TrafficError::Overflow("target reported total"))?;
+            (rx, tx, target_total)
+        }
+    };
+    Ok(CorrectionPlan {
+        state: corrected,
+        preview: CorrectionPreview {
+            accounting_period: period.identity().to_owned(),
+            next_reset: period.next_reset,
+            current_received,
+            current_transmitted,
+            current_total,
+            target_received,
+            target_transmitted,
+            target_total,
+        },
+    })
 }
 
 fn pending_report(config: &DeploymentConfig, period: &AccountingPeriod) -> TrafficReport {
@@ -578,7 +726,8 @@ mod tests {
     };
 
     use super::{
-        CorrectionRecord, TrafficState, accounting_period, report_at, reset_at, reset_with_runtime,
+        CorrectionRecord, CorrectionTarget, TrafficState, accounting_period, report_at, reset_at,
+        reset_with_runtime, set_used_at,
     };
     use crate::runtime::Runtime;
 
@@ -787,20 +936,24 @@ mod tests {
         let mut state = TrafficState::new("2024-02-01", "ens3", "boot-a", 100, 200)
             .accumulate("boot-a", 130, 260);
 
-        state.corrections.push(CorrectionRecord::SetDirection {
-            rx: 50,
-            tx: 60,
-            at: when,
-        });
-        assert_eq!((state.reported_rx(), state.reported_tx()), (50, 60));
-        assert_eq!(state.total_adjustment(), 0);
-
         state.corrections.push(CorrectionRecord::TotalAdjustment {
             bytes: 700,
             at: when,
         });
         assert_eq!(state.total_adjustment(), 700);
-        assert_eq!((state.reported_rx(), state.reported_tx()), (50, 60));
+        assert_eq!((state.reported_rx(), state.reported_tx()), (30, 60));
+
+        state.corrections.push(CorrectionRecord::SetDirection {
+            rx: 50,
+            tx: 60,
+            at: when,
+        });
+        assert_eq!(state.total_adjustment(), 700);
+        assert_eq!(
+            (state.reported_rx(), state.reported_tx()),
+            (30, 60),
+            "a direction record is audit history; the correction itself reconciles the accumulated baseline"
+        );
     }
 
     #[test]
@@ -962,5 +1115,405 @@ mod tests {
         let boot_path = fixture.path().join("proc/sys/kernel/random/boot_id");
         fs::create_dir_all(boot_path.parent().unwrap()).unwrap();
         fs::write(boot_path, boot_id).unwrap();
+    }
+
+    #[test]
+    fn total_correction_changes_the_total_without_direction_values() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let config = config();
+        let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+        reset_at(&store, &config, now).unwrap();
+        write_interface_fixture(&fixture, 130, 260, "boot-a");
+        reset_at(&store, &config, now).unwrap();
+        assert_eq!(report_at(&store, &config, now).unwrap().total(), 90);
+
+        let preview = set_used_at(&store, &config, now, CorrectionTarget::Total(1000)).unwrap();
+
+        assert_eq!(
+            (preview.current_received, preview.current_transmitted),
+            (30, 60)
+        );
+        assert_eq!(preview.current_total, 90);
+        assert_eq!(preview.target_total, 1000);
+        assert_eq!(
+            (preview.target_received, preview.target_transmitted),
+            (30, 60)
+        );
+        let report = report_at(&store, &config, now).unwrap();
+        assert_eq!(report.total(), 1000);
+        assert_eq!((report.received, report.transmitted), (30, 60));
+    }
+
+    #[test]
+    fn total_correction_keeps_accumulating_future_counter_deltas_on_top_of_the_target() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let config = config();
+        let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+        reset_at(&store, &config, now).unwrap();
+        set_used_at(&store, &config, now, CorrectionTarget::Total(500)).unwrap();
+        assert_eq!(report_at(&store, &config, now).unwrap().total(), 500);
+
+        write_interface_fixture(&fixture, 104, 205, "boot-a");
+        let report = report_at(&store, &config, now).unwrap();
+
+        assert_eq!(report.total(), 509);
+        assert_eq!((report.received, report.transmitted), (4, 5));
+    }
+
+    #[test]
+    fn repeated_total_corrections_compute_each_delta_against_the_current_total() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let config = config();
+        let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+        reset_at(&store, &config, now).unwrap();
+        set_used_at(&store, &config, now, CorrectionTarget::Total(500)).unwrap();
+        assert_eq!(report_at(&store, &config, now).unwrap().total(), 500);
+
+        set_used_at(&store, &config, now, CorrectionTarget::Total(600)).unwrap();
+        assert_eq!(report_at(&store, &config, now).unwrap().total(), 600);
+
+        let persisted: TrafficState = serde_json::from_str(
+            &fs::read_to_string(fixture.path().join("var/lib/sbctl/state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted.total_adjustment(), 600);
+    }
+
+    #[test]
+    fn total_correction_below_the_current_total_is_rejected_without_writing() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let config = config();
+        let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+        reset_at(&store, &config, now).unwrap();
+        write_interface_fixture(&fixture, 130, 260, "boot-a");
+        reset_at(&store, &config, now).unwrap();
+        let before = fs::read(fixture.path().join("var/lib/sbctl/state.json")).unwrap();
+
+        let error = set_used_at(&store, &config, now, CorrectionTarget::Total(50)).unwrap_err();
+
+        assert!(matches!(error, super::TrafficError::TotalTooLow { .. }));
+        assert_eq!(
+            fs::read(fixture.path().join("var/lib/sbctl/state.json")).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn direction_correction_sets_values_and_accumulates_future_deltas_without_touching_counters() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let config = config();
+        let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+        reset_at(&store, &config, now).unwrap();
+        let counters_before = (
+            fs::read_to_string(
+                fixture
+                    .path()
+                    .join("sys/class/net/ens3/statistics/rx_bytes"),
+            )
+            .unwrap(),
+            fs::read_to_string(
+                fixture
+                    .path()
+                    .join("sys/class/net/ens3/statistics/tx_bytes"),
+            )
+            .unwrap(),
+        );
+
+        let preview = set_used_at(
+            &store,
+            &config,
+            now,
+            CorrectionTarget::Directions { rx: 500, tx: 300 },
+        )
+        .unwrap();
+
+        assert_eq!(
+            (preview.target_received, preview.target_transmitted),
+            (500, 300)
+        );
+        assert_eq!(preview.target_total, 800);
+        let report = report_at(&store, &config, now).unwrap();
+        assert_eq!((report.received, report.transmitted), (500, 300));
+        assert_eq!(report.total(), 800);
+
+        assert_eq!(
+            fs::read_to_string(
+                fixture
+                    .path()
+                    .join("sys/class/net/ens3/statistics/rx_bytes"),
+            )
+            .unwrap(),
+            counters_before.0,
+            "a correction must not modify the real sysfs counter"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                fixture
+                    .path()
+                    .join("sys/class/net/ens3/statistics/tx_bytes"),
+            )
+            .unwrap(),
+            counters_before.1
+        );
+
+        write_interface_fixture(&fixture, 104, 205, "boot-a");
+        let report = report_at(&store, &config, now).unwrap();
+        assert_eq!((report.received, report.transmitted), (504, 305));
+        assert_eq!(report.total(), 809);
+    }
+
+    #[test]
+    fn direction_correction_can_reduce_reported_values() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let config = config();
+        let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+        reset_at(&store, &config, now).unwrap();
+        write_interface_fixture(&fixture, 130, 260, "boot-a");
+        reset_at(&store, &config, now).unwrap();
+        assert_eq!(report_at(&store, &config, now).unwrap().total(), 90);
+
+        set_used_at(
+            &store,
+            &config,
+            now,
+            CorrectionTarget::Directions { rx: 40, tx: 20 },
+        )
+        .unwrap();
+
+        let report = report_at(&store, &config, now).unwrap();
+        assert_eq!((report.received, report.transmitted), (40, 20));
+        assert_eq!(report.total(), 60);
+    }
+
+    #[test]
+    fn direction_correction_after_a_reboot_accumulates_deltas_before_the_next_reset() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let config = config();
+        let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+        reset_at(&store, &config, now).unwrap();
+
+        write_interface_fixture(&fixture, 0, 0, "boot-b");
+        set_used_at(
+            &store,
+            &config,
+            now,
+            CorrectionTarget::Directions { rx: 600, tx: 400 },
+        )
+        .unwrap();
+
+        write_interface_fixture(&fixture, 5, 7, "boot-b");
+        let report = report_at(&store, &config, now).unwrap();
+
+        assert_eq!(
+            (report.received, report.transmitted),
+            (605, 407),
+            "deltas since the correction-time counter accumulate even before the reset task runs"
+        );
+    }
+
+    #[test]
+    fn direction_correction_preserves_the_set_values_across_a_counter_rollback() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let config = config();
+        let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+        reset_at(&store, &config, now).unwrap();
+        set_used_at(
+            &store,
+            &config,
+            now,
+            CorrectionTarget::Directions { rx: 500, tx: 300 },
+        )
+        .unwrap();
+
+        write_interface_fixture(&fixture, 4, 9, "boot-b");
+        reset_at(&store, &config, now).unwrap();
+        let report = report_at(&store, &config, now).unwrap();
+        assert_eq!((report.received, report.transmitted), (500, 300));
+
+        write_interface_fixture(&fixture, 10, 20, "boot-b");
+        let report = report_at(&store, &config, now).unwrap();
+        assert_eq!((report.received, report.transmitted), (506, 311));
+    }
+
+    #[test]
+    fn direction_correction_rejects_an_overflowing_rx_tx_total() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let config = config();
+        let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+        reset_at(&store, &config, now).unwrap();
+        let before = fs::read(fixture.path().join("var/lib/sbctl/state.json")).unwrap();
+
+        let error = set_used_at(
+            &store,
+            &config,
+            now,
+            CorrectionTarget::Directions {
+                rx: u64::MAX,
+                tx: 1,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, super::TrafficError::Overflow(_)));
+        assert_eq!(
+            fs::read(fixture.path().join("var/lib/sbctl/state.json")).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn correction_rejects_missing_state_without_creating_it() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let config = config();
+        let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+
+        let error = set_used_at(&store, &config, now, CorrectionTarget::Total(500)).unwrap_err();
+
+        assert!(matches!(error, super::TrafficError::StateMissing));
+        assert!(!fixture.path().join("var/lib/sbctl/state.json").exists());
+    }
+
+    #[test]
+    fn correction_rejects_corrupted_state_without_overwriting_it() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let config = config();
+        let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+        store.write_state(b"not json").unwrap();
+
+        let error = set_used_at(&store, &config, now, CorrectionTarget::Total(500)).unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::TrafficError::Storage(ConfigError::StateCorrupt(_))
+        ));
+        assert_eq!(
+            fs::read(fixture.path().join("var/lib/sbctl/state.json")).unwrap(),
+            b"not json"
+        );
+    }
+
+    #[test]
+    fn correction_rejects_state_belonging_to_a_previous_period() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let config = config();
+        let january = Utc.with_ymd_and_hms(2024, 1, 20, 0, 0, 0).unwrap();
+        let february = Utc.with_ymd_and_hms(2024, 2, 5, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+        reset_at(&store, &config, january).unwrap();
+
+        let error =
+            set_used_at(&store, &config, february, CorrectionTarget::Total(500)).unwrap_err();
+
+        assert!(matches!(error, super::TrafficError::StateStale));
+    }
+
+    #[test]
+    fn correction_is_rejected_before_the_first_reset() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let mut config = config();
+        config.accounting_policy = AccountingPolicy::AnchoredMonth;
+        config.anchored_reset_at = Some("2024-06-15T12:00".into());
+        let now = Utc.with_ymd_and_hms(2024, 5, 1, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+
+        let error = set_used_at(&store, &config, now, CorrectionTarget::Total(500)).unwrap_err();
+
+        assert!(matches!(error, super::TrafficError::PendingFirstReset));
+        assert!(!fixture.path().join("var/lib/sbctl/state.json").exists());
+    }
+
+    #[test]
+    fn concurrent_corrections_serialize_on_the_operation_lock() {
+        use std::sync::Arc;
+
+        let fixture = TempDir::new().unwrap();
+        let store = Arc::new(DeploymentStore::new(fixture.path()));
+        let config = config();
+        let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+        reset_at(&store, &config, now).unwrap();
+
+        std::thread::scope(|scope| {
+            for _ in 0..10 {
+                let store = Arc::clone(&store);
+                let thread_config = config.clone();
+                scope.spawn(move || {
+                    set_used_at(&store, &thread_config, now, CorrectionTarget::Total(1000))
+                        .unwrap();
+                });
+            }
+        });
+
+        let report = report_at(&store, &config, now).unwrap();
+        assert_eq!(
+            report.total(),
+            1000,
+            "each correction recomputes its delta against the latest committed total under the lock"
+        );
+    }
+
+    #[test]
+    fn correction_applies_under_the_same_lock_as_the_reset_task() {
+        use std::sync::Arc;
+
+        let fixture = TempDir::new().unwrap();
+        let store = Arc::new(DeploymentStore::new(fixture.path()));
+        let config = config();
+        let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+        reset_at(&store, &config, now).unwrap();
+
+        std::thread::scope(|scope| {
+            for _ in 0..5 {
+                let thread_store = Arc::clone(&store);
+                let thread_config = config.clone();
+                scope.spawn(move || {
+                    reset_at(&thread_store, &thread_config, now).unwrap();
+                });
+                let thread_store = Arc::clone(&store);
+                let thread_config = config.clone();
+                scope.spawn(move || {
+                    set_used_at(
+                        &thread_store,
+                        &thread_config,
+                        now,
+                        CorrectionTarget::Total(500),
+                    )
+                    .unwrap();
+                });
+            }
+        });
+
+        let persisted: TrafficState = serde_json::from_str(
+            &fs::read_to_string(fixture.path().join("var/lib/sbctl/state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted.total_adjustment(), 500);
+        let report = report_at(&store, &config, now).unwrap();
+        assert_eq!(report.total(), 500);
     }
 }

@@ -58,8 +58,11 @@ enum Command {
     Menu,
     /// Show whether sbctl currently manages a deployment.
     Status,
-    /// Reconcile and show VPS traffic for the current accounting period.
-    Traffic,
+    /// Reconcile and show VPS traffic, or apply an explicit traffic correction.
+    Traffic {
+        #[command(subcommand)]
+        command: Option<TrafficCommand>,
+    },
     /// List the generated Managed protocol listeners without exposing credentials.
     Node,
     /// Validate the active sing-box configuration and restart both managed services.
@@ -200,6 +203,30 @@ enum ConfigCommand {
     Show,
     /// Parse and validate the persisted deployment configuration.
     Validate,
+}
+
+#[derive(Debug, Subcommand)]
+enum TrafficCommand {
+    /// Show the current accounting period's VPS traffic.
+    Show,
+    /// Set the reported VPS traffic for the current accounting period.
+    #[command(group(
+        clap::ArgGroup::new("correction")
+            .required(true)
+            .multiple(true)
+            .args(["bytes", "rx", "tx"])
+    ))]
+    SetUsed {
+        /// Target reported total VPS traffic in bytes; only increases the total.
+        #[arg(long, value_name = "TOTAL", conflicts_with_all = ["rx", "tx"])]
+        bytes: Option<u64>,
+        /// Target reported received bytes; requires --tx.
+        #[arg(long, value_name = "BYTES", requires = "tx", conflicts_with = "bytes")]
+        rx: Option<u64>,
+        /// Target reported transmitted bytes; requires --rx.
+        #[arg(long, value_name = "BYTES", requires = "rx", conflicts_with = "bytes")]
+        tx: Option<u64>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -350,7 +377,12 @@ fn main() -> ExitCode {
         ),
         Command::Menu => menu(root),
         Command::Status => print_status(root),
-        Command::Traffic => print_traffic(root),
+        Command::Traffic { command } => match command {
+            None | Some(TrafficCommand::Show) => print_traffic(root),
+            Some(TrafficCommand::SetUsed { bytes, rx, tx }) => {
+                traffic_set_used(root, bytes, rx, tx)
+            }
+        },
         Command::Node => print_nodes(root),
         Command::Restart { sing_box_bin } => restart(root, sing_box_bin),
         Command::Uninstall { purge } => uninstall(root, purge),
@@ -938,6 +970,31 @@ fn print_traffic(root: &Path) -> ExitCode {
         }
         Err(error) => {
             eprintln!("traffic failed: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn traffic_set_used(root: &Path, bytes: Option<u64>, rx: Option<u64>, tx: Option<u64>) -> ExitCode {
+    let target = if let Some(bytes) = bytes {
+        sbctl::traffic::CorrectionTarget::Total(bytes)
+    } else {
+        sbctl::traffic::CorrectionTarget::Directions {
+            rx: rx.expect("validated: --rx requires --tx"),
+            tx: tx.expect("validated: --tx requires --rx"),
+        }
+    };
+    let store = sbctl::config::DeploymentStore::new(root);
+    let result = match store.load() {
+        Ok(config) => {
+            sbctl::traffic::set_used(&store, &config, target).map_err(|error| error.to_string())
+        }
+        Err(error) => Err(error.to_string()),
+    };
+    match result {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("traffic correction failed: {error}");
             ExitCode::from(2)
         }
     }

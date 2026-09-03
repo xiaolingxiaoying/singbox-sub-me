@@ -73,6 +73,36 @@ done
 query_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2080/sub/$credential/uri?credential=$credential")
 test "$query_status" = 404 || fail 'query-string credential was accepted'
 
+# Explicit traffic corrections are administrator-authorized writers: they show a
+# summary, never touch the sysfs counters, and reject invalid targets.
+fixture_root_for correction "$platform"
+"$sbctl" --root "$root" config init --mode ip-fallback --subscription-host 127.0.0.1 --http-port 2086 --interface ens3 --protocol vless-reality --reality-decoy-sni www.cloudflare.com
+"$sbctl" --root "$root" accounting-reset >/dev/null
+printf '130\n' > "$root/sys/class/net/ens3/statistics/rx_bytes"
+printf '260\n' > "$root/sys/class/net/ens3/statistics/tx_bytes"
+"$sbctl" --root "$root" accounting-reset >/dev/null
+summary=$("$sbctl" --root "$root" traffic set-used --bytes 5000)
+contains "$summary" 'accounting period:'
+contains "$summary" 'current total: 90 bytes'
+contains "$summary" 'target received: 30 bytes'
+contains "$summary" 'target transmitted: 60 bytes'
+contains "$summary" 'target total: 5000 bytes'
+contains "$("$sbctl" --root "$root" traffic)" 'total: 5000 bytes'
+printf '134\n' > "$root/sys/class/net/ens3/statistics/rx_bytes"
+printf '265\n' > "$root/sys/class/net/ens3/statistics/tx_bytes"
+contains "$("$sbctl" --root "$root" traffic)" 'total: 5009 bytes'
+"$sbctl" --root "$root" traffic set-used --rx 500 --tx 300 >/dev/null
+contains "$("$sbctl" --root "$root" traffic)" 'received: 500 bytes'
+contains "$("$sbctl" --root "$root" traffic)" 'transmitted: 300 bytes'
+test "$(cat "$root/sys/class/net/ens3/statistics/rx_bytes")" = 134 || fail 'direction correction modified the sysfs counter'
+test "$(cat "$root/sys/class/net/ens3/statistics/tx_bytes")" = 265 || fail 'direction correction modified the sysfs counter'
+if "$sbctl" --root "$root" traffic set-used --bytes 100 >/dev/null 2>&1; then
+  fail 'total correction below the current total was accepted'
+fi
+if "$sbctl" --root "$root" traffic set-used --bytes 100 --rx 5 >/dev/null 2>&1; then
+  fail 'conflicting traffic correction arguments were accepted'
+fi
+
 # Anchored-month before its first reset is a valid pending state; DST collisions are rejected.
 fixture_root_for anchored "$platform"
 if "$sbctl" --root "$root" config init --mode ip-fallback --subscription-host 127.0.0.1 --http-port 2084 --interface ens3 --protocol vless-reality --reality-decoy-sni www.cloudflare.com --accounting-policy anchored-month --accounting-timezone America/New_York --anchored-reset-at 2024-03-10T02:30 >"$work/dst.out" 2>&1; then

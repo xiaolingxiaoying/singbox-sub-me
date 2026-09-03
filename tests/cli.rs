@@ -1448,6 +1448,243 @@ fn traffic_and_status_reads_do_not_write_accounting_state() {
     assert_eq!(snapshot(), before, "reads must not change accounting state");
 }
 
+fn initialize_traffic_fixture(fixture: &TempDir) {
+    write_traffic_fixture(fixture, 100, 200, "boot-a");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "203.0.113.7",
+            "--http-port",
+            "2080",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+}
+
+fn run_traffic_set_used(fixture: &TempDir, args: &[&str]) -> assert_cmd::assert::Assert {
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "traffic",
+            "set-used",
+        ])
+        .args(args)
+        .assert()
+}
+
+#[test]
+fn traffic_set_used_bytes_changes_the_total_without_direction_values() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    initialize_traffic_fixture(&fixture);
+    let root = fixture.path().to_str().expect("fixture path is UTF-8");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(["--root", root, "accounting-reset"])
+        .assert()
+        .success();
+    write_traffic_fixture(&fixture, 130, 260, "boot-a");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(["--root", root, "accounting-reset"])
+        .assert()
+        .success();
+
+    run_traffic_set_used(&fixture, &["--bytes", "1000"])
+        .success()
+        .stdout(predicate::str::contains("accounting period:"))
+        .stdout(predicate::str::contains("current received: 30 bytes"))
+        .stdout(predicate::str::contains("current transmitted: 60 bytes"))
+        .stdout(predicate::str::contains("current total: 90 bytes"))
+        .stdout(predicate::str::contains("target received: 30 bytes"))
+        .stdout(predicate::str::contains("target transmitted: 60 bytes"))
+        .stdout(predicate::str::contains("target total: 1000 bytes"))
+        .stdout(predicate::str::contains("next reset:"));
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(["--root", root, "traffic"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("received: 30 bytes"))
+        .stdout(predicate::str::contains("transmitted: 60 bytes"))
+        .stdout(predicate::str::contains("total: 1000 bytes"));
+
+    write_traffic_fixture(&fixture, 134, 265, "boot-a");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(["--root", root, "traffic"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("total: 1009 bytes"));
+}
+
+#[test]
+fn traffic_set_used_rx_tx_sets_direction_values_without_modifying_counters() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    initialize_traffic_fixture(&fixture);
+    let root = fixture.path().to_str().expect("fixture path is UTF-8");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(["--root", root, "accounting-reset"])
+        .assert()
+        .success();
+
+    run_traffic_set_used(&fixture, &["--rx", "500", "--tx", "300"])
+        .success()
+        .stdout(predicate::str::contains("target received: 500 bytes"))
+        .stdout(predicate::str::contains("target transmitted: 300 bytes"))
+        .stdout(predicate::str::contains("target total: 800 bytes"));
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(["--root", root, "traffic"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("received: 500 bytes"))
+        .stdout(predicate::str::contains("transmitted: 300 bytes"))
+        .stdout(predicate::str::contains("total: 800 bytes"));
+
+    assert_eq!(
+        fs::read_to_string(
+            fixture
+                .path()
+                .join("sys/class/net/ens3/statistics/rx_bytes")
+        )
+        .expect("sysfs RX counter remains readable"),
+        "100"
+    );
+    assert_eq!(
+        fs::read_to_string(
+            fixture
+                .path()
+                .join("sys/class/net/ens3/statistics/tx_bytes")
+        )
+        .expect("sysfs TX counter remains readable"),
+        "200"
+    );
+}
+
+#[test]
+fn traffic_set_used_rejects_invalid_arguments_without_writing() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    initialize_traffic_fixture(&fixture);
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "accounting-reset",
+        ])
+        .assert()
+        .success();
+    let state_path = fixture.path().join("var/lib/sbctl/state.json");
+    let before = fs::read(&state_path).expect("state is established");
+
+    run_traffic_set_used(&fixture, &["--bytes", "100", "--rx", "5"])
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
+    run_traffic_set_used(&fixture, &["--rx", "5"])
+        .code(2)
+        .stderr(predicate::str::contains("--tx"));
+    run_traffic_set_used(&fixture, &["--tx", "5"])
+        .code(2)
+        .stderr(predicate::str::contains("--rx"));
+    run_traffic_set_used(&fixture, &["--bytes", "-5"])
+        .code(2)
+        .stderr(predicate::str::contains("unexpected argument"));
+    run_traffic_set_used(&fixture, &[])
+        .code(2)
+        .stderr(predicate::str::contains(
+            "required arguments were not provided",
+        ));
+
+    assert_eq!(
+        fs::read(&state_path).expect("state remains readable"),
+        before,
+        "argument validation must not write accounting state"
+    );
+}
+
+#[test]
+fn traffic_set_used_rejects_corrupted_state_without_overwriting_it() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    initialize_traffic_fixture(&fixture);
+    let state_path = fixture.path().join("var/lib/sbctl/state.json");
+    fs::create_dir_all(state_path.parent().expect("state has a parent"))
+        .expect("state directory is created");
+    fs::write(&state_path, b"not json").expect("corrupted state is written");
+
+    run_traffic_set_used(&fixture, &["--bytes", "1000"])
+        .code(2)
+        .stderr(predicate::str::contains("state is corrupted"));
+
+    assert_eq!(
+        fs::read(&state_path).expect("corrupted state remains readable"),
+        b"not json"
+    );
+}
+
+#[test]
+fn traffic_set_used_rejects_a_target_below_the_current_total() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    initialize_traffic_fixture(&fixture);
+    let root = fixture.path().to_str().expect("fixture path is UTF-8");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(["--root", root, "accounting-reset"])
+        .assert()
+        .success();
+    write_traffic_fixture(&fixture, 130, 260, "boot-a");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(["--root", root, "accounting-reset"])
+        .assert()
+        .success();
+    let state_path = fixture.path().join("var/lib/sbctl/state.json");
+    let before = fs::read(&state_path).expect("state is established");
+
+    run_traffic_set_used(&fixture, &["--bytes", "50"])
+        .code(2)
+        .stderr(predicate::str::contains(
+            "below the currently reported total",
+        ));
+
+    assert_eq!(
+        fs::read(&state_path).expect("state remains readable"),
+        before,
+        "a rejected correction must not change accounting state"
+    );
+}
+
+#[test]
+fn traffic_set_used_requires_established_state() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    initialize_traffic_fixture(&fixture);
+
+    run_traffic_set_used(&fixture, &["--bytes", "1000"])
+        .code(2)
+        .stderr(predicate::str::contains(
+            "accounting state has not been established",
+        ));
+    assert!(!fixture.path().join("var/lib/sbctl/state.json").exists());
+}
+
 #[test]
 fn traffic_without_established_state_is_a_diagnosable_error() {
     let fixture = TempDir::new().expect("temporary root is created");
