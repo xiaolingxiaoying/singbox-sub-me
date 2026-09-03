@@ -25,12 +25,36 @@ An accounting-period policy that begins a new period on the first day of every c
 _Avoid_: Rolling month, anchored reset
 
 **Anchored-month reset**:
-An accounting-period policy that begins a new period at the configured day and time every month in the selected accounting timezone. If that day does not exist in a short month, the reset occurs on that month's last day.
+An accounting-period policy that begins its first period at a configured date and time, then begins a new period at the same day and time each month in the selected accounting timezone. If that day does not exist in a short month, the reset occurs on that month's last day.
 _Avoid_: Natural-month reset, rolling month
 
-**System-timezone accounting**:
-An accounting-period policy that interprets reset times using the VPS's configured operating-system timezone. The administrator may choose a common named timezone during setup without changing the host timezone.
-_Avoid_: UTC-only accounting, browser-local time
+**Accounting timezone**:
+The named IANA timezone used to interpret accounting-period reset dates and times. It belongs to the sbctl deployment and does not change the VPS operating-system timezone.
+_Avoid_: System-timezone accounting, browser-local time
+
+**First reset instant**:
+The administrator-selected date and local time at which an Anchored-month reset schedule first becomes active. Before this instant, the deployment has no active anchored accounting period.
+_Avoid_: Installation time, billing start
+
+**Accounting reset**:
+The transition from one Accounting period to the next, including establishing a new network-counter baseline. It is independent from rebuilding or serving a Subscription format.
+_Avoid_: Subscription refresh, traffic deletion
+
+**Pending first reset**:
+The valid pre-period state of an Anchored-month reset before its First reset instant. It reports zero VPS traffic for the not-yet-started period and exposes the first reset instant as the next reset.
+_Avoid_: Broken accounting, missing period
+
+**Traffic correction**:
+An administrator-authored adjustment to the current Accounting period's reported VPS traffic when the measured amount is known to be wrong. A total-only correction does not invent RX/TX direction values.
+_Avoid_: Data-plane limit, per-user traffic
+
+**Total traffic adjustment**:
+A correction applied only to the reported total VPS traffic without changing the measured RX or TX direction values. It is distinct from a direction-aware Traffic correction.
+_Avoid_: Fake RX/TX, bandwidth limit
+
+**Accounting state writer**:
+One of the explicitly authorized operations that may persist accounting state: the periodic Accounting reset task or an administrator's Traffic correction command.
+_Avoid_: Subscription request, status read
 
 **Subscription format**:
 One of the generated client-consumable representations of the same node set: sing-box JSON, Clash/Mihomo YAML, or URI text for Shadowrocket-compatible clients. The first release keeps all three formats and must cover the sing-box JSON and Clash Meta YAML compatibility expected by `vps-sub-meter`.
@@ -75,3 +99,31 @@ _Avoid_: Script compatibility, migration
 **Existing deployment**:
 Any sing-box binary, service, or configuration discovered before sbctl is installed. sbctl never silently replaces or adopts an existing deployment.
 _Avoid_: Managed deployment, migration
+
+**Development host**:
+The WSL2 Ubuntu 22.04 environment used for compilation, unit tests, and simulated CLI checks. It is not evidence that a production systemd VPS installation is supported.
+_Avoid_: Production host, deployment host
+
+**Production host**:
+A supported Debian or Ubuntu machine with a real systemd boot/runtime environment where service lifecycle, privileged port ownership, networking, and certificate automation are verified.
+_Avoid_: WSL2 host, test fixture
+
+**Direct HTTPS ownership**:
+The deployment boundary in which sbctl owns public TCP ports 80 and 443, using a non-root service with only the narrowly required privileged-port capability or systemd socket activation.
+_Avoid_: Root HTTPS daemon, shared public port
+
+**Authenticated release manifest**:
+A fixed-version manifest whose publisher authenticity is verified by a release signature before its artifact hashes and URLs are trusted. Its canonical signed payload and schema are part of the release contract.
+_Avoid_: Unsigned manifest, latest manifest
+
+**Socket-activated HTTPS service**:
+A Direct HTTPS service whose TCP 80 and 443 listeners are opened and owned by systemd, then passed to a non-root sbctl process.
+_Avoid_: Root-bound HTTPS service, capability-first binding
+
+**Release gate**:
+A condition that must pass before a version may be published, including real systemd installation, non-root service startup, authenticated manifest verification, and failure recovery.
+_Avoid_: Best-effort test, unit-test-only release
+
+**Subscription request failure**:
+An externally observable response for an invalid route or credential that reveals no authorization detail, while internal storage, traffic, or certificate failures are separately diagnosed through redacted service logs.
+_Avoid_: Credential error leak, silent 404 for every failure

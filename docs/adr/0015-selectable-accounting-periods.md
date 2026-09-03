@@ -1,0 +1,5 @@
+# Selectable accounting periods with timezone-local reset schedules
+
+sbctl supports both Natural-month reset and Anchored-month reset. An administrator may select an IANA Accounting timezone; an Anchored-month reset includes a First reset instant in `YYYY-MM-DD HH:MM` local time and repeats monthly at the same day and time, clamping to the last day in short months. Accounting reset is maintained independently from subscription serving, with a persistent periodic task and read-time safety reconciliation, while VPS traffic remains the configured interface's RX+TX and the monthly limit remains reporting-only in the first release.
+
+This preserves the useful configurability of `vps-sub-meter` without changing the host timezone or coupling subscription requests to state mutation. The implementation must distinguish the first anchored period from later monthly periods, persist the schedule and state schema, handle reboot/counter rollback/missed timer execution, and keep subscription responses read-only.
