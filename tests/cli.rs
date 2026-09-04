@@ -4882,3 +4882,67 @@ fn config_wizard_output_does_not_leak_credentials() {
     }
     assert!(stdout.contains("subscription credential: [redacted]"));
 }
+
+#[test]
+fn system_status_reports_the_kernel_congestion_control_from_the_fixture() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let cc = fixture
+        .path()
+        .join("proc/sys/net/ipv4/tcp_congestion_control");
+    let qdisc = fixture.path().join("proc/sys/net/core/default_qdisc");
+    fs::create_dir_all(cc.parent().expect("congestion control has a parent")).unwrap();
+    fs::create_dir_all(qdisc.parent().expect("qdisc has a parent")).unwrap();
+    fs::write(&cc, "cubic\n").unwrap();
+    fs::write(&qdisc, "fq_codel\n").unwrap();
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "system",
+            "status",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("tcp_congestion_control=cubic"))
+        .stdout(predicate::str::contains("default_qdisc=fq_codel"));
+}
+
+#[test]
+fn system_bbr_applies_and_persists_the_drop_in_without_touching_sing_box() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let cc = fixture
+        .path()
+        .join("proc/sys/net/ipv4/tcp_congestion_control");
+    let qdisc = fixture.path().join("proc/sys/net/core/default_qdisc");
+    fs::create_dir_all(cc.parent().expect("congestion control has a parent")).unwrap();
+    fs::create_dir_all(qdisc.parent().expect("qdisc has a parent")).unwrap();
+    fs::write(&cc, "cubic\n").unwrap();
+    fs::write(&qdisc, "fq_codel\n").unwrap();
+    let sysctl = fixture.path().join("usr/bin/sysctl");
+    fs::create_dir_all(sysctl.parent().expect("sysctl has a parent")).unwrap();
+    fs::write(&sysctl, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&sysctl, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "system",
+            "bbr",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("tcp_congestion_control=bbr"));
+
+    let drop_in = fs::read_to_string(fixture.path().join("etc/sysctl.d/99-sbctl-bbr.conf"))
+        .expect("the sysctl drop-in is persisted");
+    assert!(drop_in.contains("net.ipv4.tcp_congestion_control=bbr"));
+    assert!(drop_in.contains("net.core.default_qdisc=fq"));
+}

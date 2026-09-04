@@ -8,6 +8,7 @@ pub mod release;
 pub mod runtime;
 pub mod socket_activation;
 pub mod subscription;
+pub mod system;
 pub mod term;
 pub mod traffic;
 pub mod update;

@@ -153,6 +153,11 @@ enum Command {
     /// Run the periodic accounting reset task (managed by the systemd timer).
     #[command(name = "accounting-reset", hide = true)]
     AccountingReset,
+    /// Host system tuning helpers (require root; never touch sing-box).
+    System {
+        #[command(subcommand)]
+        command: SystemCommand,
+    },
     /// Validate and atomically replace the canonical protocol artifacts and
     /// the active sing-box configuration from the persisted deployment.
     #[command(name = "regenerate", hide = true)]
@@ -297,6 +302,16 @@ enum CertificateCommand {
     /// Validate the certificate and re-pin it for the service accounts. This is
     /// the Certbot deploy hook and the recommended post-renewal check.
     Verify,
+}
+
+/// Host system tuning helpers. These require root and never touch the sing-box
+/// deployment; they configure kernel-level TCP acceleration only.
+#[derive(Debug, Subcommand)]
+enum SystemCommand {
+    /// Enable BBR + FQ TCP congestion control (kernel 4.9+) and persist it.
+    Bbr,
+    /// Show the current kernel congestion control and queueing discipline.
+    Status,
 }
 
 #[derive(Debug, Subcommand)]
@@ -518,6 +533,7 @@ fn main() -> ExitCode {
         Command::Credential { command } => run_credential(root, command),
         Command::Serve { bind, max_requests } => serve_subscription(root, bind, max_requests),
         Command::Certificate { command } => run_certificate(root, command),
+        Command::System { command } => run_system(root, command),
         Command::Config { command } => run_config(root, command),
         Command::AccountingReset => run_accounting_reset(root),
         Command::Regenerate { sing_box_bin } => regenerate(root, sing_box_bin),
@@ -1572,6 +1588,30 @@ fn run_certificate(root: &Path, command: CertificateCommand) -> ExitCode {
         }
         Err(error) => {
             eprintln!("certificate operation failed: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_system(root: &Path, command: SystemCommand) -> ExitCode {
+    let runtime = sbctl::runtime::Runtime::live(root);
+    let result: Result<(), String> = match command {
+        SystemCommand::Bbr => sbctl::system::enable_bbr(&runtime).map(|status| {
+            println!(
+                "BBR enabled: tcp_congestion_control={}, default_qdisc={}",
+                status.congestion_control, status.qdisc
+            );
+        }),
+        SystemCommand::Status => sbctl::system::read_current(&runtime).map(|status| {
+            println!("tcp_congestion_control={}", status.congestion_control);
+            println!("default_qdisc={}", status.qdisc);
+        }),
+    }
+    .map_err(|error| error.to_string());
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("system operation failed: {error}");
             ExitCode::from(2)
         }
     }

@@ -251,6 +251,22 @@ sbctl uninstall --purge
 
 新部署默认使用 America/Los_Angeles 作为 VPS 刷新时区、Asia/Shanghai 作为客户端参考显示时区；需要自定义周期时，可在配置向导中选择 `anchored-month`，并设置 IANA 时区与首次重置时间。菜单中的流量输入按 GiB 处理（兼容 `GB` 后缀，按 1024³ bytes 换算），内部保存精确 byte 数。流量上限目前用于展示和订阅元数据，不会主动阻断 sing-box 数据面。
 
+## 性能调优（可选）
+
+`sbctl` 自身不修改内核。若 VPS 内核为 4.9+，可用 BBR（Google 的 TCP 拥塞控制算法）提升
+TCP 类协议（VLESS Reality / VMess WebSocket / AnyTLS）在长距离或丢包链路上的吞吐与延迟。
+该命令需要 root，只写内核 sysctl 并持久化到 `/etc/sysctl.d/`，不触碰 sing-box 配置：
+
+```bash
+# 查看当前内核拥塞控制与队列调度
+sudo sbctl system status
+
+# 启用 BBR + FQ（幂等；已是 bbr/fq 则不重复写入）并持久化
+sudo sbctl system bbr
+```
+
+> 说明：TUIC 的 QUIC 拥塞控制（`congestion_control=bbr`）属于协议层，客户端与服务端均支持时即生效，与上述内核级 BBR 无关。BBR 需内核支持；若内核过低，`sysctl -w` 会报错并中止，不会改动其他设置。
+
 ## 安全边界
 
 - 不自动接管已有 sing-box、sing-box-yg、Caddy、Nginx 或防火墙配置。
