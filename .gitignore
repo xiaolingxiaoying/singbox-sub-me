@@ -1,6 +1,7 @@
 /target/
+/target-linux*/
 /.tmp-sing-box-yg-research/
-/.reference-sing-box-yg/
+/.reference-*/
 /.scratch/research/
 /.scratch/upstream/
 
