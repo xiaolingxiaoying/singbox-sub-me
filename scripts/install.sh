@@ -3,7 +3,7 @@ set -euo pipefail
 
 # sbctl bootstrap installer.
 #
-# One-line usage:  bash <(wget -qO- https://raw.githubusercontent.com/xiaolingxiaoying/singbox-sub-me/main/scripts/install.sh)
+# One-line usage:  bash <(wget -qO- https://raw.githubusercontent.com/xiaolingxiaoying/singbox-sub-me/master/scripts/install.sh)
 #
 # The only trust decisions this script makes are the sbctl binary download,
 # which it protects by verifying the Ed25519 signature over the canonical JSON

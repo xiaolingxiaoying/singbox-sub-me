@@ -73,7 +73,7 @@ target/release/sbctl
 二进制，再以中文菜单引导选择订阅模式、域名/IP、网卡和协议：
 
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/xiaolingxiaoying/singbox-sub-me/main/scripts/install.sh)
+bash <(wget -qO- https://raw.githubusercontent.com/xiaolingxiaoying/singbox-sub-me/master/scripts/install.sh)
 ```
 
 脚本默认从最新 GitHub Release 取得与系统架构匹配的 manifest；可通过
