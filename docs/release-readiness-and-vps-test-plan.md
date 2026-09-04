@@ -120,3 +120,31 @@ sbctl sub --format uri
 3. 至少完成一台干净 Ubuntu VPS 的所选订阅模式端到端测试；
 4. 所有失败案例都有可重现步骤、脱敏诊断记录和自动化回归覆盖；
 5. 没有在测试中接管或破坏任何既有代理、反向代理或防火墙配置。
+
+## 当前执行记录与 TODO
+
+已完成：
+
+- 已拉取远程 `master`，并将 Rust 格式化修复提交为 `1fd1be5`。
+- 本地 `cargo fmt --check`、Clippy、完整 Rust 测试和 release 构建均通过。
+- 提交 `1fd1be5` 的 GitHub CI 已通过：format、Clippy 和 test job 均成功。
+
+TODO：
+
+- [ ] 在 Windows 上启用 Docker Desktop 的 WSL 集成，并运行三发行版真实 systemd 验收：
+  `SBCTL_ARTIFACT=<Linux release binary> sh tests/acceptance/run.sh`，覆盖 Debian 12、Ubuntu 22.04
+  和 Ubuntu 24.04。
+- [ ] 若验收失败，按本计划保留 `systemctl status sbctl.service`、`journalctl -u sbctl.service`、
+  `ss -ltnp`、脱敏后的 `/etc/sbctl/config.toml` 和各安装/卸载步骤退出状态；修复后重新运行
+  三个发行版验收。
+- [ ] 确认候选版本命名。现有 `v0.1.14` tag 已占用且指向旧提交；建议将包版本更新为 `0.1.15`，
+  从通过全部门禁的精确 commit 创建 `v0.1.15` 候选 tag。
+- [ ] 运行 Release workflow，确认 amd64/arm64 build、acceptance 和 package job 全部成功；记录
+  tag、commit SHA、Actions 链接、工件 SHA-256 及 sing-box 版本。
+- [ ] 下载同一候选 tag 的 sbctl、sing-box 和 signed manifest，验证 manifest 签名、工件摘要及
+  manifest 中的固定 URL/版本/兼容矩阵一致。
+- [ ] 在全新的 Ubuntu 22.04 或 24.04 amd64 VPS 上完成至少一种模式的端到端测试；按条件继续
+  验证 IP fallback、External proxy 和 Direct 三种模式，并导入 sing-box、Clash 和 URI 三种
+  订阅格式检查连接、TLS/SNI、协议端口和 `subscription-userinfo`。
+- [ ] 测试完成后导出脱敏证据，先执行默认 `sbctl uninstall`；确认 VPS 专用于测试且证据已保存后，
+  再执行 `sbctl uninstall --purge` 并确认没有残留 sbctl 状态。
