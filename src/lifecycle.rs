@@ -592,6 +592,28 @@ pub fn prepare_daemon_storage(root: &Path, direct: bool) -> Result<(), String> {
             "could not prepare sbctl service storage: chown exited with {status}"
         ));
     }
+    // The /etc/sing-box directory is created private (0700 root:root). The
+    // sing-box data plane runs as its own account, so grant that group
+    // traversal of the directory while root keeps ownership. Without this the
+    // account cannot enter the directory to read its configuration.
+    let status = Command::new("chown")
+        .args(["root:sing-box", "/etc/sing-box"])
+        .status()
+        .map_err(|error| format!("could not grant sing-box config directory access: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "could not grant sing-box config directory access: chown exited with {status}"
+        ));
+    }
+    let status = Command::new("chmod")
+        .args(["0750", "/etc/sing-box"])
+        .status()
+        .map_err(|error| format!("could not grant sing-box config directory access: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "could not grant sing-box config directory access: chmod exited with {status}"
+        ));
+    }
     // The generated sing-box configuration is written root-only (0600). The
     // sing-box data plane runs as its own account, so the file must be owned
     // and readable by that account while staying private to the host.
