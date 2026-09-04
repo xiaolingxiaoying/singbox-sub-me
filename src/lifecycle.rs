@@ -605,6 +605,73 @@ pub fn prepare_daemon_storage(root: &Path, direct: bool) -> Result<(), String> {
     })?;
     if direct {
         grant_certificate_storage(root)?;
+    } else {
+        grant_self_signed_certificate_access(root)?;
+    }
+    Ok(())
+}
+
+/// In self-signed certificate mode the sing-box data plane reads the pinned
+/// certificate under /var/lib/sbctl/certificates. Grant the sing-box service
+/// account traversal of the storage root and read access to the pinned
+/// certificate copy, keeping the private key group-readable only.
+fn grant_self_signed_certificate_access(root: &Path) -> Result<(), String> {
+    let status = Command::new("chmod")
+        .args(["0755", "/var/lib/sbctl"])
+        .status()
+        .map_err(|error| format!("could not grant certificate traversal: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "could not grant certificate traversal: chmod exited with {status}"
+        ));
+    }
+    let certificates = root.join("var/lib/sbctl/certificates");
+    if certificates.is_dir() {
+        let status = Command::new("chown")
+            .args(["-R", "root:sing-box", &certificates.to_string_lossy()])
+            .status()
+            .map_err(|error| format!("could not grant certificate file access: {error}"))?;
+        if !status.success() {
+            return Err(format!(
+                "could not grant certificate file access: chown exited with {status}"
+            ));
+        }
+        let status = Command::new("find")
+            .args([
+                &certificates.to_string_lossy(),
+                "-type",
+                "d",
+                "-exec",
+                "chmod",
+                "0755",
+                "{}",
+                "+",
+            ])
+            .status()
+            .map_err(|error| format!("could not restrict certificate directories: {error}"))?;
+        if !status.success() {
+            return Err(format!(
+                "could not restrict certificate directories: find exited with {status}"
+            ));
+        }
+        let status = Command::new("find")
+            .args([
+                &certificates.to_string_lossy(),
+                "-type",
+                "f",
+                "-exec",
+                "chmod",
+                "0640",
+                "{}",
+                "+",
+            ])
+            .status()
+            .map_err(|error| format!("could not restrict certificate files: {error}"))?;
+        if !status.success() {
+            return Err(format!(
+                "could not restrict certificate files: find exited with {status}"
+            ));
+        }
     }
     Ok(())
 }

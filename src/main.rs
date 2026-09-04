@@ -1261,7 +1261,11 @@ fn run_accounting_reset(root: &Path) -> ExitCode {
 
 fn regenerate(root: &Path, sing_box_bin: Option<PathBuf>) -> ExitCode {
     let store = sbctl::config::DeploymentStore::new(root);
-    let update_active_config = root.join("var/lib/sbctl/ownership").is_file();
+    // Regenerate always re-syncs the active sing-box configuration on a live
+    // host (root "/"), even for an installation that never wrote the ownership
+    // marker (a `--no-start` install). Fixture roots are left untouched.
+    let update_active_config =
+        root == std::path::Path::new("/") || root.join("var/lib/sbctl/ownership").is_file();
     let result = store.load().and_then(|config| {
         let binary = sing_box_bin.unwrap_or_else(|| root.join("usr/local/bin/sing-box"));
         let direct = config.subscription_mode == sbctl::config::SubscriptionMode::Direct;
