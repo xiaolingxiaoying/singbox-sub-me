@@ -388,7 +388,9 @@ impl DeploymentConfig {
 
     pub fn protocol_listener_port(&self, protocol: &ManagedProtocol) -> Option<u16> {
         match protocol {
-            ManagedProtocol::VlessReality => self.vless_reality.as_ref().map(|node| node.listen_port),
+            ManagedProtocol::VlessReality => {
+                self.vless_reality.as_ref().map(|node| node.listen_port)
+            }
             ManagedProtocol::VmessWebsocket => {
                 self.vmess_websocket.as_ref().map(|node| node.listen_port)
             }

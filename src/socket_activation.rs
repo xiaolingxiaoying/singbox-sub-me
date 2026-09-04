@@ -87,7 +87,7 @@ pub fn direct_listener_role(port: u16) -> Option<DirectListenerRole> {
 
 #[cfg(test)]
 mod tests {
-    use super::{direct_listener_role, parse_listen_fds, DirectListenerRole};
+    use super::{DirectListenerRole, direct_listener_role, parse_listen_fds};
 
     #[test]
     fn parse_listen_fds_returns_the_descriptor_count_for_this_process() {

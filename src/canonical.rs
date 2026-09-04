@@ -87,11 +87,21 @@ impl CanonicalNode {
 
     pub fn tls_server_name(&self) -> &str {
         match self {
-            Self::VlessReality { tls_server_name, .. }
-            | Self::VmessWebsocket { tls_server_name, .. }
-            | Self::Hysteria2 { tls_server_name, .. }
-            | Self::Tuic { tls_server_name, .. }
-            | Self::Anytls { tls_server_name, .. } => tls_server_name,
+            Self::VlessReality {
+                tls_server_name, ..
+            }
+            | Self::VmessWebsocket {
+                tls_server_name, ..
+            }
+            | Self::Hysteria2 {
+                tls_server_name, ..
+            }
+            | Self::Tuic {
+                tls_server_name, ..
+            }
+            | Self::Anytls {
+                tls_server_name, ..
+            } => tls_server_name,
         }
     }
 
@@ -197,9 +207,7 @@ pub fn nodes(config: &DeploymentConfig) -> Vec<CanonicalNode> {
 #[cfg(test)]
 mod tests {
     use super::nodes;
-    use crate::config::{
-        DeploymentConfig, ManagedProtocol, ProtocolPorts, SubscriptionMode,
-    };
+    use crate::config::{DeploymentConfig, ManagedProtocol, ProtocolPorts, SubscriptionMode};
 
     #[test]
     fn canonical_nodes_derive_host_ports_credentials_and_tls_from_the_config() {
@@ -254,10 +262,7 @@ mod tests {
 
         let canonical = nodes(&config);
         assert_eq!(canonical[0].host(), "203.0.113.7");
-        assert_eq!(
-            canonical[0].tls_server_name(),
-            config.subscription_host
-        );
+        assert_eq!(canonical[0].tls_server_name(), config.subscription_host);
     }
 
     #[test]

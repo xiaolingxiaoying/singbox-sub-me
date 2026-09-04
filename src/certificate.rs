@@ -45,13 +45,17 @@ pub enum CertificateError {
     Unreadable { host: String, detail: String },
     #[error("certificate for the subscription host {host} is not a valid X.509 certificate")]
     MalformedCertificate { host: String },
-    #[error("certificate for the subscription host {host} is not yet valid (valid from {not_before})")]
+    #[error(
+        "certificate for the subscription host {host} is not yet valid (valid from {not_before})"
+    )]
     NotYetValid { host: String, not_before: String },
     #[error("certificate for the subscription host {host} expired on {not_after}")]
     Expired { host: String, not_after: String },
     #[error("certificate for the subscription host {host} does not cover that host name")]
     SanMismatch { host: String },
-    #[error("certificate private key for the subscription host {host} does not match the certificate")]
+    #[error(
+        "certificate private key for the subscription host {host} does not match the certificate"
+    )]
     KeyMismatch { host: String },
     #[error("private key file for the subscription host {host} is invalid or missing")]
     KeyInvalid { host: String },
@@ -157,11 +161,12 @@ fn load_directory_at(
 ) -> Result<ValidatedCertificate, CertificateError> {
     require_direct(config)?;
     let host = config.subscription_host.clone();
-    let fullchain_pem =
-        fs::read(directory.join("fullchain.pem")).map_err(|error| CertificateError::Unreadable {
+    let fullchain_pem = fs::read(directory.join("fullchain.pem")).map_err(|error| {
+        CertificateError::Unreadable {
             host: host.clone(),
             detail: error.to_string(),
-        })?;
+        }
+    })?;
     let privkey_pem =
         fs::read(directory.join("privkey.pem")).map_err(|error| CertificateError::Unreadable {
             host: host.clone(),
@@ -170,18 +175,12 @@ fn load_directory_at(
     let mut chain_reader = BufReader::new(&fullchain_pem[..]);
     let chain = rustls_pemfile::certs(&mut chain_reader)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| CertificateError::MalformedCertificate {
-            host: host.clone(),
-        })?;
+        .map_err(|_| CertificateError::MalformedCertificate { host: host.clone() })?;
     let end_entity = chain
         .first()
-        .ok_or_else(|| CertificateError::MalformedCertificate {
-            host: host.clone(),
-        })?;
+        .ok_or_else(|| CertificateError::MalformedCertificate { host: host.clone() })?;
     let (_, parsed) = X509Certificate::from_der(end_entity.as_ref())
-        .map_err(|_| CertificateError::MalformedCertificate {
-            host: host.clone(),
-        })?;
+        .map_err(|_| CertificateError::MalformedCertificate { host: host.clone() })?;
 
     let now_ts = now.timestamp();
     let not_before = parsed.validity().not_before.timestamp();
@@ -205,17 +204,11 @@ fn load_directory_at(
     }
 
     let key = rustls_pemfile::private_key(&mut BufReader::new(&privkey_pem[..]))
-        .map_err(|_| CertificateError::KeyInvalid {
-            host: host.clone(),
-        })?
-        .ok_or_else(|| CertificateError::KeyInvalid {
-            host: host.clone(),
-        })?;
+        .map_err(|_| CertificateError::KeyInvalid { host: host.clone() })?
+        .ok_or_else(|| CertificateError::KeyInvalid { host: host.clone() })?;
     let provider = rustls::ServerConfig::builder().crypto_provider().clone();
     CertifiedKey::from_der(chain.clone(), key.clone_key(), &provider)
-        .map_err(|_| CertificateError::KeyMismatch {
-            host: host.clone(),
-        })?;
+        .map_err(|_| CertificateError::KeyMismatch { host: host.clone() })?;
 
     let fingerprint = sha256_hex(end_entity.as_ref());
     Ok(ValidatedCertificate {
@@ -326,8 +319,7 @@ pub fn pin(
     validated: &ValidatedCertificate,
 ) -> Result<(), CertificateError> {
     let directory = pinned_directory(store, config);
-    fs::create_dir_all(&directory)
-        .map_err(|error| CertificateError::Storage(error.to_string()))?;
+    fs::create_dir_all(&directory).map_err(|error| CertificateError::Storage(error.to_string()))?;
     atomic_write_certificate(&directory, "fullchain.pem", &validated.fullchain_pem)?;
     atomic_write_certificate(&directory, "privkey.pem", &validated.privkey_pem)?;
     restrict_certificate_permissions(store, &directory)
@@ -421,10 +413,7 @@ pub struct CertificateStatus {
 
 /// Reports certificate state without failing: a missing or invalid certificate
 /// becomes an `error` state so the rest of the status report stays available.
-pub fn status(
-    store: &DeploymentStore,
-    config: &DeploymentConfig,
-) -> CertificateStatus {
+pub fn status(store: &DeploymentStore, config: &DeploymentConfig) -> CertificateStatus {
     match load(store, config) {
         Ok(validated) => CertificateStatus {
             host: validated.host.clone(),
@@ -453,10 +442,7 @@ fn require_direct(config: &DeploymentConfig) -> Result<(), CertificateError> {
         .ok_or(CertificateError::NotDirect)
 }
 
-fn certbot_result(
-    status: ExitStatus,
-    output: String,
-) -> Result<(), CertificateError> {
+fn certbot_result(status: ExitStatus, output: String) -> Result<(), CertificateError> {
     if status.success() {
         return Ok(());
     }
@@ -540,12 +526,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        dns_name_matches, load_at, pin, CertificateError, CERTIFICATE_GROUP,
-    };
-    use crate::config::{
-        DeploymentConfig, DeploymentStore, ManagedProtocol, SubscriptionMode,
-    };
+    use super::{CERTIFICATE_GROUP, CertificateError, dns_name_matches, load_at, pin};
+    use crate::config::{DeploymentConfig, DeploymentStore, ManagedProtocol, SubscriptionMode};
     use chrono::{TimeZone, Utc};
     use rcgen::generate_simple_self_signed;
     use std::fs;
@@ -574,7 +556,10 @@ mod tests {
 
     fn write_certificate(fixture: &TempDir, names: &[&str]) {
         let certificate = generate_simple_self_signed(
-            names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>(),
+            names
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>(),
         )
         .expect("cert");
         fs::create_dir_all(live_directory(fixture)).expect("certificate directory is created");
@@ -621,8 +606,12 @@ mod tests {
         write_certificate(&fixture, &["sub.example.test"]);
         let (store, config) = direct_store(&fixture);
 
-        let error = load_at(&store, &config, Utc.with_ymd_and_hms(4097, 1, 1, 0, 0, 0).unwrap())
-            .expect_err("an expired certificate is rejected");
+        let error = load_at(
+            &store,
+            &config,
+            Utc.with_ymd_and_hms(4097, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .expect_err("an expired certificate is rejected");
         assert!(matches!(error, CertificateError::Expired { .. }));
     }
 
@@ -632,8 +621,12 @@ mod tests {
         write_certificate(&fixture, &["sub.example.test"]);
         let (store, config) = direct_store(&fixture);
 
-        let error = load_at(&store, &config, Utc.with_ymd_and_hms(1974, 1, 1, 0, 0, 0).unwrap())
-            .expect_err("a not-yet-valid certificate is rejected");
+        let error = load_at(
+            &store,
+            &config,
+            Utc.with_ymd_and_hms(1974, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .expect_err("a not-yet-valid certificate is rejected");
         assert!(matches!(error, CertificateError::NotYetValid { .. }));
     }
 
@@ -643,8 +636,7 @@ mod tests {
         write_certificate(&fixture, &["other.example.test"]);
         let (store, config) = direct_store(&fixture);
 
-        let error = load_at(&store, &config, mid_2025())
-            .expect_err("a SAN mismatch is rejected");
+        let error = load_at(&store, &config, mid_2025()).expect_err("a SAN mismatch is rejected");
         assert!(matches!(error, CertificateError::SanMismatch { .. }));
     }
 
@@ -662,8 +654,8 @@ mod tests {
         .expect("the wrong private key is written");
         let (store, config) = direct_store(&fixture);
 
-        let error = load_at(&store, &config, mid_2025())
-            .expect_err("a mismatched private key is rejected");
+        let error =
+            load_at(&store, &config, mid_2025()).expect_err("a mismatched private key is rejected");
         assert!(matches!(error, CertificateError::KeyMismatch { .. }));
     }
 
@@ -672,8 +664,7 @@ mod tests {
         let fixture = TempDir::new().expect("temporary root is created");
         let (store, config) = direct_store(&fixture);
 
-        let error = load_at(&store, &config, mid_2025())
-            .expect_err("missing files are rejected");
+        let error = load_at(&store, &config, mid_2025()).expect_err("missing files are rejected");
         assert!(matches!(error, CertificateError::Unreadable { .. }));
     }
 
@@ -716,7 +707,11 @@ mod tests {
                 .expect("pinned key has metadata")
                 .permissions()
                 .mode();
-            assert_eq!(mode & 0o777, 0o640, "the private key is group-readable only");
+            assert_eq!(
+                mode & 0o777,
+                0o640,
+                "the private key is group-readable only"
+            );
             let directory_mode = fs::metadata(&pinned)
                 .expect("pinned directory has metadata")
                 .permissions()

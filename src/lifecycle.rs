@@ -17,8 +17,7 @@ const SBCTL_HTTP_SOCKET_MARKER: &str = "Description=sbctl Direct HTTPS public li
 const ACCOUNTING_RESET_MARKER: &str = "Description=sbctl accounting period reset";
 const CERTBOT_DEPLOY_HOOK: &str =
     "etc/letsencrypt/renewal-hooks/deploy/sbctl-certificate-deploy-hook";
-const CERTBOT_DEPLOY_HOOK_MARKER: &str =
-    "sbctl-managed Direct HTTPS certificate deploy hook";
+const CERTBOT_DEPLOY_HOOK_MARKER: &str = "sbctl-managed Direct HTTPS certificate deploy hook";
 const CERTIFICATE_GROUP: &str = crate::certificate::CERTIFICATE_GROUP;
 
 const BACKED_UP_PATHS: &[&str] = &[
@@ -227,8 +226,7 @@ pub fn uninstall(root: &Path, purge: bool) -> Result<Option<std::path::PathBuf>,
     let sing_box_unit_owned = unit_has_marker(root, SING_BOX_UNIT, SING_BOX_UNIT_MARKER)?;
     let reset_timer_owned = unit_has_marker(root, ACCOUNTING_RESET_TIMER, ACCOUNTING_RESET_MARKER)?;
     let http_socket_owned = unit_has_marker(root, SBCTL_HTTP_SOCKET, SBCTL_HTTP_SOCKET_MARKER)?;
-    let deploy_hook_owned =
-        unit_has_marker(root, CERTBOT_DEPLOY_HOOK, CERTBOT_DEPLOY_HOOK_MARKER)?;
+    let deploy_hook_owned = unit_has_marker(root, CERTBOT_DEPLOY_HOOK, CERTBOT_DEPLOY_HOOK_MARKER)?;
     let sing_box_config_owned = sing_box_unit_owned || !root.join(SING_BOX_UNIT).exists();
     if sbctl_unit_owned {
         systemctl(root, &["disable", "--now", "sbctl.service"])?;
@@ -496,10 +494,11 @@ fn ensure_daemon_accounts(root: &Path) -> Result<(), String> {
 
 fn ensure_daemon_account(root: &Path, account: &str) -> Result<(), String> {
     let passwd = root.join("etc/passwd");
-    if fs::read_to_string(&passwd)
-        .ok()
-        .is_some_and(|contents| contents.lines().any(|line| line.starts_with(&format!("{account}:"))))
-    {
+    if fs::read_to_string(&passwd).ok().is_some_and(|contents| {
+        contents
+            .lines()
+            .any(|line| line.starts_with(&format!("{account}:")))
+    }) {
         return Ok(());
     }
     let candidate = root.join("usr/sbin/useradd");
@@ -530,7 +529,9 @@ fn ensure_daemon_account(root: &Path, account: &str) -> Result<(), String> {
 fn ensure_certificate_group(root: &Path) -> Result<(), String> {
     let group_file = root.join("etc/group");
     let groups = fs::read_to_string(&group_file).unwrap_or_default();
-    let group_exists = groups.lines().any(|line| line.starts_with(&format!("{CERTIFICATE_GROUP}:")));
+    let group_exists = groups
+        .lines()
+        .any(|line| line.starts_with(&format!("{CERTIFICATE_GROUP}:")));
     if !group_exists {
         run_account_command(root, "groupadd", &["--system", CERTIFICATE_GROUP])?;
     }
@@ -562,9 +563,10 @@ fn run_account_command(root: &Path, program: &str, args: &[&str]) -> Result<(), 
         .args(args)
         .status()
         .map_err(|error| format!("could not run {program}: {error}"))?;
-    status.success().then_some(()).ok_or_else(|| {
-        format!("{program} {} exited with {status}", args.join(" "))
-    })
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| format!("{program} {} exited with {status}", args.join(" ")))
 }
 
 fn prepare_daemon_storage(root: &Path, direct: bool) -> Result<(), String> {
@@ -588,9 +590,7 @@ fn prepare_daemon_storage(root: &Path, direct: bool) -> Result<(), String> {
     let status = Command::new("chown")
         .args(["sing-box:sing-box", "/etc/sing-box/config.json"])
         .status()
-        .map_err(|error| {
-            format!("could not grant sing-box service config access: {error}")
-        })?;
+        .map_err(|error| format!("could not grant sing-box service config access: {error}"))?;
     if !status.success() {
         return Err(format!(
             "could not grant sing-box service config access: chown exited with {status}"
@@ -599,13 +599,9 @@ fn prepare_daemon_storage(root: &Path, direct: bool) -> Result<(), String> {
     let status = Command::new("chmod")
         .args(["0640", "/etc/sing-box/config.json"])
         .status()
-        .map_err(|error| {
-            format!("could not restrict sing-box service config: {error}")
-        })?;
+        .map_err(|error| format!("could not restrict sing-box service config: {error}"))?;
     status.success().then_some(()).ok_or_else(|| {
-        format!(
-            "could not restrict sing-box service config: chmod exited with {status}"
-        )
+        format!("could not restrict sing-box service config: chmod exited with {status}")
     })?;
     if direct {
         grant_certificate_storage(root)?;

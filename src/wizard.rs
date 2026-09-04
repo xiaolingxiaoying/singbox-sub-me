@@ -109,11 +109,8 @@ pub fn run<C: Prompts>(
         Some(ask_required(
             prompts,
             "External proxy loopback 监听端口（大于 1024）",
-            existing.and_then(|config| {
-                config
-                    .subscription_listen_port
-                    .map(|port| port.to_string())
-            }),
+            existing
+                .and_then(|config| config.subscription_listen_port.map(|port| port.to_string())),
             parse_high_port,
         )?)
     } else {
@@ -123,7 +120,9 @@ pub fn run<C: Prompts>(
     let interface = ask_required(
         prompts,
         "流量统计网卡",
-        existing.map(|config| config.interface.clone()).or(default_interface),
+        existing
+            .map(|config| config.interface.clone())
+            .or(default_interface),
         parse_interface,
     )?;
 
@@ -289,7 +288,11 @@ fn ask_value<C: Prompts, T>(
     }
 }
 
-fn ask_yes_no<C: Prompts>(prompts: &mut C, label: &str, default: bool) -> Result<bool, WizardError> {
+fn ask_yes_no<C: Prompts>(
+    prompts: &mut C,
+    label: &str,
+    default: bool,
+) -> Result<bool, WizardError> {
     loop {
         let answer = prompts.ask(label, Some(if default { "y" } else { "n" }))?;
         match answer.trim().to_ascii_lowercase().as_str() {
@@ -341,9 +344,9 @@ fn parse_interface(value: &str) -> Result<String, String> {
     let value = value.trim().to_owned();
     let valid = !value.is_empty()
         && value.len() <= 15
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-' || byte == b'.');
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-' || byte == b'.'
+        });
     if valid {
         Ok(value)
     } else {
@@ -490,16 +493,19 @@ mod tests {
         answers.insert(2, "198.51.100.9");
         let mut prompts = ScriptPrompts::new(&answers, &[true]);
 
-        let outcome = run(Some(&config), None, &mut prompts).expect("wizard recovers from a bad host");
+        let outcome =
+            run(Some(&config), None, &mut prompts).expect("wizard recovers from a bad host");
 
         let WizardOutcome::Changed(updated) = outcome else {
             panic!("a corrected host must produce a confirmed configuration");
         };
         assert_eq!(updated.subscription_host, "198.51.100.9");
-        assert!(prompts
-            .reports()
-            .iter()
-            .any(|message| message.contains("Subscription host 必须是合法主机名")));
+        assert!(
+            prompts
+                .reports()
+                .iter()
+                .any(|message| message.contains("Subscription host 必须是合法主机名"))
+        );
     }
 
     #[test]
@@ -512,7 +518,10 @@ mod tests {
 
         let result = run(Some(&config), None, &mut prompts);
 
-        assert!(result.is_err(), "VMess in IP fallback mode must be rejected");
+        assert!(
+            result.is_err(),
+            "VMess in IP fallback mode must be rejected"
+        );
     }
 
     #[test]
@@ -540,12 +549,8 @@ mod tests {
         ];
         let mut prompts = ScriptPrompts::new(&answers, &[true]);
 
-        let outcome = run(
-            None,
-            Some("ens3".to_owned()),
-            &mut prompts,
-        )
-        .expect("a fresh wizard completes");
+        let outcome =
+            run(None, Some("ens3".to_owned()), &mut prompts).expect("a fresh wizard completes");
 
         let WizardOutcome::Changed(config) = outcome else {
             panic!("a fresh deployment must be committed");
@@ -554,7 +559,10 @@ mod tests {
         assert_eq!(config.subscription_host, "sub.example.test");
         assert_eq!(config.interface, "ens3");
         assert_eq!(config.accounting_timezone, "UTC");
-        assert_eq!(config.accounting_policy, crate::config::AccountingPolicy::NaturalMonth);
+        assert_eq!(
+            config.accounting_policy,
+            crate::config::AccountingPolicy::NaturalMonth
+        );
         assert_eq!(config.enabled_protocols.len(), 5);
         assert_eq!(config.certbot_email, None);
     }

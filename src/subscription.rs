@@ -132,7 +132,9 @@ pub fn regenerate(
     }
     if update_active_config {
         let server = server_artifact(&artifacts)?;
-        if let Err(error) = store.write_relative_locked(ACTIVE_CONFIG_RELATIVE_PATH, server.as_bytes()) {
+        if let Err(error) =
+            store.write_relative_locked(ACTIVE_CONFIG_RELATIVE_PATH, server.as_bytes())
+        {
             restore_replaced(store, &prior_artifacts, prior_active.as_deref());
             return Err(SubscriptionError::Storage(error));
         }
@@ -147,7 +149,9 @@ fn server_artifact<'a>(
         .iter()
         .find(|(name, _)| *name == SING_BOX_SERVER_ARTIFACT)
         .map(|(_, contents)| contents.as_str())
-        .ok_or_else(|| SubscriptionError::Check("no generated sing-box server configuration".to_owned()))
+        .ok_or_else(|| {
+            SubscriptionError::Check("no generated sing-box server configuration".to_owned())
+        })
 }
 
 fn read_artifact(store: &DeploymentStore, name: &str) -> Option<Vec<u8>> {
@@ -369,9 +373,7 @@ pub async fn serve(
     {
         return Err(SubscriptionError::ExternalProxyBind);
     }
-    let listener = TcpListener::bind(bind)
-        .await
-        .map_err(listener_io)?;
+    let listener = TcpListener::bind(bind).await.map_err(listener_io)?;
     serve_http_listener(listener, &store, &config, max_requests).await
 }
 
@@ -919,33 +921,48 @@ fn clash(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
                 short_id,
                 decoy_sni,
                 ..
-            } => format!("  - name: {}\n    type: vless\n    server: {host}\n    port: {port}\n    uuid: {uuid}\n    network: tcp\n    flow: xtls-rprx-vision\n    tls: true\n    servername: {decoy_sni}\n    client-fingerprint: chrome\n    reality-opts:\n      public-key: {public_key}\n      short-id: {short_id}\n", node.tag()),
+            } => format!(
+                "  - name: {}\n    type: vless\n    server: {host}\n    port: {port}\n    uuid: {uuid}\n    network: tcp\n    flow: xtls-rprx-vision\n    tls: true\n    servername: {decoy_sni}\n    client-fingerprint: chrome\n    reality-opts:\n      public-key: {public_key}\n      short-id: {short_id}\n",
+                node.tag()
+            ),
             CanonicalNode::VmessWebsocket {
                 host,
                 port,
                 tls_server_name,
                 uuid,
                 path,
-            } => format!("  - name: {}\n    type: vmess\n    server: {host}\n    port: {port}\n    uuid: {uuid}\n    alterId: 0\n    cipher: auto\n    tls: true\n    servername: {tls_server_name}\n    network: ws\n    ws-opts:\n      path: {path}\n      headers:\n        Host: {tls_server_name}\n", node.tag()),
+            } => format!(
+                "  - name: {}\n    type: vmess\n    server: {host}\n    port: {port}\n    uuid: {uuid}\n    alterId: 0\n    cipher: auto\n    tls: true\n    servername: {tls_server_name}\n    network: ws\n    ws-opts:\n      path: {path}\n      headers:\n        Host: {tls_server_name}\n",
+                node.tag()
+            ),
             CanonicalNode::Hysteria2 {
                 host,
                 port,
                 tls_server_name,
                 password,
-            } => format!("  - name: {}\n    type: hysteria2\n    server: {host}\n    port: {port}\n    password: {password}\n    sni: {tls_server_name}\n    skip-cert-verify: false\n", node.tag()),
+            } => format!(
+                "  - name: {}\n    type: hysteria2\n    server: {host}\n    port: {port}\n    password: {password}\n    sni: {tls_server_name}\n    skip-cert-verify: false\n",
+                node.tag()
+            ),
             CanonicalNode::Tuic {
                 host,
                 port,
                 tls_server_name,
                 uuid,
                 password,
-            } => format!("  - name: {}\n    type: tuic\n    server: {host}\n    port: {port}\n    uuid: {uuid}\n    password: {password}\n    sni: {tls_server_name}\n    alpn:\n      - h3\n    skip-cert-verify: false\n", node.tag()),
+            } => format!(
+                "  - name: {}\n    type: tuic\n    server: {host}\n    port: {port}\n    uuid: {uuid}\n    password: {password}\n    sni: {tls_server_name}\n    alpn:\n      - h3\n    skip-cert-verify: false\n",
+                node.tag()
+            ),
             CanonicalNode::Anytls {
                 host,
                 port,
                 tls_server_name,
                 password,
-            } => format!("  - name: {}\n    type: anytls\n    server: {host}\n    port: {port}\n    password: {password}\n    tls: true\n    sni: {tls_server_name}\n    skip-cert-verify: false\n", node.tag()),
+            } => format!(
+                "  - name: {}\n    type: anytls\n    server: {host}\n    port: {port}\n    password: {password}\n    tls: true\n    sni: {tls_server_name}\n    skip-cert-verify: false\n",
+                node.tag()
+            ),
         };
         proxies.push_str(&entry);
     }
@@ -1021,13 +1038,22 @@ fn certificate_tls_config(config: &DeploymentConfig) -> Value {
             &config.subscription_host,
         );
         (
-            directory.join("fullchain.pem").to_string_lossy().into_owned(),
+            directory
+                .join("fullchain.pem")
+                .to_string_lossy()
+                .into_owned(),
             directory.join("privkey.pem").to_string_lossy().into_owned(),
         )
     } else {
         (
-            format!("/etc/letsencrypt/live/{}/fullchain.pem", config.subscription_host),
-            format!("/etc/letsencrypt/live/{}/privkey.pem", config.subscription_host),
+            format!(
+                "/etc/letsencrypt/live/{}/fullchain.pem",
+                config.subscription_host
+            ),
+            format!(
+                "/etc/letsencrypt/live/{}/privkey.pem",
+                config.subscription_host
+            ),
         )
     };
     json!({"enabled": true, "server_name": config.subscription_host,
@@ -1059,9 +1085,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::{generated_artifacts, regenerate};
-    use crate::config::{
-        DeploymentConfig, DeploymentStore, ManagedProtocol, SubscriptionMode,
-    };
+    use crate::config::{DeploymentConfig, DeploymentStore, ManagedProtocol, SubscriptionMode};
 
     async fn http_get(port: u16, path: &str) -> String {
         let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -1081,9 +1105,7 @@ mod tests {
 
     /// Establishes the minimal traffic fixture so a subscription response can
     /// read a legal accounting state and the generated URI artifact.
-    fn seed_direct_subscription(
-        fixture: &TempDir,
-    ) -> (DeploymentStore, DeploymentConfig, String) {
+    fn seed_direct_subscription(fixture: &TempDir) -> (DeploymentStore, DeploymentConfig, String) {
         let statistics = fixture.path().join("sys/class/net/ens3/statistics");
         fs::create_dir_all(&statistics).expect("statistics directory is created");
         fs::write(statistics.join("rx_bytes"), "100\n").expect("RX counter is written");
@@ -1128,7 +1150,11 @@ mod tests {
             .expect("an ephemeral listener is available");
         let port = listener.local_addr().expect("listener address").port();
 
-        let handler = tokio::spawn(super::serve_acme_listener(listener, Arc::new(store), Some(1)));
+        let handler = tokio::spawn(super::serve_acme_listener(
+            listener,
+            Arc::new(store),
+            Some(1),
+        ));
 
         let served = http_get(port, "/.well-known/acme-challenge/token-1").await;
         assert!(served.starts_with("HTTP/1.1 200 OK"), "challenge is served");
@@ -1178,7 +1204,10 @@ mod tests {
         ));
 
         let response = tls_get(port, &format!("/sub/{credential}/uri")).await;
-        assert!(response.starts_with("HTTP/1.1 200 OK"), "TLS subscription is served");
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "TLS subscription is served"
+        );
         assert!(response.contains("vless://"));
         assert!(response.contains("subscription-userinfo:"));
         handler.await.expect("handler completes").expect("no error");
@@ -1201,9 +1230,11 @@ mod tests {
             Some(1),
         ));
 
-        let handshake =
-            tls_handshake_sni(port, "attacker.example.test").await;
-        assert!(handshake.is_err(), "an SNI mismatch is rejected before any HTTP request");
+        let handshake = tls_handshake_sni(port, "attacker.example.test").await;
+        assert!(
+            handshake.is_err(),
+            "an SNI mismatch is rejected before any HTTP request"
+        );
         handler.await.expect("handler completes").expect("no error");
     }
 
@@ -1225,7 +1256,10 @@ mod tests {
         ));
 
         let handshake = tls_handshake_sni(port, "").await;
-        assert!(handshake.is_err(), "a missing SNI is rejected before any HTTP request");
+        assert!(
+            handshake.is_err(),
+            "a missing SNI is rejected before any HTTP request"
+        );
         handler.await.expect("handler completes").expect("no error");
     }
 
@@ -1236,8 +1270,7 @@ mod tests {
         store: &DeploymentStore,
         config: &DeploymentConfig,
     ) {
-        let certificate_directory =
-            fixture.path().join("etc/letsencrypt/live/sub.example.test");
+        let certificate_directory = fixture.path().join("etc/letsencrypt/live/sub.example.test");
         fs::create_dir_all(&certificate_directory).expect("certificate directory is created");
         let certificate = rcgen::generate_simple_self_signed(vec!["sub.example.test".into()])
             .expect("a self-signed certificate is generated");
@@ -1251,8 +1284,8 @@ mod tests {
             certificate.signing_key.serialize_pem(),
         )
         .expect("private key is written");
-        let validated = crate::certificate::load(store, config)
-            .expect("the fixture certificate is valid");
+        let validated =
+            crate::certificate::load(store, config).expect("the fixture certificate is valid");
         crate::certificate::pin(store, config, &validated)
             .expect("the certificate is pinned for the daemon");
     }
@@ -1359,7 +1392,11 @@ mod tests {
         let path = fixture.path().join("sing-box-check");
         fs::write(
             &path,
-            if accepts { "#!/bin/sh\nexit 0\n" } else { "#!/bin/sh\nexit 1\n" },
+            if accepts {
+                "#!/bin/sh\nexit 0\n"
+            } else {
+                "#!/bin/sh\nexit 1\n"
+            },
         )
         .expect("checker is written");
         #[cfg(unix)]
@@ -1413,14 +1450,21 @@ mod tests {
         let rejecting = checker(&fixture, false);
 
         let result = regenerate(&store, &vless_config(), Some(&rejecting), true);
-        assert!(result.is_err(), "a rejected check must fail the regeneration");
+        assert!(
+            result.is_err(),
+            "a rejected check must fail the regeneration"
+        );
         for (name, old) in [
             ("sing-box-server.json", "old server".as_bytes()),
             ("subscription-sing-box.json", "old sing-box".as_bytes()),
             ("subscription-clash.yaml", "old clash".as_bytes()),
             ("subscription-uri.txt", "old uri".as_bytes()),
         ] {
-            assert_eq!(artifact(&store, name), old, "{name} stays on the old complete version");
+            assert_eq!(
+                artifact(&store, name),
+                old,
+                "{name} stays on the old complete version"
+            );
         }
         assert_eq!(
             fs::read(store.root().join("etc/sing-box/config.json"))
@@ -1560,10 +1604,12 @@ mod tests {
         new.subscription_host = "198.51.100.9".into();
         let rejecting = checker(&fixture, false);
 
-        let result =
-            super::apply_config_transaction(&store, &new, Some(&rejecting));
+        let result = super::apply_config_transaction(&store, &new, Some(&rejecting));
 
-        assert!(result.is_err(), "a rejected check must fail the transaction");
+        assert!(
+            result.is_err(),
+            "a rejected check must fail the transaction"
+        );
         let expected = generated_artifacts(&old).expect("old artifacts are generated");
         for (name, contents) in &expected {
             assert_eq!(
@@ -1574,7 +1620,9 @@ mod tests {
         }
         assert_eq!(
             persisted_config(&store),
-            toml::to_string_pretty(&old).expect("old config serializes").as_bytes()
+            toml::to_string_pretty(&old)
+                .expect("old config serializes")
+                .as_bytes()
         );
     }
 
@@ -1601,7 +1649,9 @@ mod tests {
         }
         assert_eq!(
             persisted_config(&store),
-            toml::to_string_pretty(&new).expect("new config serializes").as_bytes()
+            toml::to_string_pretty(&new)
+                .expect("new config serializes")
+                .as_bytes()
         );
         let server = expected
             .iter()
@@ -1613,7 +1663,13 @@ mod tests {
                 .expect("active config is readable"),
             server
         );
-        assert_eq!(snapshot.config, toml::to_string_pretty(&old).expect("old serializes").as_bytes().to_vec());
+        assert_eq!(
+            snapshot.config,
+            toml::to_string_pretty(&old)
+                .expect("old serializes")
+                .as_bytes()
+                .to_vec()
+        );
     }
 
     #[test]
@@ -1623,11 +1679,13 @@ mod tests {
         let old = vless_config();
         write_initial_deployment(&store, &old);
         let artifacts_before = generated_artifacts(&old).expect("old artifacts are generated");
-        let active_before = fs::read(store.root().join("etc/sing-box/config.json")).expect("active config is readable");
+        let active_before = fs::read(store.root().join("etc/sing-box/config.json"))
+            .expect("active config is readable");
         let mut new = old.clone();
         new.monthly_traffic_limit = 1_000_000;
 
-        super::apply_config_transaction(&store, &new, None).expect("config-only change needs no check");
+        super::apply_config_transaction(&store, &new, None)
+            .expect("config-only change needs no check");
 
         for (name, contents) in &artifacts_before {
             assert_eq!(
@@ -1637,12 +1695,15 @@ mod tests {
             );
         }
         assert_eq!(
-            fs::read(store.root().join("etc/sing-box/config.json")).expect("active config is readable"),
+            fs::read(store.root().join("etc/sing-box/config.json"))
+                .expect("active config is readable"),
             active_before
         );
         assert_eq!(
             persisted_config(&store),
-            toml::to_string_pretty(&new).expect("new config serializes").as_bytes()
+            toml::to_string_pretty(&new)
+                .expect("new config serializes")
+                .as_bytes()
         );
     }
 
@@ -1670,7 +1731,9 @@ mod tests {
         }
         assert_eq!(
             persisted_config(&store),
-            toml::to_string_pretty(&old).expect("old config serializes").as_bytes()
+            toml::to_string_pretty(&old)
+                .expect("old config serializes")
+                .as_bytes()
         );
     }
 }
