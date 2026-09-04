@@ -1,6 +1,6 @@
 [package]
 name = "sbctl"
-version = "0.1.15"
+version = "0.1.16"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Control plane for a private sing-box deployment"
