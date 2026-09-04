@@ -885,7 +885,7 @@ fn sing_box_server(
                 ..
             } => json!({"type": "vless", "tag": node.tag(), "listen": "::",
                 "listen_port": port, "users": [{"uuid": uuid, "flow": "xtls-rprx-vision"}],
-                "tls": {"enabled": true, "reality": {"enabled": true,
+                "tls": {"enabled": true, "server_name": decoy_sni, "reality": {"enabled": true,
                     "handshake": {"server": decoy_sni, "server_port": 443}, "private_key": private_key,
                     "short_id": [short_id]}}}),
             CanonicalNode::VmessWebsocket {
