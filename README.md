@@ -1,8 +1,13 @@
 # sbctl
 
+[![CI](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/workflows/ci.yml/badge.svg)](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/xiaolingxiaoying/singbox-sub-me/blob/master/Cargo.toml)
+
 `sbctl` 是一个使用 Rust 编写的 sing-box 控制面工具，用于在单台 VPS 上部署和管理 sing-box，并生成私有订阅。
 
 项目的目标是保留 sing-box 作为数据面，将协议配置、订阅生成、证书生命周期、流量统计、服务管理和安全更新集中到一个可验证、可回滚的原生程序中。
+
+当前版本已具备从签名发布工件安装、配置五种协议、提供订阅、管理 systemd 服务以及安全更新/卸载的完整闭环。项目面向有 Linux VPS 和 systemd 运维能力的用户；它不会替用户修改防火墙、接管现有代理或管理反向代理。
 
 ## 功能概览
 
@@ -44,9 +49,9 @@
 - Debian 12 或 Ubuntu 22.04+
 - systemd
 - amd64；发布流程同时准备 arm64 工件
-- 已安装或可安装经过校验的 sing-box
+- 已安装或可从签名 manifest 下载经过校验的 sing-box
 
-当前版本不会自动支持 Alpine、非 systemd 系统、容器环境或 Windows/macOS 服务器。
+当前版本不会自动支持 Alpine、非 systemd 系统、容器环境或 Windows/macOS 服务器。Docker/WSL2 仅用于开发和验收，不是生产部署目标。
 
 ## 构建
 
@@ -152,6 +157,17 @@ sbctl config init \
 
 IP fallback 使用明文 HTTP，仅推荐在没有可用域名时使用，并且当前只允许 VLESS Reality。
 
+安装完成后，可使用配置向导修改已有部署。向导会先展示脱敏摘要，确认后才执行原子配置更新；直接回车会保留当前值：
+
+```bash
+sbctl config wizard
+sbctl config show
+sbctl config validate
+sbctl config switch-mode --mode external-proxy --listen-port 2080
+```
+
+向导还可设置协议监听证书模式（`domain` 或 `self-signed`）、账期策略、IANA 时区、首次锚定重置时间和每月流量上限。`self-signed` 证书只用于协议监听；Direct 订阅入口仍使用 Certbot/ACME 证书。
+
 ## 订阅模式
 
 ### Direct
@@ -159,6 +175,8 @@ IP fallback 使用明文 HTTP，仅推荐在没有可用域名时使用，并且
 sbctl 直接提供 HTTPS 订阅并使用 Certbot/ACME 管理域名证书。该模式需要域名；公网 TCP `80/443` 由 systemd 的 `sbctl-http.socket` 持有，并通过 `LISTEN_FDS` 交给非 root 的 `sbctl` 服务进程按本地端口区分 HTTP-01 与 TLS 订阅。`sbctl` 与 `sing-box` 分别使用独立的无登录服务账户。
 
 证书在加载前校验有效期、SAN、私钥匹配与 SNI；安装时写入 Certbot 的 renewal deploy hook（`sbctl certificate verify`），续期后重新校验并把证书固定到 `sbctl`/`sing-box` 两个服务账户可读的私有副本，下一次 TLS 连接自动使用新证书。续期由 Debian/Ubuntu 的 `certbot.timer`（或手动 `sbctl certificate renew`）触发，首次用 `sbctl certificate obtain --email <EMAIL>` 签发。
+
+Direct 模式需要域名解析到 VPS，且公网 TCP `80/443` 可供 ACME 和订阅入口使用。首次部署后，先完成 Certbot 签发并验证证书，再确认 `sbctl.service` 与 `sbctl-http.socket` 均正常运行。
 
 ### External proxy
 
@@ -189,6 +207,14 @@ sbctl sub --format sing-box
 sbctl sub --format clash
 sbctl sub --format uri
 
+# 轮换订阅凭据（旧订阅 URL 立即失效）
+sbctl credential rotate
+
+# Direct 模式证书
+sbctl certificate obtain --email admin@example.com
+sbctl certificate renew
+sbctl certificate verify
+
 # 校验配置并重启服务
 sbctl restart --sing-box-bin /usr/local/bin/sing-box
 
@@ -216,6 +242,8 @@ sbctl uninstall --purge
 ```
 
 `subscription-credential` 与任何协议的 UUID、password 都不同。订阅响应会包含动态生成的 `subscription-userinfo`，其中的流量统计是整张配置网卡的 VPS traffic，不代表单个协议或用户的流量。
+
+账期默认使用 UTC 自然月；需要自定义周期时，可在配置向导中选择 `anchored-month`，并设置 IANA 时区与首次重置时间。流量上限目前用于展示和订阅元数据，不会主动阻断 sing-box 数据面。
 
 ## 安全边界
 
@@ -264,6 +292,20 @@ docker compose -f docker-compose.acceptance.yml down
 可通过 `BASE_IMAGE=ubuntu:22.04` 或 `BASE_IMAGE=ubuntu:24.04` 切换验收发行版。
 该配置需要 Docker Desktop/Engine 开启 Linux 容器、特权容器和 cgroup 挂载权限；Windows
 路径建议使用 WSL 路径执行。生产部署仍应使用 Debian/Ubuntu VPS 上的 systemd。
+
+## 发布与更新
+
+推送 `v*` 标签会触发 GitHub Actions 发布流程，为 `amd64` 和 `arm64` 构建 sbctl，运行 Debian/Ubuntu systemd 验收，并上传 sing-box 工件和按架构区分的签名 manifest。安装器和运行时都会先验证 Ed25519 manifest 签名，再验证每个二进制的 SHA-256；不会信任 manifest 中的未固定 URL 或摘要。
+
+发布后的主机更新会保留回滚点，并在替换前执行候选 sing-box 的配置检查和服务健康检查：
+
+```bash
+sbctl update --check
+sbctl update
+sbctl sing-box update
+```
+
+完整的安装、systemd 单元和真实主机验收说明见 [`docs/installation.md`](docs/installation.md) 与 [`docs/release-readiness-and-vps-test-plan.md`](docs/release-readiness-and-vps-test-plan.md)。
 
 ## 参考项目
 
