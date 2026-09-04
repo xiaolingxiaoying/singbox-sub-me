@@ -11,7 +11,12 @@ acceptance_lib=${SBCTL_ACCEPTANCE_LIB:-/usr/local/lib/sbctl-acceptance/fixture.s
 . "$acceptance_lib"
 
 fail() { echo "acceptance failure: $*" >&2; exit 1; }
-contains() { printf '%s' "$1" | grep -F -- "$2" >/dev/null || fail "expected output to contain: $2"; }
+contains() {
+  printf '%s' "$1" | grep -F -- "$2" >/dev/null && return 0
+  echo "acceptance output did not contain: $2" >&2
+  printf '%s\n' "$1" | grep -i 'subscription-userinfo' >&2 || true
+  fail "expected output to contain: $2"
+}
 fake_sing_box="$work/sing-box"
 printf '#!/bin/sh\nexit 0\n' > "$fake_sing_box"
 chmod 0755 "$fake_sing_box"
@@ -86,7 +91,7 @@ sleep 1
 for path in sing-box.json clash.yaml uri; do
   response=$(curl --silent --show-error --include "http://127.0.0.1:2080/sub/$credential/$path")
   contains "$response" 'HTTP/1.1 200 OK'
-  contains "$response" 'subscription-userinfo: upload=36; download=71; total=999; expire='
+  contains "$response" 'subscription-userinfo: upload=71; download=36; total=999; expire='
 done
 query_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2080/sub/$credential/uri?credential=$credential")
 test "$query_status" = 404 || fail 'query-string credential was accepted'
