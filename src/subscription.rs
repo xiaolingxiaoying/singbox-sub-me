@@ -945,7 +945,7 @@ fn clash(config: &DeploymentConfig, nodes: &[CanonicalNode]) -> Result<String, S
                 decoy_sni,
                 ..
             } => format!(
-                "  - name: {}\n    type: vless\n    server: {host}\n    port: {port}\n    uuid: {uuid}\n    network: tcp\n    flow: xtls-rprx-vision\n    tls: true\n    servername: {decoy_sni}\n    client-fingerprint: chrome\n    reality-opts:\n      public-key: {public_key}\n      short-id: {short_id}\n",
+                "  - name: {}\n    type: vless\n    server: {host}\n    port: {port}\n    uuid: {uuid}\n    network: tcp\n    udp: true\n    flow: xtls-rprx-vision\n    tls: true\n    servername: {decoy_sni}\n    client-fingerprint: chrome\n    reality-opts:\n      public-key: {public_key}\n      short-id: {short_id}\n",
                 node.tag()
             ),
             CanonicalNode::VmessWebsocket {
@@ -983,7 +983,7 @@ fn clash(config: &DeploymentConfig, nodes: &[CanonicalNode]) -> Result<String, S
                 tls_server_name,
                 password,
             } => format!(
-                "  - name: {}\n    type: anytls\n    server: {host}\n    port: {port}\n    password: {password}\n    tls: true\n    sni: {tls_server_name}\n    skip-cert-verify: {skip}\n",
+                "  - name: {}\n    type: anytls\n    server: {host}\n    port: {port}\n    password: {password}\n    client-fingerprint: chrome\n    udp: true\n    idle-session-check-interval: 30\n    idle-session-timeout: 30\n    tls: true\n    sni: {tls_server_name}\n    skip-cert-verify: {skip}\n",
                 node.tag()
             ),
         };
