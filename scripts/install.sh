@@ -51,7 +51,10 @@ curl --fail --globoff --location --silent --show-error "$manifest_url" >"$work_d
 
 # Verify the manifest signature BEFORE trusting any URL or digest in it. A
 # signature failure stops the install with no artifact accessed.
-jq -S -c 'del(.signature)' "$work_dir/manifest.json" >"$work_dir/canonical.json"
+# jq appends a trailing newline, while Rust's canonical JSON signer covers the
+# exact compact JSON bytes without one. Remove only jq's record terminator so
+# both verification implementations sign and verify the same payload.
+jq -S -c 'del(.signature)' "$work_dir/manifest.json" | tr -d '\r\n' >"$work_dir/canonical.json"
 jq -r '.signature' "$work_dir/manifest.json" | base64 -d >"$work_dir/signature.bin"
 printf '%s\n' "$SBCTL_PUBLIC_KEY_PEM" >"$work_dir/public-key.pem"
 if ! openssl pkeyutl -verify -pubin -inkey "$work_dir/public-key.pem" -rawin \

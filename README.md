@@ -228,6 +228,19 @@ systemd Debian/Ubuntu VM 或等价环境才属于 Production host 验收依据�
 验收使用本地注入的 `sbctl` 发布二进制和容器内的 fake sing-box，不依赖 GitHub
 Release 或公网域名；容器仅用于验收，不代表 sbctl 支持容器作为生产部署环境。
 
+也可以使用仓库提供的 Compose 配置启动单个 systemd 验收容器（默认 Debian 12）：
+
+```bash
+SBCTL_ARTIFACT=./target/release/sbctl docker compose -f docker-compose.acceptance.yml up -d --build
+docker exec sbctl-acceptance systemctl is-system-running
+docker exec sbctl-acceptance /usr/local/lib/sbctl-acceptance/verify-bootstrap.sh
+docker compose -f docker-compose.acceptance.yml down
+```
+
+可通过 `BASE_IMAGE=ubuntu:22.04` 或 `BASE_IMAGE=ubuntu:24.04` 切换验收发行版。
+该配置需要 Docker Desktop/Engine 开启 Linux 容器、特权容器和 cgroup 挂载权限；Windows
+路径建议使用 WSL 路径执行。生产部署仍应使用 Debian/Ubuntu VPS 上的 systemd。
+
 ## 参考项目
 
 - [sing-box-yg](https://github.com/yonggekkk/sing-box-yg)：五协议配置、端口和节点输出的行为参考

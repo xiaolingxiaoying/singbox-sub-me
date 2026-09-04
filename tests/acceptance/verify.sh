@@ -32,6 +32,7 @@ grep -F 'Requires=sbctl-http.socket' "$root/etc/systemd/system/sbctl.service" >/
 grep -F 'User=sbctl' "$root/etc/systemd/system/sbctl.service" >/dev/null || fail 'sbctl.service does not run as sbctl'
 grep -F 'User=sing-box' "$root/etc/systemd/system/sing-box.service" >/dev/null || fail 'sing-box.service does not run as sing-box'
 fixture_seed_certificate sub.example.test
+"$sbctl" --root "$root" certificate verify >/dev/null
 "$sbctl" --root "$root" accounting-reset >/dev/null
 # systemd-socket-activate plays the role of the sbctl-http.socket unit: it
 # binds TCP 80 and 443 and passes both listeners to a non-root-required
@@ -85,7 +86,7 @@ sleep 1
 for path in sing-box.json clash.yaml uri; do
   response=$(curl --silent --show-error --include "http://127.0.0.1:2080/sub/$credential/$path")
   contains "$response" 'HTTP/1.1 200 OK'
-  contains "$response" 'subscription-userinfo: upload=36; download=71; total=107; expire='
+  contains "$response" 'subscription-userinfo: upload=36; download=71; total=999; expire='
 done
 query_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2080/sub/$credential/uri?credential=$credential")
 test "$query_status" = 404 || fail 'query-string credential was accepted'

@@ -16,8 +16,17 @@ chmod 0755 "$work/sbctl" "$work/sing-box"
 sbctl_sha=$(sha256sum "$work/sbctl" | awk '{print $1}')
 sing_box_sha=$(sha256sum "$work/sing-box" | awk '{print $1}')
 cat > "$work/manifest-amd64.json" <<EOF
-{"sbctl":{"url":"file://$work/sbctl","sha256":"$sbctl_sha"},"sing_box":{"url":"file://$work/sing-box","sha256":"$sing_box_sha"}}
+{"schema":1,"sbctl":{"version":"0.0.0","url":"file://$work/sbctl","sha256":"$sbctl_sha"},"sing_box":{"version":"0.0.0","url":"file://$work/sing-box","sha256":"$sing_box_sha"},"sing_box_compatibility":[{"min":"0.0.0","max":"0.0.0"}]}
 EOF
+
+# The bootstrap installer now authenticates manifests before downloading either
+# artifact. Sign this local fixture with the development-only test key.
+sbctl_signer=${SBCTL_BIN:-/opt/sbctl/sbctl}
+"$sbctl_signer" release sign \
+  --manifest "$work/manifest-amd64.json" \
+  --private-key /usr/local/lib/sbctl-acceptance/dev-signing-key.hex \
+  --output "$work/manifest-amd64.signed.json"
+mv "$work/manifest-amd64.signed.json" "$work/manifest-amd64.json"
 
 PATH="$work/bin:$PATH" SBCTL_MANIFEST_URL="file://$work/manifest-{arch}.json" "$installer" \
   --mode ip-fallback \

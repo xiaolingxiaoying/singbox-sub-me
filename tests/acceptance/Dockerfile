@@ -9,7 +9,9 @@ COPY tests/acceptance/verify-real.sh /usr/local/lib/sbctl-acceptance/verify-real
 COPY tests/acceptance/verify-bootstrap.sh /usr/local/lib/sbctl-acceptance/verify-bootstrap.sh
 COPY tests/acceptance/fixture.sh /usr/local/lib/sbctl-acceptance/fixture.sh
 COPY scripts/install.sh /usr/local/lib/sbctl-acceptance/install.sh
-RUN chmod 0755 /usr/local/lib/sbctl-acceptance/verify.sh
+COPY scripts/dev-signing-key.hex /usr/local/lib/sbctl-acceptance/dev-signing-key.hex
+RUN sed -i 's/\r$//' /usr/local/lib/sbctl-acceptance/*.sh \
+    && chmod 0755 /usr/local/lib/sbctl-acceptance/verify.sh
 RUN chmod 0755 /usr/local/lib/sbctl-acceptance/verify-real.sh \
     /usr/local/lib/sbctl-acceptance/verify-bootstrap.sh \
     /usr/local/lib/sbctl-acceptance/install.sh \
