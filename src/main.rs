@@ -812,9 +812,8 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
             sbctl::lifecycle::prepare_daemon_prerequisites(root, direct)
                 .map_err(sbctl::config::ConfigError::StateContent)?;
             if direct {
-                sbctl::certificate::deploy_hook(&store, &config).map_err(|error| {
-                    sbctl::config::ConfigError::StateContent(error.to_string())
-                })?;
+                sbctl::certificate::pin_if_present(&store, &config)
+                    .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
             }
             sbctl::traffic::reset(&store, &config)
                 .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;

@@ -9,7 +9,7 @@ use qrcode::{Color, QrCode};
 pub fn render_ansi(data: &str) -> Result<String, String> {
     let code = QrCode::new(data.as_bytes()).map_err(|error| error.to_string())?;
     let modules = code.to_colors();
-    let width = code.width() as usize;
+    let width = code.width();
     let mut out = String::new();
     out.push_str("\x1b[30;47m");
     let mut row = 0;

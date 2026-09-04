@@ -300,6 +300,25 @@ pub fn deploy_hook(
     publish(store, config)
 }
 
+/// Pins the already-issued certificate during installation, but only when one
+/// actually exists. A fresh Direct deployment has no certificate yet: the units
+/// and the socket-activated HTTPS listener are installed first, then the
+/// certificate is obtained and pinned afterwards via `certificate obtain`.
+/// Returns the validated certificate when present, or `Ok(None)` when none has
+/// been issued yet, so a not-yet-obtained certificate never blocks an install.
+pub fn pin_if_present(
+    store: &DeploymentStore,
+    config: &DeploymentConfig,
+) -> Result<Option<ValidatedCertificate>, CertificateError> {
+    if !live_directory(store, config)
+        .join("fullchain.pem")
+        .is_file()
+    {
+        return Ok(None);
+    }
+    publish(store, config).map(Some)
+}
+
 fn publish(
     store: &DeploymentStore,
     config: &DeploymentConfig,

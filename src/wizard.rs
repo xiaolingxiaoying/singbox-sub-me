@@ -138,7 +138,7 @@ pub fn run<C: Prompts>(
         "协议监听证书 (domain / self-signed)",
         existing
             .map(|config| config.certificate_mode.to_string())
-            .or_else(|| Some(CertificateMode::Domain.to_string())),
+            .or_else(|| Some(CertificateMode::SelfSigned.to_string())),
         parse_certificate_mode,
     )?;
 

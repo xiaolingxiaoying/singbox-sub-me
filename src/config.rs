@@ -297,7 +297,7 @@ impl DeploymentConfig {
             proxy_host,
             http_port,
             subscription_listen_port,
-            certificate_mode: CertificateMode::Domain,
+            certificate_mode: CertificateMode::SelfSigned,
             interface,
             enabled_protocols,
             reality_decoy_sni,
