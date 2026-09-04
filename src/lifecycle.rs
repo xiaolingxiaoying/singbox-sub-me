@@ -244,6 +244,7 @@ pub fn uninstall(root: &Path, purge: bool) -> Result<Option<std::path::PathBuf>,
     if sbctl_unit_owned {
         remove_file_if_present(&root.join(SBCTL_UNIT))?;
         remove_file_if_present(&root.join("usr/local/bin/sbctl"))?;
+        remove_file_if_present(&root.join("usr/local/bin/ly"))?;
     }
     if sing_box_unit_owned {
         remove_file_if_present(&root.join(SING_BOX_UNIT))?;

@@ -62,30 +62,54 @@ cargo build --release
 target/release/sbctl
 ```
 
-## 安装
+## 一键安装
 
-在 Debian/Ubuntu VPS 上，首次安装只需运行一个脚本；脚本会先校验发布 manifest 和两个
+在 Debian/Ubuntu VPS 上，首次安装只需一行命令；脚本会先校验发布 manifest 和两个
 二进制，再以中文菜单引导选择订阅模式、域名/IP、网卡和协议：
 
 ```bash
-wget -O /tmp/sbctl-install.sh https://raw.githubusercontent.com/xiaolingxiaoying/singbox-sub-me/master/scripts/install.sh
-bash /tmp/sbctl-install.sh
+bash <(wget -qO- https://raw.githubusercontent.com/xiaolingxiaoying/singbox-sub-me/main/scripts/install.sh)
 ```
 
 脚本默认从最新 GitHub Release 取得与系统架构匹配的 manifest；可通过
 `SBCTL_MANIFEST_URL` 固定到指定版本。保留传递 `sbctl install` 参数的非交互入口，适合
 自动化部署；交互式安装不会修改防火墙，也不会接管已有 sing-box、sing-box-yg、Nginx 或 Caddy。
 
-安装后检查服务并获取订阅地址：
+安装完成后会安装快捷方式命令 `ly`。直接运行 `ly`（等价 `sbctl menu`，简写 `sbctl m`）
+进入 sing-box-yg 风格的全屏彩色菜单，以数字选择驱动：
+
+```
+ 1. 一键安装 / 重新部署       8. 更新 sbctl（一键升级）
+ 2. 查看部署状态              9. 更新 / 切换 sing-box 内核
+ 3. 查看 VPS 流量            10. 查看运行日志
+ 4. 查看节点端口 / SNI        11. 卸载 sbctl
+ 5. 显示订阅地址 + 二维码      0. 退出
+ 6. 修改部署配置（端口随机/指定、订阅主机 IP↔域名）
+ 7. 校验配置并重启服务
+```
+
+命令行方式检查服务并获取订阅地址：
 
 ```bash
 systemctl status sbctl.service sing-box.service
 sbctl status
-sbctl sub
+sbctl sub          # 订阅 URL
+sbctl qr           # 订阅 URL 二维码
 ```
 
-之后可随时使用 `sbctl menu`（或简写 `sbctl m`）重新进入交互式管理菜单。菜单提供状态、
-VPS 流量、节点端口、订阅地址、服务重启和保留备份的卸载操作；重启和卸载会要求确认。
+升级 sbctl 与 sing-box（自动拉取并校验最新签名 manifest）：
+
+```bash
+sbctl update --check   # 仅显示可用版本
+sbctl update           # 实际升级（含回滚点）
+sbctl sing-box update  # 仅升级 sing-box 内核
+```
+
+卸载（保留备份与配置，`--purge` 连数据一起清除）：
+
+```bash
+sbctl uninstall
+```
 
 选择 `external-proxy` 时，sbctl 默认监听 `127.0.0.1:2080`，请在 Nginx/Caddy 中将 `/sub/` 反代到该地址。
 五个协议端口用 `sbctl node` 查看，并在 VPS 安全组/防火墙中放行；sbctl 不会自动修改防火墙。

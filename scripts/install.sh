@@ -3,12 +3,29 @@ set -euo pipefail
 
 # sbctl bootstrap installer.
 #
+# One-line usage:  bash <(wget -qO- https://raw.githubusercontent.com/xiaolingxiaoying/singbox-sub-me/main/scripts/install.sh)
+#
 # The only trust decisions this script makes are the sbctl binary download,
 # which it protects by verifying the Ed25519 signature over the canonical JSON
 # of the release manifest BEFORE trusting any URL or digest. Every later trust
 # decision (sing-box download, digest, compatibility matrix, candidate checks)
 # is made by the installed sbctl binary with the same built-in public key, so
 # the script cannot bypass the Rust verification rules.
+
+red()   { echo -e "\033[31m\033[01m$*\033[0m"; }
+green() { echo -e "\033[32m\033[01m$*\033[0m"; }
+yellow(){ echo -e "\033[33m\033[01m$*\033[0m"; }
+blue()  { echo -e "\033[36m\033[01m$*\033[0m"; }
+white() { echo -e "\033[37m\033[01m$*\033[0m"; }
+
+clear
+white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+blue  "   sbctl  ·  私有 sing-box 订阅控制面"
+white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+blue  " 项目  : github.com/xiaolingxiaoying/singbox-sub-me"
+blue  "快捷方式: ly"
+white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+echo
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "请使用 root 运行此安装脚本" >&2
@@ -77,6 +94,8 @@ esac
 curl --fail --location --silent --show-error "$artifact_url" >"$work_dir/sbctl"
 printf '%s  %s\n' "$expected_sha" "$work_dir/sbctl" | sha256sum --check --status
 install -m 0755 "$work_dir/sbctl" /usr/local/bin/sbctl
+ln -sf /usr/local/bin/sbctl /usr/local/bin/ly
+green "sbctl 已安装；快捷方式：ly"
 
 if [[ "$#" -eq 0 ]]; then
   if [[ -t 0 ]]; then

@@ -98,6 +98,11 @@ jobs:
           gh release upload "$RELEASE_TAG" \
             sbctl-linux-amd64 sbctl-linux-arm64 sing-box-linux-amd64 sing-box-linux-arm64 \
             --repo "$GITHUB_REPOSITORY" --clobber
+      - name: Install tooling for manifest signing
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          install -m 0755 sbctl-linux-amd64 /usr/local/bin/sbctl
       - name: Generate and upload architecture manifests
         env:
           GH_TOKEN: ${{ github.token }}

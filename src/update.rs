@@ -60,6 +60,50 @@ pub fn read_manifest(path: &Path) -> Result<ReleaseManifest, UpdateError> {
     Ok(crate::release::verify_manifest(path)?)
 }
 
+/// The release manifest URL for a given host architecture. The `latest`
+/// redirect is acceptable here because the fetched manifest pins fixed,
+/// versioned artifact URLs and is signature-verified before any URL is trusted.
+pub fn manifest_url_for_arch(arch: &str) -> String {
+    format!(
+        "https://github.com/xiaolingxiaoying/singbox-sub-me/releases/latest/download/manifest-{arch}.json"
+    )
+}
+
+/// Host architecture translated to the release manifest's `amd64`/`arm64` keys.
+pub fn host_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        _ => "amd64",
+    }
+}
+
+/// Downloads and signature-verifies the latest pinned release manifest for this
+/// host. The Ed25519 signature is checked before any artifact URL is trusted,
+/// so a failed signature never leads to a download or replacement.
+pub fn fetch_latest_manifest() -> Result<ReleaseManifest, UpdateError> {
+    let temporary = tempfile::NamedTempFile::new()?;
+    let url = manifest_url_for_arch(host_arch());
+    let status = Command::new("curl")
+        .args([
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--output",
+        ])
+        .arg(temporary.path())
+        .arg(&url)
+        .status()
+        .map_err(|error| UpdateError::DownloadFailed("manifest", error.to_string()))?;
+    if !status.success() {
+        return Err(UpdateError::DownloadFailed(
+            "manifest",
+            format!("curl exited with {status}"),
+        ));
+    }
+    Ok(crate::release::verify_manifest(temporary.path())?)
+}
+
 pub fn available_versions(manifest: &ReleaseManifest) -> String {
     format!(
         "sbctl: {} available\nsing-box: {} available",
@@ -290,4 +334,28 @@ fn check_sbctl_candidate(candidate: &Path) -> Result<(), UpdateError> {
         .success()
         .then_some(())
         .ok_or_else(|| UpdateError::SbctlHealth(format!("candidate exited with {status}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_url_for_arch_uses_arch_key() {
+        let url = manifest_url_for_arch("arm64");
+        assert!(
+            url.ends_with("manifest-arm64.json"),
+            "unexpected url: {url}"
+        );
+        assert!(
+            url.contains("releases/latest/download"),
+            "unexpected url: {url}"
+        );
+    }
+
+    #[test]
+    fn host_arch_maps_to_supported_key() {
+        let arch = host_arch();
+        assert!(matches!(arch, "amd64" | "arm64"), "unexpected arch: {arch}");
+    }
 }

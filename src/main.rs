@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -13,7 +14,7 @@ struct Cli {
     #[arg(long, global = true, hide = true, value_name = "PATH")]
     root: Option<PathBuf>,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -89,8 +90,9 @@ enum Command {
         #[arg(long)]
         check: bool,
         /// Signed release manifest containing the allowed artifact hashes.
+        /// Omit to fetch and verify the latest signed manifest for this host.
         #[arg(long, value_name = "PATH")]
-        manifest: PathBuf,
+        manifest: Option<PathBuf>,
         /// Optional local sbctl candidate artifact; otherwise download from the manifest.
         #[arg(long, value_name = "PATH")]
         sbctl_artifact: Option<PathBuf>,
@@ -112,6 +114,11 @@ enum Command {
     },
     /// Retrieve a generated subscription representation using its path credential.
     Sub {
+        #[arg(long, value_enum)]
+        format: Option<CliSubscriptionFormat>,
+    },
+    /// Print a terminal QR code for a generated subscription representation.
+    Qr {
         #[arg(long, value_enum)]
         format: Option<CliSubscriptionFormat>,
     },
@@ -357,8 +364,9 @@ enum SingBoxCommand {
     },
     /// Download (when needed), verify, and replace the managed sing-box binary.
     Update {
+        /// Omit to fetch and verify the latest signed manifest for this host.
         #[arg(long)]
-        manifest: PathBuf,
+        manifest: Option<PathBuf>,
         #[arg(long)]
         artifact: Option<PathBuf>,
     },
@@ -410,7 +418,22 @@ impl From<CliAccountingPolicy> for sbctl::config::AccountingPolicy {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let root = cli.root.as_deref().unwrap_or_else(|| Path::new("/"));
-    match cli.command {
+    let command = match cli.command {
+        Some(command) => command,
+        None => {
+            // No subcommand supplied: open the interactive menu when the user is
+            // at a terminal (the `ly` shortcut path). Non-interactive invocations
+            // print the help text instead.
+            if io::stdin().is_terminal() {
+                return menu(root);
+            }
+            use clap::CommandFactory;
+            let mut command = Cli::command();
+            let _ = command.print_help();
+            return ExitCode::from(2);
+        }
+    };
+    match command {
         Command::Install {
             mode,
             subscription_host,
@@ -472,13 +495,14 @@ fn main() -> ExitCode {
         } => update(
             root,
             check,
-            &manifest,
+            manifest.as_deref(),
             sbctl_artifact.as_deref(),
             sing_box_artifact.as_deref(),
         ),
         Command::SingBox { command } => sing_box(root, command),
         Command::Release { command } => release(command),
         Command::Sub { format } => print_subscription_urls(root, format.map(Into::into)),
+        Command::Qr { format } => print_subscription_qr(root, format.map(Into::into)),
         Command::Credential { command } => run_credential(root, command),
         Command::Serve { bind, max_requests } => serve_subscription(root, bind, max_requests),
         Command::Certificate { command } => run_certificate(root, command),
@@ -501,7 +525,11 @@ fn sing_box(root: &Path, command: SingBoxCommand) -> ExitCode {
             })
             .map(|_| "sing-box installed".to_owned()),
         SingBoxCommand::Update { manifest, artifact } => {
-            let result = sbctl::update::read_manifest(&manifest).and_then(|manifest| {
+            let resolved_manifest = match manifest {
+                Some(path) => sbctl::update::read_manifest(&path),
+                None => sbctl::update::fetch_latest_manifest(),
+            };
+            let result = resolved_manifest.and_then(|manifest| {
                 let temporary = tempfile::NamedTempFile::new().map_err(|error| {
                     sbctl::update::UpdateError::DownloadFailed("sing-box", error.to_string())
                 })?;
@@ -603,48 +631,17 @@ fn uninstall(root: &Path, purge: bool) -> ExitCode {
 fn update(
     root: &Path,
     check: bool,
-    manifest_path: &Path,
+    manifest_path: Option<&Path>,
     sbctl_artifact: Option<&Path>,
     sing_box_artifact: Option<&Path>,
 ) -> ExitCode {
-    let result = sbctl::update::read_manifest(manifest_path).and_then(|manifest| {
-        if check {
-            return Ok(format!(
-                "update check completed without downloading or changing the host\n{}",
-                sbctl::update::available_versions(&manifest)
-            ));
-        }
-        let sbctl_download = tempfile::NamedTempFile::new().map_err(|error| {
-            sbctl::update::UpdateError::DownloadFailed("sbctl", error.to_string())
-        })?;
-        let sing_box_download = tempfile::NamedTempFile::new().map_err(|error| {
-            sbctl::update::UpdateError::DownloadFailed("sing-box", error.to_string())
-        })?;
-        let sbctl_artifact = match sbctl_artifact {
-            Some(path) => path.to_path_buf(),
-            None => {
-                sbctl::update::download_sbctl(&manifest, sbctl_download.path())?;
-                sbctl_download.path().to_path_buf()
-            }
-        };
-        let sing_box_artifact = match sing_box_artifact {
-            Some(path) => path.to_path_buf(),
-            None => {
-                sbctl::update::download_sing_box(&manifest, sing_box_download.path())?;
-                sing_box_download.path().to_path_buf()
-            }
-        };
-        let rollback = sbctl::update::apply(
-            &sbctl::config::DeploymentStore::new(root),
-            &manifest,
-            &sbctl_artifact,
-            &sing_box_artifact,
-        )?;
-        Ok(format!(
-            "update completed after verified validation and service health checks\nrollback point: {}",
-            rollback.display()
-        ))
-    });
+    let result = update_impl(
+        root,
+        check,
+        manifest_path,
+        sbctl_artifact,
+        sing_box_artifact,
+    );
     match result {
         Ok(message) => {
             println!("{message}");
@@ -655,6 +652,54 @@ fn update(
             ExitCode::from(2)
         }
     }
+}
+
+fn update_impl(
+    root: &Path,
+    check: bool,
+    manifest_path: Option<&Path>,
+    sbctl_artifact: Option<&Path>,
+    sing_box_artifact: Option<&Path>,
+) -> Result<String, sbctl::update::UpdateError> {
+    let manifest = match manifest_path {
+        Some(path) => sbctl::update::read_manifest(path)?,
+        None => sbctl::update::fetch_latest_manifest()?,
+    };
+    if check {
+        return Ok(format!(
+            "update check completed without downloading or changing the host\n{}",
+            sbctl::update::available_versions(&manifest)
+        ));
+    }
+    let sbctl_download = tempfile::NamedTempFile::new()
+        .map_err(|error| sbctl::update::UpdateError::DownloadFailed("sbctl", error.to_string()))?;
+    let sing_box_download = tempfile::NamedTempFile::new().map_err(|error| {
+        sbctl::update::UpdateError::DownloadFailed("sing-box", error.to_string())
+    })?;
+    let sbctl_artifact = match sbctl_artifact {
+        Some(path) => path.to_path_buf(),
+        None => {
+            sbctl::update::download_sbctl(&manifest, sbctl_download.path())?;
+            sbctl_download.path().to_path_buf()
+        }
+    };
+    let sing_box_artifact = match sing_box_artifact {
+        Some(path) => path.to_path_buf(),
+        None => {
+            sbctl::update::download_sing_box(&manifest, sing_box_download.path())?;
+            sing_box_download.path().to_path_buf()
+        }
+    };
+    let rollback = sbctl::update::apply(
+        &sbctl::config::DeploymentStore::new(root),
+        &manifest,
+        &sbctl_artifact,
+        &sing_box_artifact,
+    )?;
+    Ok(format!(
+        "update completed after verified validation and service health checks\nrollback point: {}",
+        rollback.display()
+    ))
 }
 
 fn install(root: &Path, options: InstallOptions) -> ExitCode {
@@ -804,56 +849,190 @@ fn menu(root: &Path) -> ExitCode {
     }
 
     loop {
-        println!(
-            "\nsbctl 管理菜单\n1) 查看部署状态\n2) 查看 VPS 流量\n3) 查看节点端口\n4) 显示订阅地址\n5) 校验配置并重启服务\n6) 修改部署配置（向导）\n7) 轮换 Subscription credential\n8) 卸载 sbctl（保留备份和配置）\n0) 退出"
-        );
-        print!("请选择 [0]: ");
-        if let Err(error) = io::stdout().flush() {
-            eprintln!("menu failed: {error}");
+        print_menu_header(root);
+        println!();
+        print!("{}", sbctl::term::yellow("请选择 [0]: "));
+        if io::stdout().flush().is_err() {
             return ExitCode::from(2);
         }
         let mut choice = String::new();
-        if let Err(error) = io::stdin().read_line(&mut choice) {
-            eprintln!("menu failed: {error}");
+        if io::stdin().read_line(&mut choice).is_err() {
             return ExitCode::from(2);
         }
-
         match choice.trim() {
             "" | "0" => return ExitCode::SUCCESS,
-            "1" => {
+            "1" => menu_install(root),
+            "2" => {
                 print_status(root);
             }
-            "2" => {
+            "3" => {
                 print_traffic(root);
             }
-            "3" => {
+            "4" => {
                 print_nodes(root);
             }
-            "4" => {
-                print_subscription_urls(root, None);
-            }
             "5" => {
-                if confirm_menu_action("确认校验配置并重启服务") {
-                    restart(root, None);
-                }
+                print_subscription_urls(root, None);
+                println!();
+                print_subscription_qr(root, None);
             }
             "6" => {
                 run_config_wizard(root, None);
             }
             "7" => {
-                if confirm_menu_action("确认轮换 Subscription credential（旧订阅 URL 将立即失效）")
-                {
-                    rotate_subscription_credential(root);
+                if confirm_menu_action("确认校验配置并重启服务") {
+                    restart(root, None);
                 }
             }
             "8" => {
+                if confirm_menu_action("确认更新 sbctl 与 sing-box（自动拉取签名 manifest）")
+                {
+                    update(root, false, None, None, None);
+                }
+            }
+            "9" => {
+                if confirm_menu_action("确认更新 / 切换 sing-box 内核") {
+                    sing_box(
+                        root,
+                        SingBoxCommand::Update {
+                            manifest: None,
+                            artifact: None,
+                        },
+                    );
+                }
+            }
+            "10" => menu_logs(),
+            "11" => {
                 if confirm_menu_action("确认卸载 sbctl 服务和二进制（保留备份和配置）")
                 {
                     return uninstall(root, false);
                 }
             }
-            _ => eprintln!("无效选择，请输入 0 到 8。"),
+            _ => eprintln!("无效选择，请输入 0 到 11。"),
         }
+        println!();
+    }
+}
+
+fn print_menu_header(root: &Path) {
+    let (os, kernel, cpu, bbr) = system_info();
+    let bar = sbctl::term::blue("-".repeat(70));
+    println!("{bar}");
+    println!(
+        "{}",
+        sbctl::term::white("  sbctl  ·  私有 sing-box 订阅控制面")
+    );
+    println!("{}", sbctl::term::blue("  快捷方式: ly"));
+    println!(
+        "{}",
+        sbctl::term::blue("  项目: github.com/xiaolingxiaoying/singbox-sub-me")
+    );
+    println!("{bar}");
+    println!(
+        "{}",
+        sbctl::term::green(format!(
+            "系统: {os}   内核: {kernel}   处理器: {cpu}   BBR: {bbr}"
+        ))
+    );
+    match sbctl::config::DeploymentStore::new(root).load() {
+        Ok(config) => {
+            println!(
+                "{}",
+                sbctl::term::yellow(format!(
+                    "订阅模式: {}   订阅主机: {}",
+                    config.subscription_mode, config.subscription_host
+                ))
+            );
+            println!(
+                "{}",
+                sbctl::term::green(sbctl::lifecycle::service_status(root))
+            );
+            println!("{}", sbctl::term::green("状态: 已部署"));
+        }
+        Err(_) => println!("{}", sbctl::term::red("状态: 未安装，请选择 1 安装")),
+    }
+    println!("{bar}");
+    println!("{}", sbctl::term::green(" 1. 一键安装 / 重新部署"));
+    println!("{}", sbctl::term::green(" 2. 查看部署状态"));
+    println!("{}", sbctl::term::green(" 3. 查看 VPS 流量"));
+    println!("{}", sbctl::term::green(" 4. 查看节点端口 / SNI"));
+    println!("{}", sbctl::term::green(" 5. 显示订阅地址 + 二维码"));
+    println!(
+        "{}",
+        sbctl::term::green(" 6. 修改部署配置（端口随机/指定、订阅主机 IP↔域名）")
+    );
+    println!("{}", sbctl::term::green(" 7. 校验配置并重启服务"));
+    println!("{}", sbctl::term::green(" 8. 更新 sbctl（一键升级）"));
+    println!("{}", sbctl::term::green(" 9. 更新 / 切换 sing-box 内核"));
+    println!("{}", sbctl::term::green("10. 查看运行日志"));
+    println!("{}", sbctl::term::green("11. 卸载 sbctl"));
+    println!("{}", sbctl::term::green(" 0. 退出"));
+    println!("{bar}");
+}
+
+fn system_info() -> (String, String, String, String) {
+    let os = fs::read_to_string("/etc/os-release")
+        .ok()
+        .and_then(|contents| {
+            contents
+                .lines()
+                .find(|line| line.starts_with("PRETTY_NAME="))
+                .map(|line| line["PRETTY_NAME=".len()..].trim_matches('"').to_owned())
+        })
+        .unwrap_or_else(|| "unknown".to_owned());
+    let kernel =
+        fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_else(|_| "unknown".to_owned());
+    let bbr = fs::read_to_string("/proc/sys/net/ipv4/tcp_congestion_control")
+        .unwrap_or_else(|_| "unknown".to_owned());
+    let cpu = std::env::consts::ARCH.to_owned();
+    (os, kernel.trim().to_owned(), cpu, bbr.trim().to_owned())
+}
+
+fn menu_install(root: &Path) {
+    match sbctl::config::DeploymentStore::new(root).load() {
+        Ok(_) => {
+            eprintln!("已安装。若要重新配置请选 6（修改部署配置），升级请选 8 / 9。");
+        }
+        Err(sbctl::config::ConfigError::Missing) => {
+            let _ = install(
+                root,
+                InstallOptions {
+                    mode: CliSubscriptionMode::Direct,
+                    subscription_host: None,
+                    proxy_host: None,
+                    http_port: None,
+                    interface: None,
+                    reality_decoy_sni: None,
+                    disable_protocol: Vec::new(),
+                    vless_port: None,
+                    vmess_port: None,
+                    hysteria2_port: None,
+                    tuic_port: None,
+                    anytls_port: None,
+                    sing_box_bin: None,
+                    manifest: None,
+                    no_start: false,
+                },
+            );
+        }
+        Err(error) => eprintln!("检查部署状态失败: {error}"),
+    }
+}
+
+fn menu_logs() {
+    let status = std::process::Command::new("journalctl")
+        .args([
+            "-u",
+            "sbctl.service",
+            "-u",
+            "sing-box.service",
+            "-n",
+            "50",
+            "--no-pager",
+        ])
+        .status();
+    if let Err(error) = status {
+        eprintln!("查看日志失败: {error}（需要 systemd）");
     }
 }
 
@@ -1105,6 +1284,42 @@ fn print_subscription_urls(
         }
         Err(error) => {
             eprintln!("subscription failed: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn print_subscription_qr(
+    root: &Path,
+    format: Option<sbctl::subscription::SubscriptionFormat>,
+) -> ExitCode {
+    let store = sbctl::config::DeploymentStore::new(root);
+    let result = store.load().and_then(|config| {
+        let format = format.unwrap_or(sbctl::subscription::SubscriptionFormat::SingBox);
+        sbctl::subscription::subscription_url(&config, format)
+            .map(|url| (url, format))
+            .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))
+    });
+    match result {
+        Ok((url, format)) => {
+            let label = match format {
+                sbctl::subscription::SubscriptionFormat::SingBox => "sing-box",
+                sbctl::subscription::SubscriptionFormat::Clash => "clash/mihomo",
+                sbctl::subscription::SubscriptionFormat::Uri => "uri",
+            };
+            println!("{label} 订阅二维码：");
+            println!("{url}");
+            match sbctl::qr::render_ansi(&url) {
+                Ok(qr) => println!("{qr}"),
+                Err(error) => {
+                    eprintln!("qr rendering failed: {error}");
+                    return ExitCode::from(2);
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("subscription qr failed: {error}");
             ExitCode::from(2)
         }
     }
