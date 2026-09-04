@@ -13,8 +13,8 @@ use std::io;
 use thiserror::Error;
 
 use crate::config::{
-    AccountingPolicy, ConfigError, DeploymentConfig, DeploymentOptions, ManagedProtocol,
-    ProtocolPorts, SubscriptionMode,
+    AccountingPolicy, CertificateMode, ConfigError, DeploymentConfig, DeploymentOptions,
+    ManagedProtocol, ProtocolPorts, SubscriptionMode,
 };
 
 #[derive(Debug, Error)]
@@ -126,6 +126,15 @@ pub fn run<C: Prompts>(
         parse_interface,
     )?;
 
+    let certificate_mode = ask_required(
+        prompts,
+        "协议监听证书 (domain / self-signed)",
+        existing
+            .map(|config| config.certificate_mode.to_string())
+            .or_else(|| Some(CertificateMode::Domain.to_string())),
+        parse_certificate_mode,
+    )?;
+
     let mut enabled_protocols = Vec::new();
     for protocol in [
         ManagedProtocol::VlessReality,
@@ -224,6 +233,7 @@ pub fn run<C: Prompts>(
             certbot_email,
             http_port,
             subscription_listen_port: listen_port,
+            certificate_mode,
             interface,
             enabled_protocols,
             reality_decoy_sni,
@@ -301,6 +311,14 @@ fn ask_yes_no<C: Prompts>(
             "n" | "no" => return Ok(false),
             _ => prompts.report("请输入 y 或 n"),
         }
+    }
+}
+
+fn parse_certificate_mode(value: &str) -> Result<CertificateMode, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "domain" | "1" => Ok(CertificateMode::Domain),
+        "self-signed" | "2" => Ok(CertificateMode::SelfSigned),
+        _ => Err("证书模式必须是 domain 或 self-signed".to_owned()),
     }
 }
 
@@ -466,7 +484,7 @@ mod tests {
     #[test]
     fn empty_answers_keep_the_existing_configuration() {
         let config = ip_fallback_config();
-        let mut prompts = ScriptPrompts::new(&empty_answers(15), &[true]);
+        let mut prompts = ScriptPrompts::new(&empty_answers(16), &[true]);
 
         let outcome = run(Some(&config), None, &mut prompts).expect("wizard completes");
 
@@ -476,7 +494,7 @@ mod tests {
     #[test]
     fn declining_the_summary_cancels_without_changing_the_deployment() {
         let config = ip_fallback_config();
-        let mut answers = empty_answers(15);
+        let mut answers = empty_answers(16);
         answers[1] = "198.51.100.9";
         let mut prompts = ScriptPrompts::new(&answers, &[false]);
 
@@ -488,7 +506,7 @@ mod tests {
     #[test]
     fn an_invalid_answer_is_rejected_and_re_prompted() {
         let config = ip_fallback_config();
-        let mut answers = empty_answers(15);
+        let mut answers = empty_answers(16);
         answers[1] = "not a valid host!!";
         answers.insert(2, "198.51.100.9");
         let mut prompts = ScriptPrompts::new(&answers, &[true]);
@@ -511,8 +529,8 @@ mod tests {
     #[test]
     fn a_mode_precondition_violation_fails_before_any_commit() {
         let config = ip_fallback_config();
-        let mut answers = empty_answers(17);
-        answers[6] = "y";
+        let mut answers = empty_answers(18);
+        answers[7] = "y";
         answers[12] = "www.cloudflare.com";
         let mut prompts = ScriptPrompts::new(&answers, &[true]);
 
@@ -529,6 +547,7 @@ mod tests {
         let answers = [
             "",
             "sub.example.test",
+            "",
             "",
             "",
             "",
@@ -571,7 +590,7 @@ mod tests {
     fn the_summary_and_prompts_never_print_credentials() {
         let config = ip_fallback_config();
         let credential = config.subscription_credential.clone();
-        let mut answers = empty_answers(15);
+        let mut answers = empty_answers(16);
         answers[1] = "198.51.100.9";
         let mut prompts = ScriptPrompts::new(&answers, &[false]);
 

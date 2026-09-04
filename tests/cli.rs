@@ -1993,7 +1993,7 @@ fn ip_fallback_http_service_accepts_only_the_exact_credential_path_and_reports_v
 
     let response = http_get(port, &format!("/sub/{credential}/uri"));
     assert!(response.starts_with("HTTP/1.1 200 OK"));
-    assert!(response.contains("subscription-userinfo: upload=0; download=0; total=0; expire="));
+    assert!(response.contains("subscription-userinfo: upload=0; download=0; total=1000; expire="));
     assert!(response.contains("cache-control: no-store"));
     let rejected = http_get(
         port,
@@ -4557,7 +4557,7 @@ fn config_wizard_cancelled_leaves_the_existing_deployment_unchanged() {
         .success();
     let config_path = fixture.path().join("etc/sbctl/config.toml");
     let before = fs::read(&config_path).expect("configuration is readable");
-    let mut answers = vec![String::new(); 15];
+    let mut answers = vec![String::new(); 16];
     answers[1] = "198.51.100.9".into();
     answers.push("n".into());
     let input = answers.join("\n") + "\n";
@@ -4659,10 +4659,10 @@ fn config_wizard_rejects_an_ambiguous_dst_anchored_reset_before_committing() {
         .success();
     let config_path = fixture.path().join("etc/sbctl/config.toml");
     let before = fs::read(&config_path).expect("configuration is readable");
-    let mut answers = vec![String::new(); 16];
-    answers[13] = "America/New_York".into();
-    answers[14] = "anchored-month".into();
-    answers[15] = "2024-11-03T01:30".into();
+    let mut answers = vec![String::new(); 17];
+    answers[14] = "America/New_York".into();
+    answers[15] = "anchored-month".into();
+    answers[16] = "2024-11-03T01:30".into();
     answers.push("y".into());
     let input = answers.join("\n") + "\n";
 
@@ -4731,8 +4731,8 @@ fn config_wizard_commits_a_timezone_change_and_establishes_new_accounting_state(
         "the initial UTC period is established"
     );
 
-    let mut answers = vec![String::new(); 15];
-    answers[13] = "Asia/Tokyo".into();
+    let mut answers = vec![String::new(); 16];
+    answers[14] = "Asia/Tokyo".into();
     answers.push("y".into());
     let input = answers.join("\n") + "\n";
     Command::cargo_bin("sbctl")
@@ -4780,6 +4780,7 @@ fn config_wizard_creates_a_new_deployment_with_secure_defaults() {
     let answers = [
         "",
         "sub.example.test",
+        "",
         "",
         "",
         "",
@@ -4866,7 +4867,7 @@ fn config_wizard_output_does_not_leak_credentials() {
         .success();
     let credential = read_subscription_credential(&fixture);
     let proxy_uuid = read_vless_uuid(&fixture);
-    let mut answers = vec![String::new(); 15];
+    let mut answers = vec![String::new(); 16];
     answers[1] = "198.51.100.9".into();
     answers.push("n".into());
     let input = answers.join("\n") + "\n";

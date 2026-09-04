@@ -5,6 +5,7 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use rcgen::{CertificateParams, DnType, KeyPair};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::Write;
@@ -22,7 +23,8 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::canonical::CanonicalNode;
 use crate::config::{
-    ConfigError, DeploymentConfig, DeploymentStore, ManagedProtocol, SubscriptionMode,
+    CertificateMode, ConfigError, DeploymentConfig, DeploymentStore, ManagedProtocol,
+    SubscriptionMode,
 };
 
 const SING_BOX_ARTIFACT: &str = "subscription-sing-box.json";
@@ -87,6 +89,8 @@ pub enum SubscriptionError {
     InvalidCredential,
     #[error("subscription artifact is unavailable: {0}")]
     Artifact(#[from] std::io::Error),
+    #[error("self-signed certificate generation failed: {0}")]
+    Certificate(String),
     #[error("TLS certificate could not be loaded: {0}")]
     Tls(String),
     #[error("sing-box configuration check failed: {0}")]
@@ -281,9 +285,9 @@ pub fn generated_artifacts(
     let nodes = crate::canonical::nodes(config);
     Ok(vec![
         (SING_BOX_SERVER_ARTIFACT, sing_box_server(config, &nodes)?),
-        (SING_BOX_ARTIFACT, sing_box(&nodes)?),
-        (CLASH_ARTIFACT, clash(&nodes)?),
-        (URI_ARTIFACT, uri(&nodes)?),
+        (SING_BOX_ARTIFACT, sing_box(config, &nodes)?),
+        (CLASH_ARTIFACT, clash(config, &nodes)?),
+        (URI_ARTIFACT, uri(config, &nodes)?),
     ])
 }
 
@@ -796,7 +800,11 @@ pub fn ensure_external_proxy_listener_available(port: u16) -> Result<(), Subscri
         .map_err(|_| SubscriptionError::ListenerUnavailable(port))
 }
 
-fn sing_box(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
+fn sing_box(
+    config: &DeploymentConfig,
+    nodes: &[CanonicalNode],
+) -> Result<String, SubscriptionError> {
+    let skip_verify = client_skip_cert_verify(config);
     let mut outbounds = Vec::new();
     for node in nodes {
         outbounds.push(match &node {
@@ -821,7 +829,7 @@ fn sing_box(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
             } => json!({"type": "vmess", "tag": node.tag(), "server": host,
                 "server_port": port, "uuid": uuid, "security": "auto", "alter_id": 0,
                 "transport": {"type": "ws", "path": path},
-                "tls": {"enabled": true, "server_name": tls_server_name}}),
+                "tls": {"enabled": true, "server_name": tls_server_name, "insecure": skip_verify}}),
             CanonicalNode::Hysteria2 {
                 host,
                 port,
@@ -829,7 +837,8 @@ fn sing_box(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
                 password,
             } => json!({"type": "hysteria2", "tag": node.tag(), "server": host,
                 "server_port": port, "password": password,
-                "tls": {"enabled": true, "server_name": tls_server_name}}),
+                "tls": {"enabled": true, "server_name": tls_server_name, "insecure": skip_verify,
+                    "alpn": ["h3"]}}),
             CanonicalNode::Tuic {
                 host,
                 port,
@@ -838,7 +847,9 @@ fn sing_box(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
                 password,
             } => json!({"type": "tuic", "tag": node.tag(), "server": host,
                 "server_port": port, "uuid": uuid, "password": password,
-                "tls": {"enabled": true, "server_name": tls_server_name}}),
+                "congestion_control": "bbr", "udp_relay_mode": "native",
+                "tls": {"enabled": true, "server_name": tls_server_name, "insecure": skip_verify,
+                    "alpn": ["h3"]}}),
             CanonicalNode::Anytls {
                 host,
                 port,
@@ -846,7 +857,9 @@ fn sing_box(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
                 password,
             } => json!({"type": "anytls", "tag": node.tag(), "server": host,
                 "server_port": port, "password": password,
-                "tls": {"enabled": true, "server_name": tls_server_name}}),
+                "idle_session_check_interval": "30s", "idle_session_timeout": "30s",
+                "min_idle_session": 5,
+                "tls": {"enabled": true, "server_name": tls_server_name, "insecure": skip_verify}}),
         });
     }
     Ok(
@@ -859,7 +872,7 @@ fn sing_box_server(
     config: &DeploymentConfig,
     nodes: &[CanonicalNode],
 ) -> Result<String, SubscriptionError> {
-    let certificate = certificate_tls_config(config);
+    let certificate = certificate_tls_config(config)?;
     let mut inbounds = Vec::new();
     for node in nodes {
         inbounds.push(match &node {
@@ -884,7 +897,7 @@ fn sing_box_server(
             } => json!({"type": "vmess", "tag": node.tag(), "listen": "::",
                 "listen_port": port, "users": [{"uuid": uuid, "alterId": 0}],
                 "transport": {"type": "ws", "path": path},
-                "tls": server_tls(tls_server_name, &certificate)}),
+                "tls": server_tls(tls_server_name, &certificate, &[])}),
             CanonicalNode::Hysteria2 {
                 port,
                 tls_server_name,
@@ -892,7 +905,7 @@ fn sing_box_server(
                 ..
             } => json!({"type": "hysteria2", "tag": node.tag(), "listen": "::",
                 "listen_port": port, "users": [{"password": password}],
-                "tls": server_tls(tls_server_name, &certificate)}),
+                "tls": server_tls(tls_server_name, &certificate, &["h3"])}),
             CanonicalNode::Tuic {
                 port,
                 tls_server_name,
@@ -901,7 +914,7 @@ fn sing_box_server(
                 ..
             } => json!({"type": "tuic", "tag": node.tag(), "listen": "::",
                 "listen_port": port, "users": [{"uuid": uuid, "password": password}],
-                "tls": server_tls(tls_server_name, &certificate)}),
+                "tls": server_tls(tls_server_name, &certificate, &["h3"])}),
             CanonicalNode::Anytls {
                 port,
                 tls_server_name,
@@ -909,7 +922,7 @@ fn sing_box_server(
                 ..
             } => json!({"type": "anytls", "tag": node.tag(), "listen": "::",
                 "listen_port": port, "users": [{"password": password}],
-                "tls": server_tls(tls_server_name, &certificate)}),
+                "tls": server_tls(tls_server_name, &certificate, &[])}),
         });
     }
     Ok(
@@ -918,7 +931,8 @@ fn sing_box_server(
     )
 }
 
-fn clash(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
+fn clash(config: &DeploymentConfig, nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
+    let skip = client_skip_cert_verify(config);
     let mut proxies = String::from("proxies:\n");
     for node in nodes {
         let entry = match &node {
@@ -941,7 +955,7 @@ fn clash(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
                 uuid,
                 path,
             } => format!(
-                "  - name: {}\n    type: vmess\n    server: {host}\n    port: {port}\n    uuid: {uuid}\n    alterId: 0\n    cipher: auto\n    tls: true\n    servername: {tls_server_name}\n    network: ws\n    ws-opts:\n      path: {path}\n      headers:\n        Host: {tls_server_name}\n",
+                "  - name: {}\n    type: vmess\n    server: {host}\n    port: {port}\n    uuid: {uuid}\n    alterId: 0\n    cipher: auto\n    tls: true\n    servername: {tls_server_name}\n    skip-cert-verify: {skip}\n    network: ws\n    ws-opts:\n      path: {path}\n      headers:\n        Host: {tls_server_name}\n",
                 node.tag()
             ),
             CanonicalNode::Hysteria2 {
@@ -950,7 +964,7 @@ fn clash(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
                 tls_server_name,
                 password,
             } => format!(
-                "  - name: {}\n    type: hysteria2\n    server: {host}\n    port: {port}\n    password: {password}\n    sni: {tls_server_name}\n    skip-cert-verify: false\n",
+                "  - name: {}\n    type: hysteria2\n    server: {host}\n    port: {port}\n    password: {password}\n    sni: {tls_server_name}\n    skip-cert-verify: {skip}\n",
                 node.tag()
             ),
             CanonicalNode::Tuic {
@@ -960,7 +974,7 @@ fn clash(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
                 uuid,
                 password,
             } => format!(
-                "  - name: {}\n    type: tuic\n    server: {host}\n    port: {port}\n    uuid: {uuid}\n    password: {password}\n    sni: {tls_server_name}\n    alpn:\n      - h3\n    skip-cert-verify: false\n",
+                "  - name: {}\n    type: tuic\n    server: {host}\n    port: {port}\n    uuid: {uuid}\n    password: {password}\n    sni: {tls_server_name}\n    alpn:\n      - h3\n    skip-cert-verify: {skip}\n",
                 node.tag()
             ),
             CanonicalNode::Anytls {
@@ -969,7 +983,7 @@ fn clash(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
                 tls_server_name,
                 password,
             } => format!(
-                "  - name: {}\n    type: anytls\n    server: {host}\n    port: {port}\n    password: {password}\n    tls: true\n    sni: {tls_server_name}\n    skip-cert-verify: false\n",
+                "  - name: {}\n    type: anytls\n    server: {host}\n    port: {port}\n    password: {password}\n    tls: true\n    sni: {tls_server_name}\n    skip-cert-verify: {skip}\n",
                 node.tag()
             ),
         };
@@ -978,7 +992,12 @@ fn clash(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
     Ok(proxies)
 }
 
-fn uri(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
+fn uri(config: &DeploymentConfig, nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
+    let insecure = if client_skip_cert_verify(config) {
+        1
+    } else {
+        0
+    };
     let mut uris = String::new();
     for node in nodes {
         match &node {
@@ -1009,7 +1028,7 @@ fn uri(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
                 tls_server_name,
                 password,
             } => uris.push_str(&format!(
-                "hysteria2://{password}@{host}:{port}?insecure=0&sni={tls_server_name}#{}\n",
+                "hysteria2://{password}@{host}:{port}?insecure={insecure}&sni={tls_server_name}#{}\n",
                 node.tag()
             )),
             CanonicalNode::Tuic {
@@ -1019,7 +1038,7 @@ fn uri(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
                 uuid,
                 password,
             } => uris.push_str(&format!(
-                "tuic://{uuid}:{password}@{host}:{port}?congestion_control=bbr&alpn=h3&sni={tls_server_name}#{}\n",
+                "tuic://{uuid}:{password}@{host}:{port}?congestion_control=bbr&alpn=h3&insecure={insecure}&sni={tls_server_name}#{}\n",
                 node.tag()
             )),
             CanonicalNode::Anytls {
@@ -1028,7 +1047,7 @@ fn uri(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
                 tls_server_name,
                 password,
             } => uris.push_str(&format!(
-                "anytls://{password}@{host}:{port}?security=tls&sni={tls_server_name}#{}\n",
+                "anytls://{password}@{host}:{port}?security=tls&insecure={insecure}&sni={tls_server_name}#{}\n",
                 node.tag()
             )),
         }
@@ -1041,39 +1060,99 @@ fn uri(nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
 /// copy that the deploy hook grants to the `sbctl` and `sing-box` accounts.
 /// External proxy mode leaves certificate management entirely to the existing
 /// reverse proxy and its own Certbot setup.
-fn certificate_tls_config(config: &DeploymentConfig) -> Value {
-    let (certificate_path, key_path) = if config.subscription_mode == SubscriptionMode::Direct {
-        let directory = crate::config::DeploymentStore::certificate_directory_absolute(
-            &config.subscription_host,
-        );
-        (
-            directory
-                .join("fullchain.pem")
-                .to_string_lossy()
-                .into_owned(),
-            directory.join("privkey.pem").to_string_lossy().into_owned(),
-        )
-    } else {
-        (
-            format!(
-                "/etc/letsencrypt/live/{}/fullchain.pem",
-                config.subscription_host
-            ),
-            format!(
-                "/etc/letsencrypt/live/{}/privkey.pem",
-                config.subscription_host
-            ),
-        )
+/// The Managed protocol listeners present this certificate to their clients.
+/// `SelfSigned` mode generates a long-lived self-signed certificate (sing-box-yg
+/// style, never expires, no ACME dependency) that clients are told to skip
+/// verifying; `Domain` mode uses the administrator-managed certificate.
+fn certificate_tls_config(config: &DeploymentConfig) -> Result<Value, SubscriptionError> {
+    let (certificate_path, key_path) = match config.certificate_mode {
+        CertificateMode::SelfSigned => ensure_self_signed_certificate(config)?,
+        CertificateMode::Domain => {
+            if config.subscription_mode == SubscriptionMode::Direct {
+                let directory = crate::config::DeploymentStore::certificate_directory_absolute(
+                    &config.subscription_host,
+                );
+                (
+                    directory
+                        .join("fullchain.pem")
+                        .to_string_lossy()
+                        .into_owned(),
+                    directory.join("privkey.pem").to_string_lossy().into_owned(),
+                )
+            } else {
+                (
+                    format!(
+                        "/etc/letsencrypt/live/{}/fullchain.pem",
+                        config.subscription_host
+                    ),
+                    format!(
+                        "/etc/letsencrypt/live/{}/privkey.pem",
+                        config.subscription_host
+                    ),
+                )
+            }
+        }
     };
-    json!({"enabled": true, "server_name": config.subscription_host,
+    Ok(
+        json!({"enabled": true, "server_name": config.subscription_host,
         "certificate_path": certificate_path,
-        "key_path": key_path})
+        "key_path": key_path}),
+    )
 }
 
-fn server_tls(tls_server_name: &str, certificate: &Value) -> Value {
-    json!({"enabled": true, "server_name": tls_server_name,
+/// Generates and pins a long-lived self-signed certificate for the subscription
+/// host, or reuses the pinned copy. The certificate stays valid for 36500 days,
+/// matching the sing-box-yg default, so the proxy listeners never break on an
+/// expired administrator-managed certificate.
+fn ensure_self_signed_certificate(
+    config: &DeploymentConfig,
+) -> Result<(String, String), SubscriptionError> {
+    let directory =
+        Path::new(crate::config::CERTIFICATES_ABSOLUTE_PATH).join(&config.subscription_host);
+    let certificate_path = directory.join("cert.pem");
+    let key_path = directory.join("key.pem");
+    if certificate_path.is_file() && key_path.is_file() {
+        return Ok((
+            certificate_path.to_string_lossy().into_owned(),
+            key_path.to_string_lossy().into_owned(),
+        ));
+    }
+    let key_pair =
+        KeyPair::generate().map_err(|error| SubscriptionError::Certificate(error.to_string()))?;
+    let mut params = CertificateParams::new(vec![config.subscription_host.clone()])
+        .map_err(|error| SubscriptionError::Certificate(error.to_string()))?;
+    params
+        .distinguished_name
+        .push(DnType::CommonName, config.subscription_host.clone());
+    params
+        .distinguished_name
+        .push(DnType::OrganizationName, "sbctl");
+    let certificate = params
+        .self_signed(&key_pair)
+        .map_err(|error| SubscriptionError::Certificate(error.to_string()))?;
+    fs::create_dir_all(&directory).map_err(SubscriptionError::Artifact)?;
+    fs::write(&certificate_path, certificate.pem()).map_err(SubscriptionError::Artifact)?;
+    fs::write(&key_path, key_pair.serialize_pem()).map_err(SubscriptionError::Artifact)?;
+    Ok((
+        certificate_path.to_string_lossy().into_owned(),
+        key_path.to_string_lossy().into_owned(),
+    ))
+}
+
+/// Clients connecting to a self-signed certificate must be told to skip
+/// verification; the domain certificate is verified normally.
+fn client_skip_cert_verify(config: &DeploymentConfig) -> bool {
+    config.certificate_mode == CertificateMode::SelfSigned
+}
+
+fn server_tls(tls_server_name: &str, certificate: &Value, alpn: &[&str]) -> Value {
+    let mut tls = json!({"enabled": true, "server_name": tls_server_name,
         "certificate_path": certificate["certificate_path"],
-        "key_path": certificate["key_path"]})
+        "key_path": certificate["key_path"]});
+    if !alpn.is_empty() {
+        tls["alpn"] = json!(alpn);
+    }
+    tls
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {

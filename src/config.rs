@@ -36,6 +36,10 @@ pub struct DeploymentConfig {
     /// Administrator contact for Direct-mode Certbot issuance; never printed.
     #[serde(default)]
     pub certbot_email: Option<String>,
+    /// Certificate used by the Managed protocol listeners: the managed domain
+    /// certificate, or a long-lived self-signed certificate (sing-box-yg style).
+    #[serde(default)]
+    pub certificate_mode: CertificateMode,
     pub interface: String,
     pub enabled_protocols: Vec<ManagedProtocol>,
     pub reality_decoy_sni: Option<String>,
@@ -117,6 +121,7 @@ pub struct DeploymentOptions {
     pub certbot_email: Option<String>,
     pub http_port: Option<u16>,
     pub subscription_listen_port: Option<u16>,
+    pub certificate_mode: CertificateMode,
     pub interface: String,
     pub enabled_protocols: Vec<ManagedProtocol>,
     pub reality_decoy_sni: Option<String>,
@@ -162,6 +167,26 @@ impl fmt::Display for SubscriptionMode {
             Self::Direct => "direct",
             Self::ExternalProxy => "external-proxy",
             Self::IpFallback => "ip-fallback",
+        })
+    }
+}
+
+/// Whether the Managed protocol listeners use a long-lived self-signed
+/// certificate (the sing-box-yg default, no ACME dependency, never expires) or
+/// the administrator-managed domain certificate (Let's Encrypt / Certbot).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CertificateMode {
+    #[default]
+    Domain,
+    SelfSigned,
+}
+
+impl fmt::Display for CertificateMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Domain => "domain",
+            Self::SelfSigned => "self-signed",
         })
     }
 }
@@ -265,6 +290,7 @@ impl DeploymentConfig {
             proxy_host,
             http_port,
             subscription_listen_port,
+            certificate_mode: CertificateMode::Domain,
             interface,
             enabled_protocols,
             reality_decoy_sni,
@@ -301,6 +327,7 @@ impl DeploymentConfig {
             certbot_email,
             http_port,
             subscription_listen_port,
+            certificate_mode,
             interface,
             enabled_protocols,
             reality_decoy_sni,
@@ -367,6 +394,7 @@ impl DeploymentConfig {
             proxy_host: proxy_host.clone(),
             http_port: *http_port,
             subscription_listen_port: *subscription_listen_port,
+            certificate_mode: certificate_mode.clone(),
             interface: interface.clone(),
             enabled_protocols: enabled_protocols.clone(),
             reality_decoy_sni: reality_decoy_sni.clone(),
@@ -1325,8 +1353,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        AccountingPolicy, DeploymentConfig, DeploymentOptions, DeploymentStore, ManagedProtocol,
-        ProtocolPorts, SubscriptionMode,
+        AccountingPolicy, CertificateMode, DeploymentConfig, DeploymentOptions, DeploymentStore,
+        ManagedProtocol, ProtocolPorts, SubscriptionMode,
     };
 
     #[test]
@@ -1756,6 +1784,7 @@ mod tests {
                 certbot_email: source.certbot_email.clone(),
                 http_port: source.http_port,
                 subscription_listen_port: source.subscription_listen_port,
+                certificate_mode: source.certificate_mode.clone(),
                 interface: source.interface.clone(),
                 enabled_protocols: source.enabled_protocols.clone(),
                 reality_decoy_sni: source.reality_decoy_sni.clone(),
@@ -1802,6 +1831,7 @@ mod tests {
                 certbot_email: source.certbot_email.clone(),
                 http_port: source.http_port,
                 subscription_listen_port: source.subscription_listen_port,
+                certificate_mode: source.certificate_mode.clone(),
                 interface: source.interface.clone(),
                 enabled_protocols: source.enabled_protocols.clone(),
                 reality_decoy_sni: source.reality_decoy_sni.clone(),
@@ -1836,6 +1866,7 @@ mod tests {
                 certbot_email: None,
                 http_port: None,
                 subscription_listen_port: None,
+                certificate_mode: CertificateMode::Domain,
                 interface: "ens3".into(),
                 enabled_protocols: vec![
                     ManagedProtocol::VlessReality,
@@ -1881,6 +1912,7 @@ mod tests {
                 certbot_email: source.certbot_email.clone(),
                 http_port: source.http_port,
                 subscription_listen_port: source.subscription_listen_port,
+                certificate_mode: source.certificate_mode.clone(),
                 interface: source.interface.clone(),
                 enabled_protocols: source.enabled_protocols.clone(),
                 reality_decoy_sni: source.reality_decoy_sni.clone(),
@@ -1910,6 +1942,7 @@ mod tests {
                 certbot_email: None,
                 http_port: Some(2080),
                 subscription_listen_port: None,
+                certificate_mode: CertificateMode::Domain,
                 interface: "ens3".into(),
                 enabled_protocols: vec![
                     ManagedProtocol::VlessReality,
