@@ -1264,13 +1264,22 @@ fn regenerate(root: &Path, sing_box_bin: Option<PathBuf>) -> ExitCode {
     let update_active_config = root.join("var/lib/sbctl/ownership").is_file();
     let result = store.load().and_then(|config| {
         let binary = sing_box_bin.unwrap_or_else(|| root.join("usr/local/bin/sing-box"));
+        let direct = config.subscription_mode == sbctl::config::SubscriptionMode::Direct;
         sbctl::subscription::regenerate(
             &store,
             &config,
             Some(binary.as_path()),
             update_active_config,
         )
-        .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))
+        .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+        // Always restore daemon-storage permissions after a live regeneration so
+        // rewritten artifacts and the active sing-box configuration stay readable
+        // by their service accounts, even for an installation that never wrote the
+        // ownership marker (a `--no-start` install) (issue #5). `prepare_daemon_storage`
+        // is a no-op for non-live helper roots.
+        sbctl::lifecycle::prepare_daemon_storage(root, direct)
+            .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+        Ok(())
     });
     match result {
         Ok(()) => {
@@ -1556,6 +1565,16 @@ fn commit_config_change(
                     store,
                     new,
                     binary.is_file().then_some(binary.as_path()),
+                )
+                .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+                // Re-applying the daemon storage permissions after a transactional
+                // configuration change keeps the rewritten active sing-box
+                // configuration readable by the sing-box service account. Without
+                // this, the rewritten /etc/sing-box/config.json stays 0600
+                // root:root and the service cannot start (deployment issue #5).
+                sbctl::lifecycle::prepare_daemon_storage(
+                    root,
+                    new.subscription_mode == sbctl::config::SubscriptionMode::Direct,
                 )
                 .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
                 restart_services_with_rollback(root, || {

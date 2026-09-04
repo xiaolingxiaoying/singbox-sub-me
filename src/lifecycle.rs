@@ -569,7 +569,7 @@ fn run_account_command(root: &Path, program: &str, args: &[&str]) -> Result<(), 
         .ok_or_else(|| format!("{program} {} exited with {status}", args.join(" ")))
 }
 
-fn prepare_daemon_storage(root: &Path, direct: bool) -> Result<(), String> {
+pub fn prepare_daemon_storage(root: &Path, direct: bool) -> Result<(), String> {
     // Fixture roots intentionally do not have real passwd entries or ownership
     // metadata. Only change ownership when operating on the live host root.
     if root != Path::new("/") {

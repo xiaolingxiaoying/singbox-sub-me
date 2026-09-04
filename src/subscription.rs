@@ -682,6 +682,15 @@ fn subscription_http_response(
         Ok(traffic) => traffic,
         Err(error) => return unavailable_http_response(credential, &error.to_string()),
     };
+    // subscription-userinfo follows the common client convention: upload and
+    // download are the bytes used in the current period, while `total` is the
+    // configured monthly allowance. Keep the historical used-total value when
+    // no allowance is configured so unlimited deployments remain informative.
+    let quota = if traffic.monthly_traffic_limit > 0 {
+        traffic.monthly_traffic_limit
+    } else {
+        traffic.total()
+    };
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", format.content_type())
@@ -693,7 +702,7 @@ fn subscription_http_response(
                 "upload={}; download={}; total={}; expire={}",
                 traffic.transmitted,
                 traffic.received,
-                traffic.total(),
+                quota,
                 traffic.next_reset.timestamp()
             ),
         )
@@ -873,7 +882,7 @@ fn sing_box_server(
                 path,
                 ..
             } => json!({"type": "vmess", "tag": node.tag(), "listen": "::",
-                "listen_port": port, "users": [{"uuid": uuid, "alter_id": 0}],
+                "listen_port": port, "users": [{"uuid": uuid, "alterId": 0}],
                 "transport": {"type": "ws", "path": path},
                 "tls": server_tls(tls_server_name, &certificate)}),
             CanonicalNode::Hysteria2 {

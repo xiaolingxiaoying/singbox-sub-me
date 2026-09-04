@@ -1,4 +1,25 @@
+use base64::Engine;
+use x25519_dalek::{X25519_BASEPOINT_BYTES, x25519};
+
 use crate::config::{DeploymentConfig, ManagedProtocol};
+
+/// The VLESS Reality client must present the public key that corresponds to the
+/// server's private key. Deriving it from the stored private key at
+/// artifact-generation time guarantees the pair cannot drift apart, even after a
+/// messy historical regeneration left a stale public key behind (issue #1).
+fn vless_public_key_from_private(private_key: &str, fallback: &str) -> String {
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(private_key)
+        .ok()
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok());
+    match decoded {
+        Some(scalar) => {
+            let public = x25519(scalar, X25519_BASEPOINT_BYTES);
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public)
+        }
+        None => fallback.to_owned(),
+    }
+}
 
 /// A single enabled Managed protocol rendered from the persisted deployment.
 /// Every generated artifact derives its node set, host, port, credentials and
@@ -153,7 +174,7 @@ pub fn nodes(config: &DeploymentConfig) -> Vec<CanonicalNode> {
                     tls_server_name: tls_server_name.clone(),
                     uuid: node.uuid.clone(),
                     private_key: node.private_key.clone(),
-                    public_key: node.public_key.clone(),
+                    public_key: vless_public_key_from_private(&node.private_key, &node.public_key),
                     short_id: node.short_id.clone(),
                     decoy_sni: config
                         .reality_decoy_sni
