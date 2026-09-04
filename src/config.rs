@@ -1072,7 +1072,8 @@ impl DeploymentStore {
             )?;
         }
         let contents = toml::to_string_pretty(config)?;
-        Ok(atomic_write(&path, contents.as_bytes())?)
+        atomic_write(&path, contents.as_bytes())?;
+        enforce_live_file_owner(&self.root, &path)
     }
 
     pub fn load(&self) -> Result<DeploymentConfig, ConfigError> {
@@ -1094,7 +1095,8 @@ impl DeploymentStore {
             return Err(ConfigError::Missing);
         }
         let contents = toml::to_string_pretty(config)?;
-        Ok(atomic_write(&path, contents.as_bytes())?)
+        atomic_write(&path, contents.as_bytes())?;
+        enforce_live_file_owner(&self.root, &path)
     }
 
     /// Replaces the persisted configuration while an operation lock is already
@@ -1107,7 +1109,8 @@ impl DeploymentStore {
             return Err(ConfigError::Missing);
         }
         let contents = toml::to_string_pretty(config)?;
-        Ok(atomic_write(&path, contents.as_bytes())?)
+        atomic_write(&path, contents.as_bytes())?;
+        enforce_live_file_owner(&self.root, &path)
     }
 
     pub fn write_state(&self, contents: &[u8]) -> Result<(), ConfigError> {
@@ -1131,10 +1134,9 @@ impl DeploymentStore {
         if prior.as_deref() == Some(contents.as_slice()) {
             return Ok(());
         }
-        Ok(atomic_write(
-            &self.root.join(STATE_RELATIVE_PATH),
-            &contents,
-        )?)
+        let path = self.root.join(STATE_RELATIVE_PATH);
+        atomic_write(&path, &contents)?;
+        enforce_live_file_owner(&self.root, &path)
     }
 
     fn read_state_unlocked(&self) -> Result<Option<Vec<u8>>, ConfigError> {
@@ -1197,7 +1199,8 @@ impl DeploymentStore {
         contents: &[u8],
     ) -> Result<(), ConfigError> {
         let path = safe_managed_path(&self.root, relative)?;
-        Ok(atomic_write(&path, contents)?)
+        atomic_write(&path, contents)?;
+        enforce_live_file_owner(&self.root, &path)
     }
 
     fn write_artifact_unlocked(&self, name: &str, contents: &[u8]) -> Result<(), ConfigError> {
@@ -1206,15 +1209,15 @@ impl DeploymentStore {
                 "artifact name must be a single file name",
             ));
         }
-        Ok(atomic_write(
-            &self.root.join(ARTIFACTS_RELATIVE_PATH).join(name),
-            contents,
-        )?)
+        let path = self.root.join(ARTIFACTS_RELATIVE_PATH).join(name);
+        atomic_write(&path, contents)?;
+        enforce_live_file_owner(&self.root, &path)
     }
 
     fn atomic_write_managed(&self, path: &Path, contents: &[u8]) -> Result<(), ConfigError> {
         let _lock = self.operation_lock()?;
-        Ok(atomic_write(path, contents)?)
+        atomic_write(path, contents)?;
+        enforce_live_file_owner(&self.root, path)
     }
 
     fn operation_lock(&self) -> Result<OperationLock, ConfigError> {
@@ -1304,12 +1307,65 @@ fn private_open(path: &Path, create_new: bool) -> io::Result<File> {
 }
 
 fn create_private_directory(directory: &Path) -> io::Result<()> {
+    // Directory permissions on the live host are established by the daemon
+    // storage preparation so the dedicated sbctl and sing-box service accounts
+    // can traverse them. Only a brand-new directory is created private; an
+    // existing directory must never have its mode clobbered back to 0700 by a
+    // later write or the operation lock, which would disconnect the service
+    // accounts from their configuration and certificates.
+    if directory.exists() {
+        return Ok(());
+    }
     fs::create_dir_all(directory)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
     }
+    Ok(())
+}
+
+/// On the live host a root-run managed write must not leave a file owned only by
+/// root after the installation delegated it to a dedicated service account.
+/// Re-assert the service-account ownership and mode for the written file so the
+/// sbctl daemon and the sing-box data plane keep reading it after any config
+/// change. Fixture roots (a non-"/" configured root) keep the invoking user's
+/// ownership.
+fn enforce_live_file_owner(root: &Path, path: &Path) -> Result<(), ConfigError> {
+    if root != Path::new("/") {
+        return Ok(());
+    }
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| {
+            ConfigError::Storage(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "managed path is outside root",
+            ))
+        })?
+        .to_string_lossy();
+    let (owner, mode) = if relative == "etc/sing-box/config.json" {
+        ("sing-box:sing-box", 0o640u32)
+    } else {
+        ("sbctl:sbctl", 0o600u32)
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let status = std::process::Command::new("chown")
+            .args([owner, &path.to_string_lossy()])
+            .status()
+            .map_err(ConfigError::Storage)?;
+        if !status.success() {
+            return Err(ConfigError::Storage(io::Error::other(format!(
+                "chown {owner} exited with {status}"
+            ))));
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .map_err(ConfigError::Storage)?;
+    }
+    #[cfg(not(unix))]
+    let _ = (owner, mode);
     Ok(())
 }
 
