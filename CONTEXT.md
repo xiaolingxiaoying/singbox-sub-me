@@ -8,6 +8,10 @@ sbctl is a single-administrator tool for operating sing-box and providing a priv
 A high-entropy secret embedded in the sole administrator's subscription URL. It authorizes retrieval of that administrator's generated subscription; it is not a user account.
 _Avoid_: User token, API key, account
 
+**Subscription credential rotation**:
+The security operation that replaces the current Subscription credential with a newly generated one, immediately invalidating URLs that contain the previous credential. It does not change the Subscription host or any Proxy credential.
+_Avoid_: Domain change, password change, UUID change
+
 **VPS traffic**:
 The total inbound and outbound network bytes measured for the VPS during a monthly accounting period. It is not traffic attributable to a protocol, node, or individual user.
 _Avoid_: Per-user traffic, proxy traffic
@@ -31,6 +35,18 @@ _Avoid_: Natural-month reset, rolling month
 **Accounting timezone**:
 The named IANA timezone used to interpret accounting-period reset dates and times. It belongs to the sbctl deployment and does not change the VPS operating-system timezone.
 _Avoid_: System-timezone accounting, browser-local time
+
+**Client display timezone**:
+The named IANA timezone selected for presenting the next accounting reset to the administrator or subscription consumer. It may differ from the Accounting timezone, but it represents the same reset instant after timezone conversion.
+_Avoid_: Accounting timezone, VPS timezone
+
+**VPS refresh timezone**:
+The administrator-facing name for the Accounting timezone when distinguishing it from the Client display timezone. It determines when the VPS accounting period actually refreshes.
+_Avoid_: Client display timezone, operating-system timezone
+
+**Default timezone pair**:
+The onboarding defaults of America/Los_Angeles for the VPS refresh timezone and Asia/Shanghai for the Client display timezone. The pair describes one shared reset instant in two local representations and is used only when the administrator has not chosen other timezones.
+_Avoid_: System timezone pair, client device timezone
 
 **First reset instant**:
 The administrator-selected date and local time at which an Anchored-month reset schedule first becomes active. Before this instant, the deployment has no active anchored accounting period.
@@ -59,6 +75,22 @@ _Avoid_: Subscription request, status read
 **Subscription format**:
 One of the generated client-consumable representations of the same node set: sing-box JSON, Clash/Mihomo YAML, or URI text for Shadowrocket-compatible clients. The first release keeps all three formats and must cover the sing-box JSON and Clash Meta YAML compatibility expected by `vps-sub-meter`.
 _Avoid_: Subscription protocol, node configuration
+
+**Configuration topic**:
+A coherent administrator concern that can be reviewed and changed independently, such as subscription delivery, protocol listeners, or traffic accounting. It is narrower than the complete deployment configuration and does not imply a separate deployment.
+_Avoid_: Single setting, wizard step
+
+**Traffic input unit**:
+The human-facing unit used when an administrator enters a traffic amount. sbctl interprets the default unit with the same binary conversion as `vps-sub-meter`—one GiB equals 1024³ bytes—while persisted accounting values remain exact byte counts.
+_Avoid_: Raw byte input, decimal GB
+
+**Public fallback port**:
+The high TCP port exposed by an IP fallback subscription when no domain is available. It is public-facing and is distinct from the loopback listener used behind an external reverse proxy.
+_Avoid_: Backend port, protocol listener port
+
+**Proxy subscription listener**:
+The loopback HTTP listener used by an external reverse proxy to forward subscription requests to sbctl. It is not a public fallback port and does not belong to a Managed protocol.
+_Avoid_: Public fallback port, protocol listener port
 
 **Managed protocol**:
 A proxy protocol whose server configuration, share representation, and subscription representation are owned by sbctl. The first release manages VLESS Reality, VMess WebSocket, Hysteria2, TUIC v5, and AnyTLS.

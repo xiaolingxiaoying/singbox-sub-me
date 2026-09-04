@@ -50,6 +50,8 @@ pub struct DeploymentConfig {
     pub accounting_policy: AccountingPolicy,
     #[serde(default = "default_accounting_timezone")]
     pub accounting_timezone: String,
+    #[serde(default = "default_client_display_timezone")]
+    pub client_display_timezone: String,
     #[serde(default)]
     pub anchored_reset_at: Option<String>,
     #[serde(default)]
@@ -128,6 +130,7 @@ pub struct DeploymentOptions {
     pub monthly_traffic_limit: u64,
     pub accounting_policy: AccountingPolicy,
     pub accounting_timezone: String,
+    pub client_display_timezone: String,
     pub anchored_reset_at: Option<String>,
     pub ports: ProtocolPorts,
 }
@@ -150,7 +153,11 @@ impl fmt::Display for AccountingPolicy {
 }
 
 fn default_accounting_timezone() -> String {
-    "UTC".to_owned()
+    "America/Los_Angeles".to_owned()
+}
+
+fn default_client_display_timezone() -> String {
+    "Asia/Shanghai".to_owned()
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -298,6 +305,7 @@ impl DeploymentConfig {
             monthly_traffic_limit: 0,
             accounting_policy: AccountingPolicy::NaturalMonth,
             accounting_timezone: default_accounting_timezone(),
+            client_display_timezone: default_client_display_timezone(),
             anchored_reset_at: None,
             certbot_email: None,
             vless_reality,
@@ -334,6 +342,7 @@ impl DeploymentConfig {
             monthly_traffic_limit,
             accounting_policy,
             accounting_timezone,
+            client_display_timezone,
             anchored_reset_at,
             ports,
         } = options;
@@ -402,6 +411,7 @@ impl DeploymentConfig {
             monthly_traffic_limit: *monthly_traffic_limit,
             accounting_policy: accounting_policy.clone(),
             accounting_timezone: accounting_timezone.clone(),
+            client_display_timezone: client_display_timezone.clone(),
             anchored_reset_at: anchored_reset_at.clone(),
             certbot_email: certbot_email.clone(),
             vless_reality,
@@ -538,6 +548,11 @@ impl DeploymentConfig {
                 .map_err(|_| {
                     ConfigError::InvalidValue("accounting timezone must be a named IANA timezone")
                 })?;
+        self.client_display_timezone
+            .parse::<chrono_tz::Tz>()
+            .map_err(|_| {
+                ConfigError::InvalidValue("client display timezone must be a named IANA timezone")
+            })?;
         match self.accounting_policy {
             AccountingPolicy::NaturalMonth if self.anchored_reset_at.is_some() => {
                 return Err(ConfigError::InvalidValue(
@@ -670,7 +685,8 @@ impl DeploymentConfig {
                 self.monthly_traffic_limit
             ),
             format!("accounting policy: {}", self.accounting_policy),
-            format!("accounting timezone: {}", self.accounting_timezone),
+            format!("VPS refresh timezone: {}", self.accounting_timezone),
+            format!("client display timezone: {}", self.client_display_timezone),
             format!("enabled protocols: {protocols}"),
             "subscription credential: [redacted]".to_owned(),
         ];
@@ -1692,7 +1708,7 @@ mod tests {
     }
 
     #[test]
-    fn accounting_timezone_defaults_to_utc() {
+    fn new_deployments_default_to_the_selected_timezone_pair() {
         let config = DeploymentConfig::new(
             SubscriptionMode::IpFallback,
             "203.0.113.7".into(),
@@ -1704,7 +1720,8 @@ mod tests {
         )
         .expect("a default deployment is valid");
 
-        assert_eq!(config.accounting_timezone, "UTC");
+        assert_eq!(config.accounting_timezone, "America/Los_Angeles");
+        assert_eq!(config.client_display_timezone, "Asia/Shanghai");
     }
 
     #[test]
@@ -1791,6 +1808,7 @@ mod tests {
                 monthly_traffic_limit: source.monthly_traffic_limit,
                 accounting_policy: source.accounting_policy,
                 accounting_timezone: source.accounting_timezone.clone(),
+                client_display_timezone: source.client_display_timezone.clone(),
                 anchored_reset_at: source.anchored_reset_at.clone(),
                 ports: ProtocolPorts {
                     vless_reality: source.vless_reality.as_ref().map(|node| node.listen_port),
@@ -1838,6 +1856,7 @@ mod tests {
                 monthly_traffic_limit: source.monthly_traffic_limit,
                 accounting_policy: source.accounting_policy,
                 accounting_timezone: source.accounting_timezone.clone(),
+                client_display_timezone: source.client_display_timezone.clone(),
                 anchored_reset_at: source.anchored_reset_at.clone(),
                 ports: ProtocolPorts {
                     vless_reality: Some(new_port),
@@ -1875,7 +1894,8 @@ mod tests {
                 reality_decoy_sni: Some("www.cloudflare.com".into()),
                 monthly_traffic_limit: 0,
                 accounting_policy: AccountingPolicy::NaturalMonth,
-                accounting_timezone: "UTC".into(),
+                accounting_timezone: "America/Los_Angeles".into(),
+                client_display_timezone: "Asia/Shanghai".into(),
                 anchored_reset_at: None,
                 ports: ProtocolPorts::default(),
             },
@@ -1919,6 +1939,7 @@ mod tests {
                 monthly_traffic_limit: source.monthly_traffic_limit,
                 accounting_policy: source.accounting_policy,
                 accounting_timezone: source.accounting_timezone.clone(),
+                client_display_timezone: source.client_display_timezone.clone(),
                 anchored_reset_at: source.anchored_reset_at.clone(),
                 ports: ProtocolPorts {
                     vless_reality: source.vless_reality.as_ref().map(|node| node.listen_port),
@@ -1951,7 +1972,8 @@ mod tests {
                 reality_decoy_sni: Some("www.cloudflare.com".into()),
                 monthly_traffic_limit: 0,
                 accounting_policy: AccountingPolicy::NaturalMonth,
-                accounting_timezone: "UTC".into(),
+                accounting_timezone: "America/Los_Angeles".into(),
+                client_display_timezone: "Asia/Shanghai".into(),
                 anchored_reset_at: None,
                 ports: ProtocolPorts::default(),
             },

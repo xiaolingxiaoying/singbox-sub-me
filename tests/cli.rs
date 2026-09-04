@@ -2222,11 +2222,16 @@ fn status_json_reports_the_current_period_without_exposing_credentials() {
     assert_eq!(status["traffic"]["received"], 30);
     assert_eq!(status["traffic"]["transmitted"], 60);
     assert_eq!(status["traffic"]["total"], 90);
-    let now = chrono::Utc::now();
+    let now = chrono::Utc::now().with_timezone(&chrono_tz::America::Los_Angeles);
     use chrono::Datelike;
     assert_eq!(
         status["traffic"]["accounting_period"],
-        format!("{:04}-{:02}-01T00:00:00+00:00", now.year(), now.month())
+        format!(
+            "{:04}-{:02}-01T00:00:00{}",
+            now.year(),
+            now.month(),
+            now.format("%:z")
+        )
     );
     assert_eq!(
         status["services"]["sing-box.service"],
@@ -2962,7 +2967,7 @@ fn accounting_reset_establishes_state_once_and_repeated_resets_do_not_reestablis
 }
 
 #[test]
-fn configuration_init_defaults_the_accounting_timezone_to_utc() {
+fn configuration_init_defaults_the_refresh_and_client_display_timezones() {
     let fixture = TempDir::new().expect("temporary root is created");
 
     Command::cargo_bin("sbctl")
@@ -2990,7 +2995,8 @@ fn configuration_init_defaults_the_accounting_timezone_to_utc() {
 
     let config = fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
         .expect("configuration is persisted");
-    assert!(config.contains("accounting_timezone = \"UTC\""));
+    assert!(config.contains("accounting_timezone = \"America/Los_Angeles\""));
+    assert!(config.contains("client_display_timezone = \"Asia/Shanghai\""));
 }
 
 #[test]
@@ -4557,7 +4563,7 @@ fn config_wizard_cancelled_leaves_the_existing_deployment_unchanged() {
         .success();
     let config_path = fixture.path().join("etc/sbctl/config.toml");
     let before = fs::read(&config_path).expect("configuration is readable");
-    let mut answers = vec![String::new(); 16];
+    let mut answers = vec![String::new(); 17];
     answers[1] = "198.51.100.9".into();
     answers.push("n".into());
     let input = answers.join("\n") + "\n";
@@ -4659,10 +4665,10 @@ fn config_wizard_rejects_an_ambiguous_dst_anchored_reset_before_committing() {
         .success();
     let config_path = fixture.path().join("etc/sbctl/config.toml");
     let before = fs::read(&config_path).expect("configuration is readable");
-    let mut answers = vec![String::new(); 17];
+    let mut answers = vec![String::new(); 18];
     answers[14] = "America/New_York".into();
-    answers[15] = "anchored-month".into();
-    answers[16] = "2024-11-03T01:30".into();
+    answers[16] = "anchored-month".into();
+    answers[17] = "2024-11-03T01:30".into();
     answers.push("y".into());
     let input = answers.join("\n") + "\n";
 
@@ -4708,6 +4714,8 @@ fn config_wizard_commits_a_timezone_change_and_establishes_new_accounting_state(
             "2080",
             "--interface",
             "ens3",
+            "--accounting-timezone",
+            "UTC",
             "--protocol",
             "vless-reality",
             "--reality-decoy-sni",
@@ -4731,7 +4739,7 @@ fn config_wizard_commits_a_timezone_change_and_establishes_new_accounting_state(
         "the initial UTC period is established"
     );
 
-    let mut answers = vec![String::new(); 16];
+    let mut answers = vec![String::new(); 17];
     answers[14] = "Asia/Tokyo".into();
     answers.push("y".into());
     let input = answers.join("\n") + "\n";
@@ -4777,29 +4785,10 @@ fn config_wizard_creates_a_new_deployment_with_secure_defaults() {
         true,
         &["vless", "vmess", "hysteria2", "tuic", "anytls"],
     );
-    let answers = [
-        "",
-        "sub.example.test",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "www.cloudflare.com",
-        "",
-        "",
-        "",
-        "y",
-    ];
+    let mut answers = vec![String::new(); 22];
+    answers[1] = "sub.example.test".into();
+    answers[16] = "www.cloudflare.com".into();
+    answers[21] = "y".into();
     let input = answers.join("\n") + "\n";
 
     Command::cargo_bin("sbctl")
@@ -4824,7 +4813,8 @@ fn config_wizard_creates_a_new_deployment_with_secure_defaults() {
     assert!(config.contains("subscription_mode = \"direct\""));
     assert!(config.contains("subscription_host = \"sub.example.test\""));
     assert!(config.contains("interface = \"ens3\""));
-    assert!(config.contains("accounting_timezone = \"UTC\""));
+    assert!(config.contains("accounting_timezone = \"America/Los_Angeles\""));
+    assert!(config.contains("client_display_timezone = \"Asia/Shanghai\""));
     assert!(config.contains("accounting_policy = \"natural-month\""));
     for protocol in [
         "vless-reality",
@@ -4867,7 +4857,7 @@ fn config_wizard_output_does_not_leak_credentials() {
         .success();
     let credential = read_subscription_credential(&fixture);
     let proxy_uuid = read_vless_uuid(&fixture);
-    let mut answers = vec![String::new(); 16];
+    let mut answers = vec![String::new(); 17];
     answers[1] = "198.51.100.9".into();
     answers.push("n".into());
     let input = answers.join("\n") + "\n";

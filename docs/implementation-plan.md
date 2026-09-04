@@ -19,9 +19,10 @@
 
 - `natural-month`：每月 1 日 00:00；
 - `anchored-month`：按首个重置日期的日、时、分每月重复；
-- `accounting_timezone` 使用 IANA 时区，默认 `UTC`，不修改 VPS 系统时区；
+- `accounting_timezone` 使用 IANA 时区，作为 VPS 刷新时区，默认 `America/Los_Angeles`，不修改 VPS 系统时区；
+- `client_display_timezone` 独立使用 IANA 时区，默认 `Asia/Shanghai`，只影响可读的客户端参考时间，不改变实际刷新时刻；
 - `anchored_reset_at` 使用 `YYYY-MM-DDTHH:MM` 格式；
-- 默认 accounting timezone 固定为 `UTC`，只有显式配置才使用其他时区；
+- 默认 VPS 刷新时区为 `America/Los_Angeles`，默认客户端显示时区为 `Asia/Shanghai`；
 - 锚定日允许 1–31 日，短月自动收敛到当月最后一天；
 - 首个锚定时间之前不产生有效账期，已用流量显示为 0，下一次重置显示为首个锚定时间。
 
@@ -229,7 +230,7 @@ manifest 还必须声明经过测试的 sing-box 版本兼容矩阵；安装或�
 5. 用户明确确认后，才进入安装事务；取消或校验失败不改变现有部署。
 6. 非交互安装必须显式提供必要参数，不能隐式从终端或系统状态猜测安全敏感配置。
 
-向导可以提供已保存密码/配置的“保留当前值”选项，但不得打印完整 credential、私钥或密码。默认时区为 UTC，不执行上游脚本中的 `timedatectl set-timezone`。
+向导可以提供已保存密码/配置的“保留当前值”选项，但不得打印完整 credential、私钥或密码。默认 VPS 刷新时区为 America/Los_Angeles，默认客户端显示时区为 Asia/Shanghai，不执行上游脚本中的 `timedatectl set-timezone`。
 
 ### 8. 运行维护、轮换和模式切换
 
@@ -333,7 +334,7 @@ manifest 还必须声明经过测试的 sing-box 版本兼容矩阵；安装或�
 
 - 五协议和三种订阅格式属于当前版本范围；
 - `vps-sub-meter` 作为行为参考，但 sbctl 统一采用 RX+TX；
-- 账期时区默认 UTC，可由管理员选择；
+- VPS 刷新时区默认 America/Los_Angeles，客户端显示时区默认 Asia/Shanghai，二者可独立选择；
 - 锚定月允许 1–31 日，短月按月末处理；
 - 首个锚定日期允许过去或未来；
 - 月流量额度第一版只展示，不强制阻断；

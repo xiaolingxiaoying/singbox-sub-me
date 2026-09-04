@@ -36,6 +36,13 @@ pub enum WizardOutcome {
     Changed(DeploymentConfig),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigurationTopic {
+    Subscription,
+    Protocols,
+    Traffic,
+}
+
 /// The interactive prompt boundary. Production uses the console; tests drive a
 /// script of answers through the same flow so the wizard logic is exercised
 /// without a terminal.
@@ -187,20 +194,29 @@ pub fn run<C: Prompts>(
 
     let monthly_traffic_limit = ask_value(
         prompts,
-        "每月流量上限（字节）",
-        existing.map(|config| config.monthly_traffic_limit.to_string()),
-        parse_u64,
+        "每月流量上限（GiB，0 = 不限；可输入 GB）",
+        existing.map(|config| crate::traffic::format_gib(config.monthly_traffic_limit)),
+        crate::traffic::parse_traffic_amount,
     )?
     .unwrap_or(0);
 
     let accounting_timezone = ask_required(
         prompts,
-        "Accounting timezone (IANA)",
+        "VPS 刷新时区（IANA）",
         Some(
             existing
                 .map(|config| config.accounting_timezone.clone())
-                .unwrap_or_else(|| "UTC".to_owned()),
+                .unwrap_or_else(|| "America/Los_Angeles".to_owned()),
         ),
+        parse_timezone,
+    )?;
+
+    let client_display_timezone = ask_required(
+        prompts,
+        "客户端显示时区（只影响可读时间，不改变实际刷新时刻）",
+        existing
+            .map(|config| config.client_display_timezone.clone())
+            .or_else(|| Some("Asia/Shanghai".to_owned())),
         parse_timezone,
     )?;
 
@@ -240,6 +256,7 @@ pub fn run<C: Prompts>(
             monthly_traffic_limit,
             accounting_policy,
             accounting_timezone,
+            client_display_timezone,
             anchored_reset_at,
             ports,
         },
@@ -257,6 +274,243 @@ pub fn run<C: Prompts>(
         return Ok(WizardOutcome::Cancelled);
     }
 
+    Ok(WizardOutcome::Changed(new))
+}
+
+/// Runs a focused editor for an existing deployment. The editor carries all
+/// untouched choices forward and only asks about the selected configuration
+/// topic, so menu users do not have to walk through unrelated settings.
+pub fn run_topic<C: Prompts>(
+    existing: &DeploymentConfig,
+    topic: ConfigurationTopic,
+    prompts: &mut C,
+) -> Result<WizardOutcome, WizardError> {
+    if topic == ConfigurationTopic::Protocols
+        && existing.subscription_mode == SubscriptionMode::IpFallback
+    {
+        prompts.report("IP fallback 模式仅支持 VLESS Reality");
+    }
+
+    let mut mode = existing.subscription_mode.clone();
+    let mut subscription_host = existing.subscription_host.clone();
+    let mut proxy_host = existing.proxy_host.clone();
+    let mut certbot_email = existing.certbot_email.clone();
+    let mut http_port = existing.http_port;
+    let mut subscription_listen_port = existing.subscription_listen_port;
+    let mut certificate_mode = existing.certificate_mode.clone();
+    let mut interface = existing.interface.clone();
+    let mut enabled_protocols = existing.enabled_protocols.clone();
+    let mut reality_decoy_sni = existing.reality_decoy_sni.clone();
+    let mut monthly_traffic_limit = existing.monthly_traffic_limit;
+    let mut accounting_policy = existing.accounting_policy.clone();
+    let mut accounting_timezone = existing.accounting_timezone.clone();
+    let mut client_display_timezone = existing.client_display_timezone.clone();
+    let mut anchored_reset_at = existing.anchored_reset_at.clone();
+    let mut ports = ProtocolPorts {
+        vless_reality: existing.protocol_listener_port(&ManagedProtocol::VlessReality),
+        vmess_websocket: existing.protocol_listener_port(&ManagedProtocol::VmessWebsocket),
+        hysteria2: existing.protocol_listener_port(&ManagedProtocol::Hysteria2),
+        tuic: existing.protocol_listener_port(&ManagedProtocol::Tuic),
+        anytls: existing.protocol_listener_port(&ManagedProtocol::Anytls),
+    };
+
+    match topic {
+        ConfigurationTopic::Subscription => {
+            mode = ask_required(
+                prompts,
+                "订阅模式（1 直连 HTTPS / 2 外部反向代理 / 3 IP 回退）",
+                Some(mode.to_string()),
+                parse_mode,
+            )?;
+            subscription_host = ask_required(
+                prompts,
+                "订阅主机（域名或 IP）",
+                Some(subscription_host.clone()),
+                parse_host,
+            )?;
+            proxy_host = ask_value(
+                prompts,
+                "代理主机（留空 = 使用订阅主机）",
+                proxy_host.clone(),
+                parse_optional_host,
+            )?;
+            certbot_email = if mode == SubscriptionMode::Direct {
+                ask_value(
+                    prompts,
+                    "Certbot 证书邮箱（可选）",
+                    certbot_email.clone(),
+                    |value| Ok(value.trim().to_owned()),
+                )?
+            } else {
+                None
+            };
+            http_port = if mode == SubscriptionMode::IpFallback {
+                Some(ask_required(
+                    prompts,
+                    "公网回退端口（大于 1024）",
+                    Some(http_port.unwrap_or(2080).to_string()),
+                    parse_high_port,
+                )?)
+            } else {
+                None
+            };
+            subscription_listen_port = if mode == SubscriptionMode::ExternalProxy {
+                Some(ask_required(
+                    prompts,
+                    "反向代理回环端口（大于 1024）",
+                    Some(subscription_listen_port.unwrap_or(2080).to_string()),
+                    parse_high_port,
+                )?)
+            } else {
+                None
+            };
+        }
+        ConfigurationTopic::Protocols => {
+            let protocols = [
+                ManagedProtocol::VlessReality,
+                ManagedProtocol::VmessWebsocket,
+                ManagedProtocol::Hysteria2,
+                ManagedProtocol::Tuic,
+                ManagedProtocol::Anytls,
+            ];
+            for protocol in protocols {
+                if existing.subscription_mode == SubscriptionMode::IpFallback
+                    && protocol != ManagedProtocol::VlessReality
+                {
+                    continue;
+                }
+                let enabled = ask_yes_no(
+                    prompts,
+                    &format!("启用 {protocol}？"),
+                    existing.enabled_protocols.contains(&protocol),
+                )?;
+                enabled_protocols.retain(|current| current != &protocol);
+                if enabled {
+                    enabled_protocols.push(protocol);
+                }
+            }
+            if enabled_protocols.is_empty() {
+                prompts.report("至少需要启用一个协议");
+                return Ok(WizardOutcome::Cancelled);
+            }
+            certificate_mode = ask_required(
+                prompts,
+                "协议证书（1 domain / 2 self-signed）",
+                Some(certificate_mode.to_string()),
+                parse_certificate_mode,
+            )?;
+            for protocol in &enabled_protocols {
+                let current_port = existing
+                    .protocol_listener_port(protocol)
+                    .map(|port| port.to_string());
+                let port = ask_value(
+                    prompts,
+                    &format!("{protocol} 监听端口（留空 = 保持当前）"),
+                    current_port,
+                    parse_protocol_port,
+                )?;
+                match protocol {
+                    ManagedProtocol::VlessReality => ports.vless_reality = port,
+                    ManagedProtocol::VmessWebsocket => ports.vmess_websocket = port,
+                    ManagedProtocol::Hysteria2 => ports.hysteria2 = port,
+                    ManagedProtocol::Tuic => ports.tuic = port,
+                    ManagedProtocol::Anytls => ports.anytls = port,
+                }
+            }
+            reality_decoy_sni = if enabled_protocols.contains(&ManagedProtocol::VlessReality) {
+                Some(ask_required(
+                    prompts,
+                    "Reality 伪装 SNI",
+                    reality_decoy_sni,
+                    parse_hostname,
+                )?)
+            } else {
+                None
+            };
+        }
+        ConfigurationTopic::Traffic => {
+            monthly_traffic_limit = ask_value(
+                prompts,
+                "每月流量上限（GiB，0 = 不限；可输入 GB）",
+                Some(crate::traffic::format_gib(monthly_traffic_limit)),
+                crate::traffic::parse_traffic_amount,
+            )?
+            .unwrap_or(0);
+            accounting_timezone = ask_required(
+                prompts,
+                "VPS 刷新时区（IANA）",
+                Some(accounting_timezone.clone()),
+                parse_timezone,
+            )?;
+            client_display_timezone = ask_required(
+                prompts,
+                "客户端显示时区（只影响可读时间）",
+                Some(client_display_timezone.clone()),
+                parse_timezone,
+            )?;
+            accounting_policy = ask_required(
+                prompts,
+                "流量刷新规则（1 自然月 / 2 锚定月）",
+                Some(accounting_policy.to_string()),
+                parse_policy,
+            )?;
+            anchored_reset_at = if accounting_policy == AccountingPolicy::AnchoredMonth {
+                Some(ask_required(
+                    prompts,
+                    "首次重置时间（YYYY-MM-DDTHH:MM，按 VPS 刷新时区）",
+                    anchored_reset_at.clone(),
+                    parse_reset_at,
+                )?)
+            } else {
+                None
+            };
+            interface = ask_required(
+                prompts,
+                "出口网卡名称",
+                Some(interface.clone()),
+                parse_interface,
+            )?;
+        }
+    }
+
+    let new = DeploymentConfig::apply_options(
+        Some(existing),
+        &DeploymentOptions {
+            subscription_mode: mode,
+            subscription_host,
+            proxy_host,
+            certbot_email,
+            http_port,
+            subscription_listen_port,
+            certificate_mode,
+            interface,
+            enabled_protocols,
+            reality_decoy_sni,
+            monthly_traffic_limit,
+            accounting_policy,
+            accounting_timezone,
+            client_display_timezone,
+            anchored_reset_at,
+            ports,
+        },
+    )?;
+    if new == *existing {
+        return Ok(WizardOutcome::Unchanged);
+    }
+    prompts.report("");
+    prompts.report("配置变更预览：");
+    prompts.report(&new.summary());
+    if topic == ConfigurationTopic::Traffic
+        && (new.interface != existing.interface
+            || new.accounting_policy != existing.accounting_policy
+            || new.accounting_timezone != existing.accounting_timezone
+            || new.anchored_reset_at != existing.anchored_reset_at)
+    {
+        prompts.report("注意：修改 VPS 刷新时区、刷新规则或出口网卡会开始新的统计周期。");
+    }
+    if !prompts.confirm("确认应用以上配置？", false)? {
+        return Ok(WizardOutcome::Cancelled);
+    }
     Ok(WizardOutcome::Changed(new))
 }
 
@@ -394,18 +648,11 @@ fn parse_protocol_port(value: &str) -> Result<u16, String> {
     Ok(port)
 }
 
-fn parse_u64(value: &str) -> Result<u64, String> {
-    value
-        .trim()
-        .parse()
-        .map_err(|_| "必须是非负整数".to_owned())
-}
-
 fn parse_timezone(value: &str) -> Result<String, String> {
     let value = value.trim().to_owned();
-    value
-        .parse::<chrono_tz::Tz>()
-        .map_err(|_| "必须是有效 IANA 时区，例如 UTC 或 Asia/Tokyo".to_owned())?;
+    value.parse::<chrono_tz::Tz>().map_err(|_| {
+        "必须是有效 IANA 时区，例如 Asia/Shanghai 或 America/Los_Angeles".to_owned()
+    })?;
     Ok(value)
 }
 
@@ -429,7 +676,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::io;
 
-    use super::{Prompts, WizardOutcome, run};
+    use super::{ConfigurationTopic, Prompts, WizardOutcome, run, run_topic};
     use crate::config::{DeploymentConfig, ManagedProtocol, SubscriptionMode};
 
     struct ScriptPrompts {
@@ -479,6 +726,29 @@ mod tests {
 
     fn empty_answers(count: usize) -> Vec<&'static str> {
         vec![""; count]
+    }
+
+    #[test]
+    fn traffic_topic_updates_client_display_timezone_without_reset_warning() {
+        let config = ip_fallback_config();
+        let answers = ["", "", "Asia/Tokyo", "", ""];
+        let mut prompts = ScriptPrompts::new(&answers, &[true]);
+
+        let outcome = run_topic(&config, ConfigurationTopic::Traffic, &mut prompts)
+            .expect("traffic topic completes");
+
+        let WizardOutcome::Changed(updated) = outcome else {
+            panic!("changing the display timezone must produce a new configuration");
+        };
+        assert_eq!(updated.accounting_timezone, "America/Los_Angeles");
+        assert_eq!(updated.client_display_timezone, "Asia/Tokyo");
+        assert!(
+            !prompts
+                .reports()
+                .iter()
+                .any(|message| message.contains("新的统计周期")),
+            "display-only timezone changes must not warn about resetting accounting"
+        );
     }
 
     #[test]
@@ -543,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_deployment_uses_utc_natural_month_and_all_five_protocols() {
+    fn a_fresh_deployment_uses_the_default_timezone_pair_and_all_five_protocols() {
         let answers = [
             "",
             "sub.example.test",
@@ -577,7 +847,8 @@ mod tests {
         assert_eq!(config.subscription_mode, SubscriptionMode::Direct);
         assert_eq!(config.subscription_host, "sub.example.test");
         assert_eq!(config.interface, "ens3");
-        assert_eq!(config.accounting_timezone, "UTC");
+        assert_eq!(config.accounting_timezone, "America/Los_Angeles");
+        assert_eq!(config.client_display_timezone, "Asia/Shanghai");
         assert_eq!(
             config.accounting_policy,
             crate::config::AccountingPolicy::NaturalMonth

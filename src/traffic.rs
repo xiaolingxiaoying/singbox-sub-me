@@ -11,6 +11,43 @@ use crate::runtime::Runtime;
 
 const STATE_SCHEMA_VERSION: u32 = 2;
 const PENDING_PERIOD_IDENTITY: &str = "pending-first-reset";
+const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+/// Parses the human-facing traffic amount used by the interactive menu.
+/// `GB` is intentionally treated as the binary GiB unit for compatibility
+/// with vps-sub-meter, while persisted values remain exact bytes.
+pub fn parse_traffic_amount(value: &str) -> Result<u64, String> {
+    let compact = value
+        .trim()
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect::<String>();
+    let lower = compact.to_ascii_lowercase();
+    let number = if let Some(number) = lower.strip_suffix("gib") {
+        number
+    } else if let Some(number) = lower.strip_suffix("gb") {
+        number
+    } else if let Some(number) = lower.strip_suffix('g') {
+        number
+    } else {
+        lower.as_str()
+    };
+    let amount = number
+        .parse::<f64>()
+        .map_err(|_| "流量必须是非负数字，可输入 100、100.5GB 或 100GiB".to_owned())?;
+    if !amount.is_finite() || amount < 0.0 {
+        return Err("流量必须是非负数字".to_owned());
+    }
+    let bytes = amount * BYTES_PER_GIB;
+    if bytes > u64::MAX as f64 {
+        return Err("流量数值过大".to_owned());
+    }
+    Ok(bytes.floor() as u64)
+}
+
+pub fn format_gib(bytes: u64) -> String {
+    format!("{:.2} GiB", bytes as f64 / BYTES_PER_GIB)
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct TrafficState {
@@ -733,10 +770,25 @@ mod tests {
     };
 
     use super::{
-        CorrectionRecord, CorrectionTarget, TrafficState, accounting_period, report_at, reset_at,
-        reset_with_runtime, set_used_at,
+        CorrectionRecord, CorrectionTarget, TrafficState, accounting_period, format_gib,
+        parse_traffic_amount, report_at, reset_at, reset_with_runtime, set_used_at,
     };
     use crate::runtime::Runtime;
+
+    #[test]
+    fn parses_human_traffic_amounts_as_binary_gib() {
+        assert_eq!(parse_traffic_amount("1"), Ok(1 << 30));
+        assert_eq!(parse_traffic_amount("1.5 GB"), Ok(1_610_612_736));
+        assert_eq!(parse_traffic_amount("2GiB"), Ok(2 << 30));
+        assert_eq!(format_gib(1_610_612_736), "1.50 GiB");
+    }
+
+    #[test]
+    fn rejects_invalid_human_traffic_amounts() {
+        assert!(parse_traffic_amount("").is_err());
+        assert!(parse_traffic_amount("-1").is_err());
+        assert!(parse_traffic_amount("not-a-number").is_err());
+    }
 
     #[test]
     fn accumulates_rx_and_tx_deltas_without_counting_the_first_observation() {

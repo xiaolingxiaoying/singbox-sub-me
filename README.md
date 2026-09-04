@@ -81,17 +81,19 @@ bash <(wget -qO- https://raw.githubusercontent.com/xiaolingxiaoying/singbox-sub-
 自动化部署；交互式安装不会修改防火墙，也不会接管已有 sing-box、sing-box-yg、Nginx 或 Caddy。
 
 安装完成后会安装快捷方式命令 `ly`。直接运行 `ly`（等价 `sbctl menu`，简写 `sbctl m`）
-进入 sing-box-yg 风格的全屏彩色菜单，以数字选择驱动：
+进入 sing-box-yg 风格的全屏彩色菜单，以任务分组选择驱动：
 
 ```
- 1. 一键安装 / 重新部署       8. 更新 sbctl（一键升级）
- 2. 查看部署状态              9. 更新 / 切换 sing-box 内核
- 3. 查看 VPS 流量            10. 查看运行日志
- 4. 查看节点端口 / SNI        11. 卸载 sbctl
- 5. 显示订阅地址 + 二维码      0. 退出
- 6. 修改部署配置（端口随机/指定、订阅主机 IP↔域名）
- 7. 校验配置并重启服务
+ 1. 安装与部署
+ 2. 节点与协议
+ 3. 订阅中心
+ 4. 流量与账期
+ 5. 服务与诊断
+ 6. 更新与卸载
+ 0. 退出
 ```
+
+已安装部署进入主题配置后，回车会保持当前值；流量与账期主题覆盖每月流量上限、本周期流量修正、VPS 刷新时区、客户端显示时区、刷新规则、出口网卡以及对应的订阅服务端口。
 
 命令行方式检查服务并获取订阅地址：
 
@@ -243,7 +245,7 @@ sbctl uninstall --purge
 
 `subscription-credential` 与任何协议的 UUID、password 都不同。订阅响应会包含动态生成的 `subscription-userinfo`，其中的流量统计是整张配置网卡的 VPS traffic，不代表单个协议或用户的流量。
 
-账期默认使用 UTC 自然月；需要自定义周期时，可在配置向导中选择 `anchored-month`，并设置 IANA 时区与首次重置时间。流量上限目前用于展示和订阅元数据，不会主动阻断 sing-box 数据面。
+新部署默认使用 America/Los_Angeles 作为 VPS 刷新时区、Asia/Shanghai 作为客户端参考显示时区；需要自定义周期时，可在配置向导中选择 `anchored-month`，并设置 IANA 时区与首次重置时间。菜单中的流量输入按 GiB 处理（兼容 `GB` 后缀，按 1024³ bytes 换算），内部保存精确 byte 数。流量上限目前用于展示和订阅元数据，不会主动阻断 sing-box 数据面。
 
 ## 安全边界
 
