@@ -43,6 +43,7 @@ fixture_seed_certificate sub.example.test
 # binds TCP 80 and 443 and passes both listeners to a non-root-required
 # equivalent of the sbctl.service handoff through LISTEN_FDS.
 systemd-socket-activate -l 0.0.0.0:80 -l 0.0.0.0:443 -- "$sbctl" --root "$root" serve >"$work/direct.out" 2>"$work/direct.err" &
+direct_pid=$!
 sleep 1
 curl --silent --show-error --retry 5 --retry-connrefused --retry-delay 1 --insecure --resolve sub.example.test:443:127.0.0.1 "https://sub.example.test/sub/$credential/uri" | grep -F 'vless://' >/dev/null || fail 'direct HTTPS endpoint did not serve the URI subscription'
 token="acceptance-token"
@@ -50,8 +51,8 @@ mkdir -p "$root/var/lib/sbctl/acme-webroot/.well-known/acme-challenge"
 printf 'challenge-body' > "$root/var/lib/sbctl/acme-webroot/.well-known/acme-challenge/$token"
 challenge=$(curl --silent --show-error --retry 5 --retry-connrefused --retry-delay 1 "http://127.0.0.1:80/.well-known/acme-challenge/$token")
 test "$challenge" = 'challenge-body' || fail 'Direct HTTP-01 challenge endpoint did not serve the token'
-jobs -p | xargs -r kill 2>/dev/null || true
-pkill -f "$root" 2>/dev/null || true
+kill "$direct_pid" 2>/dev/null || true
+wait "$direct_pid" 2>/dev/null || true
 sleep 1
 
 # Existing deployment rejection must not modify the administrator's data.
@@ -236,7 +237,11 @@ mkdir -p "$root/usr/local/bin"
 printf 'known-good sbctl' > "$root/usr/local/bin/sbctl"
 printf 'known-good sing-box' > "$root/usr/local/bin/sing-box"
 candidate_digest=$(sha256sum "$fake_sing_box" | awk '{print $1}')
-printf '{"sbctl":{"version":"0.1.1","sha256":"%s"},"sing_box":{"version":"1.12.0","sha256":"%s"}}' "$candidate_digest" "$candidate_digest" > "$work/manifest.json"
+printf '{"schema":1,"sbctl":{"version":"0.1.1","sha256":"%s"},"sing_box":{"version":"1.12.0","sha256":"%s"},"sing_box_compatibility":[{"min":"1.12.0","max":"1.12.0"}]}' "$candidate_digest" "$candidate_digest" > "$work/manifest.unsigned.json"
+"$sbctl" release sign \
+  --manifest "$work/manifest.unsigned.json" \
+  --private-key /usr/local/lib/sbctl-acceptance/dev-signing-key.hex \
+  --output "$work/manifest.json"
 before=$(find "$root" -type f -exec sha256sum {} \; | sort)
 "$sbctl" --root "$root" update --check --manifest "$work/manifest.json" >/dev/null
 after=$(find "$root" -type f -exec sha256sum {} \; | sort)

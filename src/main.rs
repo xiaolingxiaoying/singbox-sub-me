@@ -808,6 +808,17 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
         let store = sbctl::config::DeploymentStore::new(root);
         store.initialize_with_artifacts(&config, &references)?;
         let direct = config.subscription_mode == sbctl::config::SubscriptionMode::Direct;
+        if !options.no_start {
+            sbctl::lifecycle::prepare_daemon_prerequisites(root, direct)
+                .map_err(sbctl::config::ConfigError::StateContent)?;
+            if direct {
+                sbctl::certificate::deploy_hook(&store, &config).map_err(|error| {
+                    sbctl::config::ConfigError::StateContent(error.to_string())
+                })?;
+            }
+            sbctl::traffic::reset(&store, &config)
+                .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+        }
         sbctl::lifecycle::install_units(&store, server, direct)?;
         if !options.no_start {
             sbctl::lifecycle::start_services(root, direct)

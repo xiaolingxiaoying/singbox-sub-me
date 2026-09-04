@@ -135,10 +135,17 @@ service_user=$(systemctl show -p User --value sing-box.service)
 id sing-box >/dev/null 2>&1 || fail 'dedicated sing-box account was not created'
 
 direct_credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' /etc/sbctl/config.toml)
-curl --silent --show-error --retry 5 --retry-connrefused --retry-delay 1 --insecure \
+direct_response=$(mktemp)
+if ! curl --silent --show-error --retry 5 --retry-connrefused --retry-delay 1 --insecure \
   --resolve sub.example.test:443:127.0.0.1 \
-  "https://sub.example.test/sub/$direct_credential/uri" | grep -F 'vless://' >/dev/null \
+  "https://sub.example.test/sub/$direct_credential/uri" >"$direct_response"; then
+  systemctl --no-pager status sbctl.service >&2 || true
+  journalctl --no-pager -u sbctl.service -n 30 >&2 || true
+  fail 'Direct HTTPS did not serve the subscription through the systemd socket'
+fi
+grep -F 'vless://' "$direct_response" >/dev/null \
   || fail 'Direct HTTPS did not serve the subscription through the systemd socket'
+rm -f "$direct_response"
 direct_token="real-acceptance-token"
 mkdir -p /var/lib/sbctl/acme-webroot/.well-known/acme-challenge
 printf 'real-challenge-body' > "/var/lib/sbctl/acme-webroot/.well-known/acme-challenge/$direct_token"

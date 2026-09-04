@@ -142,15 +142,22 @@ pub fn remove_managed_sing_box(root: &Path) -> Result<(), String> {
 }
 
 pub fn start_services(root: &Path, direct: bool) -> Result<(), String> {
-    ensure_daemon_accounts(root)?;
-    if direct {
-        ensure_certificate_group(root)?;
-    }
+    prepare_daemon_prerequisites(root, direct)?;
     prepare_daemon_storage(root, direct)?;
     systemctl(root, &["daemon-reload"])?;
     let mut arguments = vec!["enable", "--now"];
     arguments.extend(managed_units(direct));
     systemctl(root, &arguments)
+}
+
+/// Creates the service identities required by a deployment before any
+/// daemon-readable state or certificate copy is published.
+pub fn prepare_daemon_prerequisites(root: &Path, direct: bool) -> Result<(), String> {
+    ensure_daemon_accounts(root)?;
+    if direct {
+        ensure_certificate_group(root)?;
+    }
+    Ok(())
 }
 
 /// The units an installation transaction enables. Direct subscription mode
