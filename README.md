@@ -144,7 +144,7 @@ sbctl config init \
   --sing-box-bin /usr/local/bin/sing-box
 ```
 
-IP fallback 示例：
+IP fallback 示例（无域名，启用全部五种协议）：
 
 ```bash
 sbctl config init \
@@ -153,11 +153,15 @@ sbctl config init \
   --http-port 2080 \
   --interface eth0 \
   --protocol vless-reality \
+  --protocol vmess-websocket \
+  --protocol hysteria2 \
+  --protocol tuic \
+  --protocol anytls \
   --reality-decoy-sni www.cloudflare.com \
-  --vless-port 12001
+  --protocol-sni www.bing.com
 ```
 
-IP fallback 使用明文 HTTP，仅推荐在没有可用域名时使用，并且当前只允许 VLESS Reality。
+IP fallback 使用明文 HTTP 分发订阅，仅推荐在没有可用域名时使用。无域名时通过自签证书 + 协议伪装域名（`protocol_sni`，默认 `www.bing.com`）启用全部五种协议（VLESS Reality / VMess WebSocket / Hysteria2 / TUIC / AnyTLS），证书类协议客户端自动跳过证书校验。
 
 安装完成后，可使用配置向导修改已有部署。向导会先展示脱敏摘要，确认后才执行原子配置更新；直接回车会保留当前值：
 
@@ -186,7 +190,7 @@ sbctl 只监听 loopback，由管理员维护的 Nginx、Caddy 或其他反向�
 
 ### IP fallback
 
-sbctl 在配置的高位 HTTP 端口提供低安全性的 IP 订阅。该模式不使用 IP HTTPS 证书，也不支持 VMess、Hysteria2、TUIC 和 AnyTLS。
+sbctl 在配置的高位 HTTP 端口提供低安全性的 IP 订阅。该模式不使用 IP HTTPS 证书；证书类协议（VMess WebSocket、Hysteria2、TUIC、AnyTLS）需与 `self-signed` 证书模式配合，并为其指定一个协议伪装域名（`protocol_sni`），客户端会跳过证书校验。
 
 ## 常用命令
 

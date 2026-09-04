@@ -1094,7 +1094,7 @@ fn certificate_tls_config(config: &DeploymentConfig) -> Result<Value, Subscripti
         }
     };
     Ok(
-        json!({"enabled": true, "server_name": config.subscription_host,
+        json!({"enabled": true, "server_name": config.protocol_server_name(),
         "certificate_path": certificate_path,
         "key_path": key_path}),
     )
@@ -1107,8 +1107,8 @@ fn certificate_tls_config(config: &DeploymentConfig) -> Result<Value, Subscripti
 fn ensure_self_signed_certificate(
     config: &DeploymentConfig,
 ) -> Result<(String, String), SubscriptionError> {
-    let directory =
-        Path::new(crate::config::CERTIFICATES_ABSOLUTE_PATH).join(&config.subscription_host);
+    let server_name = config.protocol_server_name();
+    let directory = Path::new(crate::config::CERTIFICATES_ABSOLUTE_PATH).join(server_name);
     let certificate_path = directory.join("cert.pem");
     let key_path = directory.join("key.pem");
     if certificate_path.is_file() && key_path.is_file() {
@@ -1119,11 +1119,11 @@ fn ensure_self_signed_certificate(
     }
     let key_pair =
         KeyPair::generate().map_err(|error| SubscriptionError::Certificate(error.to_string()))?;
-    let mut params = CertificateParams::new(vec![config.subscription_host.clone()])
+    let mut params = CertificateParams::new(vec![server_name.to_owned()])
         .map_err(|error| SubscriptionError::Certificate(error.to_string()))?;
     params
         .distinguished_name
-        .push(DnType::CommonName, config.subscription_host.clone());
+        .push(DnType::CommonName, server_name.to_owned());
     params
         .distinguished_name
         .push(DnType::OrganizationName, "sbctl");
@@ -1172,8 +1172,10 @@ mod tests {
     use tempfile::TempDir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use super::{generated_artifacts, regenerate};
-    use crate::config::{DeploymentConfig, DeploymentStore, ManagedProtocol, SubscriptionMode};
+    use super::{clash, generated_artifacts, regenerate, sing_box, uri};
+    use crate::config::{
+        DeploymentConfig, DeploymentStore, ManagedProtocol, ProtocolPorts, SubscriptionMode,
+    };
 
     async fn http_get(port: u16, path: &str) -> String {
         let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -1224,6 +1226,59 @@ mod tests {
         crate::traffic::reset(&store, &config).expect("accounting state is established");
         let credential = config.subscription_credential.clone();
         (store, config, credential)
+    }
+
+    #[test]
+    fn no_domain_ip_fallback_artifacts_use_the_fake_protocol_sni_and_insecure_tls() {
+        let config = DeploymentConfig::new_with_ports(
+            SubscriptionMode::IpFallback,
+            "203.0.113.7".into(),
+            None,
+            Some(2080),
+            "ens3".into(),
+            vec![
+                ManagedProtocol::VlessReality,
+                ManagedProtocol::VmessWebsocket,
+                ManagedProtocol::Hysteria2,
+                ManagedProtocol::Tuic,
+                ManagedProtocol::Anytls,
+            ],
+            Some("www.cloudflare.com".into()),
+            ProtocolPorts::default(),
+        )
+        .expect("a no-domain deployment with all five protocols is valid");
+        let nodes = crate::canonical::nodes(&config);
+
+        let sing_box = sing_box(&config, &nodes).expect("sing-box artifacts generate");
+        let clash = clash(&config, &nodes).expect("clash artifacts generate");
+        let uri = uri(&config, &nodes).expect("uri artifacts generate");
+
+        for artifact in [&sing_box, &clash, &uri] {
+            assert!(
+                artifact.contains("www.bing.com"),
+                "artifact carries the default fake protocol SNI"
+            );
+            assert!(
+                artifact.contains("www.cloudflare.com"),
+                "artifact carries the Reality decoy SNI"
+            );
+            assert!(
+                artifact.contains("203.0.113.7"),
+                "artifact addresses the VPS IP rather than a domain"
+            );
+        }
+        assert!(
+            sing_box.contains("\"insecure\": true"),
+            "sing-box clients skip certificate verification"
+        );
+        assert!(
+            clash.contains("skip-cert-verify: true"),
+            "clash clients skip certificate verification"
+        );
+        assert!(
+            uri.contains("insecure=1"),
+            "URI clients skip certificate verification"
+        );
     }
 
     #[tokio::test]

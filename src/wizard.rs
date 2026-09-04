@@ -192,6 +192,25 @@ pub fn run<C: Prompts>(
         None
     };
 
+    let protocol_sni = if enabled_protocols.iter().any(|protocol| {
+        matches!(
+            protocol,
+            ManagedProtocol::VmessWebsocket
+                | ManagedProtocol::Hysteria2
+                | ManagedProtocol::Tuic
+                | ManagedProtocol::Anytls
+        )
+    }) {
+        ask_value(
+            prompts,
+            "协议 TLS 伪装域名（protocol_sni，留空 = 自动：www.bing.com 或订阅域名）",
+            existing.and_then(|config| config.protocol_sni.clone()),
+            parse_hostname,
+        )?
+    } else {
+        None
+    };
+
     let monthly_traffic_limit = ask_value(
         prompts,
         "每月流量上限（GiB，0 = 不限；可输入 GB）",
@@ -253,6 +272,7 @@ pub fn run<C: Prompts>(
             interface,
             enabled_protocols,
             reality_decoy_sni,
+            protocol_sni,
             monthly_traffic_limit,
             accounting_policy,
             accounting_timezone,
@@ -288,7 +308,7 @@ pub fn run_topic<C: Prompts>(
     if topic == ConfigurationTopic::Protocols
         && existing.subscription_mode == SubscriptionMode::IpFallback
     {
-        prompts.report("IP fallback 模式仅支持 VLESS Reality");
+        prompts.report("IP fallback 模式可启用证书类协议，但需自签证书 + 协议伪装域名");
     }
 
     let mut mode = existing.subscription_mode.clone();
@@ -301,6 +321,7 @@ pub fn run_topic<C: Prompts>(
     let mut interface = existing.interface.clone();
     let mut enabled_protocols = existing.enabled_protocols.clone();
     let mut reality_decoy_sni = existing.reality_decoy_sni.clone();
+    let mut protocol_sni = existing.protocol_sni.clone();
     let mut monthly_traffic_limit = existing.monthly_traffic_limit;
     let mut accounting_policy = existing.accounting_policy.clone();
     let mut accounting_timezone = existing.accounting_timezone.clone();
@@ -374,11 +395,6 @@ pub fn run_topic<C: Prompts>(
                 ManagedProtocol::Anytls,
             ];
             for protocol in protocols {
-                if existing.subscription_mode == SubscriptionMode::IpFallback
-                    && protocol != ManagedProtocol::VlessReality
-                {
-                    continue;
-                }
                 let enabled = ask_yes_no(
                     prompts,
                     &format!("启用 {protocol}？"),
@@ -424,6 +440,24 @@ pub fn run_topic<C: Prompts>(
                     reality_decoy_sni,
                     parse_hostname,
                 )?)
+            } else {
+                None
+            };
+            protocol_sni = if enabled_protocols.iter().any(|protocol| {
+                matches!(
+                    protocol,
+                    ManagedProtocol::VmessWebsocket
+                        | ManagedProtocol::Hysteria2
+                        | ManagedProtocol::Tuic
+                        | ManagedProtocol::Anytls
+                )
+            }) {
+                ask_value(
+                    prompts,
+                    "协议 TLS 伪装域名（protocol_sni，留空 = 自动：www.bing.com 或订阅域名）",
+                    protocol_sni,
+                    parse_hostname,
+                )?
             } else {
                 None
             };
@@ -486,6 +520,7 @@ pub fn run_topic<C: Prompts>(
             interface,
             enabled_protocols,
             reality_decoy_sni,
+            protocol_sni,
             monthly_traffic_limit,
             accounting_policy,
             accounting_timezone,
@@ -799,16 +834,16 @@ mod tests {
     #[test]
     fn a_mode_precondition_violation_fails_before_any_commit() {
         let config = ip_fallback_config();
-        let mut answers = empty_answers(18);
+        let mut answers = empty_answers(19);
+        answers[5] = "domain";
         answers[7] = "y";
-        answers[12] = "www.cloudflare.com";
         let mut prompts = ScriptPrompts::new(&answers, &[true]);
 
         let result = run(Some(&config), None, &mut prompts);
 
         assert!(
             result.is_err(),
-            "VMess in IP fallback mode must be rejected"
+            "VMess in IP fallback mode with a domain certificate must be rejected"
         );
     }
 
@@ -832,6 +867,7 @@ mod tests {
             "",
             "",
             "www.cloudflare.com",
+            "",
             "",
             "",
             "",

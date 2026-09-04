@@ -34,6 +34,10 @@ enum Command {
         interface: Option<String>,
         #[arg(long)]
         reality_decoy_sni: Option<String>,
+        /// Fake TLS server name for the certificate-based protocols in a
+        /// no-domain deployment (defaults to www.bing.com).
+        #[arg(long)]
+        protocol_sni: Option<String>,
         /// Explicitly omit a Managed protocol; all five are enabled by default.
         #[arg(long, value_enum)]
         disable_protocol: Vec<CliManagedProtocol>,
@@ -166,6 +170,7 @@ struct InstallOptions {
     http_port: Option<u16>,
     interface: Option<String>,
     reality_decoy_sni: Option<String>,
+    protocol_sni: Option<String>,
     disable_protocol: Vec<CliManagedProtocol>,
     vless_port: Option<u16>,
     vmess_port: Option<u16>,
@@ -211,6 +216,8 @@ enum ConfigCommand {
         anytls_port: Option<u16>,
         #[arg(long)]
         reality_decoy_sni: Option<String>,
+        #[arg(long)]
+        protocol_sni: Option<String>,
         #[arg(long, default_value_t = 0)]
         monthly_traffic_limit: u64,
         #[arg(long, value_enum, default_value_t = CliAccountingPolicy::NaturalMonth)]
@@ -444,6 +451,7 @@ fn main() -> ExitCode {
             http_port,
             interface,
             reality_decoy_sni,
+            protocol_sni,
             disable_protocol,
             vless_port,
             vmess_port,
@@ -462,6 +470,7 @@ fn main() -> ExitCode {
                 http_port,
                 interface,
                 reality_decoy_sni,
+                protocol_sni,
                 disable_protocol,
                 vless_port,
                 vmess_port,
@@ -747,7 +756,7 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
         } else {
             None
         };
-        let config = sbctl::config::DeploymentConfig::new_with_ports(
+        let mut config = sbctl::config::DeploymentConfig::new_with_ports(
             options.mode.into(),
             subscription_host,
             options.proxy_host,
@@ -763,6 +772,7 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
                 options.anytls_port,
             ),
         )?;
+        config.protocol_sni = options.protocol_sni;
         config.validate()?;
         if options.sing_box_bin.is_some() && options.manifest.is_some() {
             return Err(sbctl::config::ConfigError::InvalidValue(
@@ -1361,6 +1371,7 @@ fn menu_install(root: &Path) -> ExitCode {
                 http_port: None,
                 interface: None,
                 reality_decoy_sni: None,
+                protocol_sni: None,
                 disable_protocol: Vec::new(),
                 vless_port: None,
                 vmess_port: None,
@@ -1911,6 +1922,7 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
             interface,
             protocols,
             reality_decoy_sni,
+            protocol_sni,
             monthly_traffic_limit,
             accounting_policy,
             accounting_timezone,
@@ -1941,6 +1953,7 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
                     reality_decoy_sni,
                     protocol_ports(vless_port, vmess_port, hysteria2_port, tuic_port, anytls_port),
                 )?;
+                config.protocol_sni = protocol_sni;
                 config.subscription_listen_port = listen_port;
                 config.monthly_traffic_limit = monthly_traffic_limit;
                 config.accounting_policy = accounting_policy.into();

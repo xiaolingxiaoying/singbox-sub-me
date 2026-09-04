@@ -4785,10 +4785,10 @@ fn config_wizard_creates_a_new_deployment_with_secure_defaults() {
         true,
         &["vless", "vmess", "hysteria2", "tuic", "anytls"],
     );
-    let mut answers = vec![String::new(); 22];
+    let mut answers = vec![String::new(); 23];
     answers[1] = "sub.example.test".into();
     answers[16] = "www.cloudflare.com".into();
-    answers[21] = "y".into();
+    answers[22] = "y".into();
     let input = answers.join("\n") + "\n";
 
     Command::cargo_bin("sbctl")

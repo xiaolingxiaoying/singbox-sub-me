@@ -132,7 +132,7 @@ if [[ "$#" -eq 0 ]]; then
   echo "sbctl 交互式安装"
   echo "1) Direct：sbctl 使用公网 80/443 提供 HTTPS 订阅"
   echo "2) External proxy：使用现有 Nginx/Caddy 反代本机 2080 端口"
-  echo "3) IP fallback：使用 IP + 高位 HTTP 端口（仅 VLESS Reality，安全性较低）"
+  echo "3) IP fallback：使用 IP + 高位 HTTP 端口（无域名，自签证书 + 协议伪装域名）"
   while :; do
     read -r -p "请选择订阅模式 [1]: " mode_choice <"$input"
     mode_choice=${mode_choice:-1}
@@ -159,7 +159,8 @@ if [[ "$#" -eq 0 ]]; then
     install_args+=(--interface "$interface")
   fi
   if [[ "$mode" == ip-fallback ]]; then
-    install_args+=(--http-port "$http_port" --disable-protocol vmess-websocket --disable-protocol hysteria2 --disable-protocol tuic --disable-protocol anytls)
+    protocol_sni=$(read_required "协议 TLS 伪装域名（证书类协议使用）" "www.bing.com")
+    install_args+=(--http-port "$http_port" --protocol-sni "$protocol_sni")
   fi
 
   echo ""

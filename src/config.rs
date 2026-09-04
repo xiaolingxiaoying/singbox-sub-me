@@ -23,6 +23,10 @@ pub const CERTIFICATES_RELATIVE_PATH: &str = "var/lib/sbctl/certificates";
 pub const CERTIFICATES_ABSOLUTE_PATH: &str = "/var/lib/sbctl/certificates";
 const MIN_PROTOCOL_PORT: u16 = 10_000;
 const MAX_PROTOCOL_PORT: u16 = 65_535;
+/// The fake TLS server name used by the certificate-based Managed protocols in
+/// a no-domain (IP) deployment, so the self-signed certificate and the client
+/// handshake agree on a hostname even though the node host is an IP address.
+const DEFAULT_PROTOCOL_SNI: &str = "www.bing.com";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -43,6 +47,13 @@ pub struct DeploymentConfig {
     pub interface: String,
     pub enabled_protocols: Vec<ManagedProtocol>,
     pub reality_decoy_sni: Option<String>,
+    /// TLS server name used by the certificate-based Managed protocols
+    /// (VMess WebSocket, Hysteria2, TUIC, AnyTLS) and by the self-signed
+    /// certificate. In a domain deployment it defaults to the subscription
+    /// host; in a no-domain (IP) deployment it is a fake SNI so the certificate
+    /// and the client handshake agree on a hostname.
+    #[serde(default)]
+    pub protocol_sni: Option<String>,
     pub subscription_credential: String,
     #[serde(default)]
     pub monthly_traffic_limit: u64,
@@ -127,6 +138,10 @@ pub struct DeploymentOptions {
     pub interface: String,
     pub enabled_protocols: Vec<ManagedProtocol>,
     pub reality_decoy_sni: Option<String>,
+    /// Optional fake TLS server name for the certificate-based protocols in a
+    /// no-domain deployment; `None` resolves to the subscription host (domain)
+    /// or the default fake SNI (IP).
+    pub protocol_sni: Option<String>,
     pub monthly_traffic_limit: u64,
     pub accounting_policy: AccountingPolicy,
     pub accounting_timezone: String,
@@ -301,6 +316,7 @@ impl DeploymentConfig {
             interface,
             enabled_protocols,
             reality_decoy_sni,
+            protocol_sni: None,
             subscription_credential,
             monthly_traffic_limit: 0,
             accounting_policy: AccountingPolicy::NaturalMonth,
@@ -339,6 +355,7 @@ impl DeploymentConfig {
             interface,
             enabled_protocols,
             reality_decoy_sni,
+            protocol_sni,
             monthly_traffic_limit,
             accounting_policy,
             accounting_timezone,
@@ -407,6 +424,7 @@ impl DeploymentConfig {
             interface: interface.clone(),
             enabled_protocols: enabled_protocols.clone(),
             reality_decoy_sni: reality_decoy_sni.clone(),
+            protocol_sni: protocol_sni.clone(),
             subscription_credential,
             monthly_traffic_limit: *monthly_traffic_limit,
             accounting_policy: accounting_policy.clone(),
@@ -436,6 +454,21 @@ impl DeploymentConfig {
             ManagedProtocol::Tuic => self.tuic.as_ref().map(|node| node.listen_port),
             ManagedProtocol::Anytls => self.anytls.as_ref().map(|node| node.listen_port),
         }
+    }
+
+    /// The TLS server name presented by the certificate-based Managed protocols
+    /// and used as the self-signed certificate Common Name. When an explicit
+    /// `protocol_sni` is configured it wins; otherwise a domain subscription host
+    /// is used, and an IP-only (no-domain) host falls back to the default fake
+    /// SNI so the certificate and the client handshake agree on a hostname.
+    pub fn protocol_server_name(&self) -> &str {
+        self.protocol_sni.as_deref().unwrap_or_else(|| {
+            if self.subscription_host.parse::<IpAddr>().is_ok() {
+                DEFAULT_PROTOCOL_SNI
+            } else {
+                &self.subscription_host
+            }
+        })
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -532,6 +565,9 @@ impl DeploymentConfig {
         if let Some(sni) = &self.reality_decoy_sni {
             validate_hostname("Reality decoy SNI", sni)?;
         }
+        if let Some(sni) = &self.protocol_sni {
+            validate_hostname("protocol SNI", sni)?;
+        }
         if self.subscription_credential.len() < 43
             || self
                 .subscription_credential
@@ -608,9 +644,10 @@ impl DeploymentConfig {
                             | ManagedProtocol::Tuic
                             | ManagedProtocol::Anytls
                     )
-                }) {
+                }) && self.certificate_mode != CertificateMode::SelfSigned
+                {
                     return Err(ConfigError::InvalidValue(
-                        "VMess WebSocket, Hysteria2, TUIC, and AnyTLS require a domain subscription mode",
+                        "VMess WebSocket, Hysteria2, TUIC, and AnyTLS in IP fallback mode require self-signed certificates",
                     ));
                 }
             }
@@ -699,6 +736,7 @@ impl DeploymentConfig {
         if let Some(sni) = &self.reality_decoy_sni {
             lines.push(format!("Reality decoy SNI: {sni}"));
         }
+        lines.push(format!("protocol SNI: {}", self.protocol_server_name()));
         if let Some(reset_at) = &self.anchored_reset_at {
             lines.push(format!("anchored reset: {reset_at}"));
         }
@@ -1428,6 +1466,7 @@ fn validate_hostname(label: &'static str, value: &str) -> Result<(), ConfigError
         .ok_or(ConfigError::InvalidValue(match label {
             "subscription host" => "subscription host must be a valid hostname or IP address",
             "proxy host" => "proxy host must be a valid hostname or IP address",
+            "protocol SNI" => "protocol SNI must be a valid hostname",
             _ => "Reality decoy SNI must be a valid hostname",
         }))
 }
@@ -1878,6 +1917,7 @@ mod tests {
                 interface: source.interface.clone(),
                 enabled_protocols: source.enabled_protocols.clone(),
                 reality_decoy_sni: source.reality_decoy_sni.clone(),
+                protocol_sni: source.protocol_sni.clone(),
                 monthly_traffic_limit: source.monthly_traffic_limit,
                 accounting_policy: source.accounting_policy,
                 accounting_timezone: source.accounting_timezone.clone(),
@@ -1926,6 +1966,7 @@ mod tests {
                 interface: source.interface.clone(),
                 enabled_protocols: source.enabled_protocols.clone(),
                 reality_decoy_sni: source.reality_decoy_sni.clone(),
+                protocol_sni: source.protocol_sni.clone(),
                 monthly_traffic_limit: source.monthly_traffic_limit,
                 accounting_policy: source.accounting_policy,
                 accounting_timezone: source.accounting_timezone.clone(),
@@ -1965,6 +2006,7 @@ mod tests {
                     ManagedProtocol::VmessWebsocket,
                 ],
                 reality_decoy_sni: Some("www.cloudflare.com".into()),
+                protocol_sni: None,
                 monthly_traffic_limit: 0,
                 accounting_policy: AccountingPolicy::NaturalMonth,
                 accounting_timezone: "America/Los_Angeles".into(),
@@ -2009,6 +2051,7 @@ mod tests {
                 interface: source.interface.clone(),
                 enabled_protocols: source.enabled_protocols.clone(),
                 reality_decoy_sni: source.reality_decoy_sni.clone(),
+                protocol_sni: source.protocol_sni.clone(),
                 monthly_traffic_limit: source.monthly_traffic_limit,
                 accounting_policy: source.accounting_policy,
                 accounting_timezone: source.accounting_timezone.clone(),
@@ -2043,6 +2086,7 @@ mod tests {
                     ManagedProtocol::VmessWebsocket,
                 ],
                 reality_decoy_sni: Some("www.cloudflare.com".into()),
+                protocol_sni: None,
                 monthly_traffic_limit: 0,
                 accounting_policy: AccountingPolicy::NaturalMonth,
                 accounting_timezone: "America/Los_Angeles".into(),
@@ -2055,7 +2099,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(super::ConfigError::InvalidValue(
-                "VMess WebSocket, Hysteria2, TUIC, and AnyTLS require a domain subscription mode"
+                "VMess WebSocket, Hysteria2, TUIC, and AnyTLS in IP fallback mode require self-signed certificates"
             ))
         ));
     }

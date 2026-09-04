@@ -161,7 +161,7 @@ pub fn nodes(config: &DeploymentConfig) -> Vec<CanonicalNode> {
         .proxy_host
         .as_deref()
         .unwrap_or(&config.subscription_host);
-    let tls_server_name = &config.subscription_host;
+    let tls_server_name = config.protocol_server_name();
     config
         .enabled_protocols
         .iter()
@@ -171,7 +171,7 @@ pub fn nodes(config: &DeploymentConfig) -> Vec<CanonicalNode> {
                 CanonicalNode::VlessReality {
                     host: host.to_owned(),
                     port: node.listen_port,
-                    tls_server_name: tls_server_name.clone(),
+                    tls_server_name: tls_server_name.to_owned(),
                     uuid: node.uuid.clone(),
                     private_key: node.private_key.clone(),
                     public_key: vless_public_key_from_private(&node.private_key, &node.public_key),
@@ -188,7 +188,7 @@ pub fn nodes(config: &DeploymentConfig) -> Vec<CanonicalNode> {
                 CanonicalNode::VmessWebsocket {
                     host: host.to_owned(),
                     port: node.listen_port,
-                    tls_server_name: tls_server_name.clone(),
+                    tls_server_name: tls_server_name.to_owned(),
                     uuid: node.uuid.clone(),
                     path: node.path.clone(),
                 }
@@ -198,7 +198,7 @@ pub fn nodes(config: &DeploymentConfig) -> Vec<CanonicalNode> {
                 CanonicalNode::Hysteria2 {
                     host: host.to_owned(),
                     port: node.listen_port,
-                    tls_server_name: tls_server_name.clone(),
+                    tls_server_name: tls_server_name.to_owned(),
                     password: node.password.clone(),
                 }
             }
@@ -207,7 +207,7 @@ pub fn nodes(config: &DeploymentConfig) -> Vec<CanonicalNode> {
                 CanonicalNode::Tuic {
                     host: host.to_owned(),
                     port: node.listen_port,
-                    tls_server_name: tls_server_name.clone(),
+                    tls_server_name: tls_server_name.to_owned(),
                     uuid: node.uuid.clone(),
                     password: node.password.clone(),
                 }
@@ -217,7 +217,7 @@ pub fn nodes(config: &DeploymentConfig) -> Vec<CanonicalNode> {
                 CanonicalNode::Anytls {
                     host: host.to_owned(),
                     port: node.listen_port,
-                    tls_server_name: tls_server_name.clone(),
+                    tls_server_name: tls_server_name.to_owned(),
                     password: node.password.clone(),
                 }
             }
@@ -283,7 +283,31 @@ mod tests {
 
         let canonical = nodes(&config);
         assert_eq!(canonical[0].host(), "203.0.113.7");
-        assert_eq!(canonical[0].tls_server_name(), config.subscription_host);
+        // In a no-domain (IP) deployment the certificate-based protocols fall
+        // back to the default fake protocol SNI, not the IP subscription host.
+        assert_eq!(canonical[0].tls_server_name(), "www.bing.com");
+    }
+
+    #[test]
+    fn canonical_nodes_in_ip_mode_use_the_configured_protocol_sni_for_certificate_protocols() {
+        let config = DeploymentConfig::new_with_ports(
+            SubscriptionMode::IpFallback,
+            "203.0.113.7".into(),
+            None,
+            Some(2080),
+            "ens3".into(),
+            vec![ManagedProtocol::VlessReality, ManagedProtocol::Hysteria2],
+            Some("www.cloudflare.com".into()),
+            ProtocolPorts::default(),
+        )
+        .expect("a no-domain deployment with a certificate protocol is valid");
+        let mut config = config;
+        config.protocol_sni = Some("edge.example.test".into());
+        config.validate().expect("a custom protocol SNI is valid");
+
+        let canonical = nodes(&config);
+        assert_eq!(canonical[0].host(), "203.0.113.7");
+        assert_eq!(canonical[1].tls_server_name(), "edge.example.test");
     }
 
     #[test]
