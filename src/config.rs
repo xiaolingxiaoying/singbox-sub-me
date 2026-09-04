@@ -1344,11 +1344,19 @@ fn enforce_live_file_owner(root: &Path, path: &Path) -> Result<(), ConfigError> 
             ))
         })?
         .to_string_lossy();
-    let (owner, mode) = if relative == "etc/sing-box/config.json" {
-        ("sing-box:sing-box", 0o640u32)
+    let (user, owner, mode) = if relative == "etc/sing-box/config.json" {
+        ("sing-box", "sing-box:sing-box", 0o640u32)
     } else {
-        ("sbctl:sbctl", 0o600u32)
+        ("sbctl", "sbctl:sbctl", 0o600u32)
     };
+    // The dedicated service account is created during the installation
+    // transaction, after the configuration is first written. Until it exists
+    // the write cannot be delegated; the daemon-storage preparation re-applies
+    // ownership at the end of the install. Skip so a pre-account write is not
+    // an error, and enforce from the first post-install mutation onward.
+    if !user_exists(root, user) {
+        return Ok(());
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1365,8 +1373,17 @@ fn enforce_live_file_owner(root: &Path, path: &Path) -> Result<(), ConfigError> 
             .map_err(ConfigError::Storage)?;
     }
     #[cfg(not(unix))]
-    let _ = (owner, mode);
+    let _ = (user, owner, mode);
     Ok(())
+}
+
+/// Reports whether `user` has an entry in the host passwd database, so live
+/// ownership enforcement can skip writes that precede account creation.
+fn user_exists(root: &Path, user: &str) -> bool {
+    fs::read_to_string(root.join("etc/passwd"))
+        .unwrap_or_default()
+        .lines()
+        .any(|line| line.split(':').next() == Some(user))
 }
 
 fn sync_directory(_directory: &Path) -> io::Result<()> {
