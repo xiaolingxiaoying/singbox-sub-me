@@ -4,6 +4,7 @@
 /.reference-*/
 /.scratch/research/
 /.scratch/upstream/
+/.scratch/sbctl-release/deployment-issues.md
 
 # Local editor and OS files
 .idea/
