@@ -1362,7 +1362,7 @@ fn domain_nodes_export_tuic_and_anytls_with_independent_tls_credentials() {
     });
     baseline.tuic = None;
     baseline.anytls = None;
-    let baseline_artifacts = sbctl::subscription::generated_artifacts(&baseline)
+    let baseline_artifacts = sbctl::subscription::generated_artifacts(&baseline, fixture.path())
         .expect("existing protocol artifacts are generated");
     let baseline_subscription = baseline_artifacts
         .iter()

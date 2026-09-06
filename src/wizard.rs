@@ -142,7 +142,12 @@ pub fn run<C: Prompts>(
         parse_certificate_mode,
     )?;
 
-    let mut enabled_protocols = Vec::new();
+    // Ask about every protocol in the canonical order, then merge the answers
+    // with the persisted order: protocols that stay enabled keep their existing
+    // position so an unchanged selection does not reorder the generated node
+    // list (which would rewrite artifacts and restart services), and newly
+    // enabled protocols append in the canonical order.
+    let mut selected = Vec::new();
     for protocol in [
         ManagedProtocol::VlessReality,
         ManagedProtocol::VmessWebsocket,
@@ -157,9 +162,13 @@ pub fn run<C: Prompts>(
             &format!("启用 {protocol} 协议？"),
             currently_enabled,
         )? {
-            enabled_protocols.push(protocol);
+            selected.push(protocol);
         }
     }
+    let enabled_protocols = merge_protocol_order(
+        existing.map(|config| config.enabled_protocols.as_slice()),
+        &selected,
+    );
 
     let mut ports = ProtocolPorts::default();
     for protocol in &enabled_protocols {
@@ -394,21 +403,25 @@ pub fn run_topic<C: Prompts>(
                 ManagedProtocol::Tuic,
                 ManagedProtocol::Anytls,
             ];
+            let mut selected = Vec::new();
             for protocol in protocols {
                 let enabled = ask_yes_no(
                     prompts,
                     &format!("启用 {protocol}？"),
                     existing.enabled_protocols.contains(&protocol),
                 )?;
-                enabled_protocols.retain(|current| current != &protocol);
                 if enabled {
-                    enabled_protocols.push(protocol);
+                    selected.push(protocol);
                 }
             }
-            if enabled_protocols.is_empty() {
+            if selected.is_empty() {
                 prompts.report("至少需要启用一个协议");
                 return Ok(WizardOutcome::Cancelled);
             }
+            // Preserve the persisted order for protocols that stay enabled so
+            // an unchanged selection does not rewrite the generated node list.
+            enabled_protocols =
+                merge_protocol_order(Some(existing.enabled_protocols.as_slice()), &selected);
             certificate_mode = ask_required(
                 prompts,
                 "协议证书（1 domain / 2 self-signed）",
@@ -547,6 +560,27 @@ pub fn run_topic<C: Prompts>(
         return Ok(WizardOutcome::Cancelled);
     }
     Ok(WizardOutcome::Changed(new))
+}
+
+/// Merges the wizard's protocol answers with the persisted protocol order:
+/// protocols that remain enabled keep their existing position, newly enabled
+/// protocols append in the canonical order, and disabled protocols drop out.
+fn merge_protocol_order(
+    existing: Option<&[ManagedProtocol]>,
+    selected: &[ManagedProtocol],
+) -> Vec<ManagedProtocol> {
+    let mut merged = existing
+        .unwrap_or(&[])
+        .iter()
+        .filter(|protocol| selected.contains(protocol))
+        .cloned()
+        .collect::<Vec<_>>();
+    for protocol in selected {
+        if !merged.contains(protocol) {
+            merged.push(protocol.clone());
+        }
+    }
+    merged
 }
 
 /// Asks a required value, re-prompting until a valid answer is supplied.
@@ -783,6 +817,63 @@ mod tests {
                 .iter()
                 .any(|message| message.contains("新的统计周期")),
             "display-only timezone changes must not warn about resetting accounting"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_protocol_selection_preserves_the_persisted_order() {
+        use crate::config::DeploymentConfig;
+
+        let config = DeploymentConfig::new(
+            SubscriptionMode::Direct,
+            "sub.example.test".into(),
+            None,
+            None,
+            "ens3".into(),
+            vec![
+                ManagedProtocol::Anytls,
+                ManagedProtocol::VlessReality,
+                ManagedProtocol::Tuic,
+            ],
+            Some("www.cloudflare.com".into()),
+        )
+        .expect("a custom-order deployment is valid");
+        let mut prompts = ScriptPrompts::new(&empty_answers(16), &[true]);
+
+        let outcome = run(Some(&config), None, &mut prompts).expect("wizard completes");
+
+        assert_eq!(
+            outcome,
+            WizardOutcome::Unchanged,
+            "keeping every protocol enabled must not reorder the node list"
+        );
+    }
+
+    #[test]
+    fn a_protocol_topic_edit_preserves_the_persisted_order_and_appends_new_protocols() {
+        let config = ip_fallback_config();
+        let mut edited = config.clone();
+        edited.enabled_protocols = vec![ManagedProtocol::Tuic, ManagedProtocol::VlessReality];
+        // Canonical question order is VLESS, VMess, Hysteria2, TUIC, AnyTLS.
+        // Keep VLESS/TUIC enabled, enable VMess; the merged order must keep the
+        // persisted [TUIC, VLESS] order and append VMess.
+        let answers = ["y", "y", "n", "y", "n"];
+        let mut prompts = ScriptPrompts::new(&answers, &[true]);
+
+        let outcome = run_topic(&edited, ConfigurationTopic::Protocols, &mut prompts)
+            .expect("the protocol topic completes");
+
+        let WizardOutcome::Changed(updated) = outcome else {
+            panic!("enabling VMess must produce a changed configuration");
+        };
+        assert_eq!(
+            updated.enabled_protocols,
+            vec![
+                ManagedProtocol::Tuic,
+                ManagedProtocol::VlessReality,
+                ManagedProtocol::VmessWebsocket,
+            ],
+            "kept protocols keep their order; newly enabled protocols append"
         );
     }
 

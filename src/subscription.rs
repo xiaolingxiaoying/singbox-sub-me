@@ -113,7 +113,7 @@ pub fn regenerate(
     sing_box_bin: Option<&Path>,
     update_active_config: bool,
 ) -> Result<(), SubscriptionError> {
-    let artifacts = generated_artifacts(config)?;
+    let artifacts = generated_artifacts(config, store.root())?;
     if let Some(sing_box_bin) = sing_box_bin {
         let server = server_artifact(&artifacts)?;
         check_sing_box_config(sing_box_bin, server)?;
@@ -203,7 +203,7 @@ pub fn apply_config_transaction(
     sing_box_bin: Option<&Path>,
 ) -> Result<DeploymentSnapshot, SubscriptionError> {
     config.validate()?;
-    let artifacts = generated_artifacts(config)?;
+    let artifacts = generated_artifacts(config, store.root())?;
     let server = server_artifact(&artifacts)?;
     let _lock = store.acquire_operation_lock()?;
     let prior_artifacts = artifacts
@@ -247,7 +247,10 @@ pub fn apply_config_transaction(
             return Err(SubscriptionError::Storage(error));
         }
     }
-    store.replace_locked(config)?;
+    if let Err(error) = store.replace_locked(config) {
+        restore_replaced(store, &prior_artifacts, prior_active.as_deref());
+        return Err(SubscriptionError::Storage(error));
+    }
     Ok(DeploymentSnapshot {
         config: prior_config.unwrap_or_default(),
         artifacts: prior_artifacts,
@@ -280,11 +283,15 @@ pub fn restore_config_transaction(
 
 pub fn generated_artifacts(
     config: &DeploymentConfig,
+    root: &Path,
 ) -> Result<Vec<(&'static str, String)>, SubscriptionError> {
     ensure_subscription_nodes(config)?;
     let nodes = crate::canonical::nodes(config);
     Ok(vec![
-        (SING_BOX_SERVER_ARTIFACT, sing_box_server(config, &nodes)?),
+        (
+            SING_BOX_SERVER_ARTIFACT,
+            sing_box_server(config, &nodes, root)?,
+        ),
         (SING_BOX_ARTIFACT, sing_box(config, &nodes)?),
         (CLASH_ARTIFACT, clash(config, &nodes)?),
         (URI_ARTIFACT, uri(config, &nodes)?),
@@ -871,8 +878,9 @@ fn sing_box(
 fn sing_box_server(
     config: &DeploymentConfig,
     nodes: &[CanonicalNode],
+    root: &Path,
 ) -> Result<String, SubscriptionError> {
-    let certificate = certificate_tls_config(config)?;
+    let certificate = certificate_tls_config(config, root)?;
     let mut inbounds = Vec::new();
     for node in nodes {
         inbounds.push(match &node {
@@ -1064,9 +1072,12 @@ fn uri(config: &DeploymentConfig, nodes: &[CanonicalNode]) -> Result<String, Sub
 /// `SelfSigned` mode generates a long-lived self-signed certificate (sing-box-yg
 /// style, never expires, no ACME dependency) that clients are told to skip
 /// verifying; `Domain` mode uses the administrator-managed certificate.
-fn certificate_tls_config(config: &DeploymentConfig) -> Result<Value, SubscriptionError> {
+fn certificate_tls_config(
+    config: &DeploymentConfig,
+    root: &Path,
+) -> Result<Value, SubscriptionError> {
     let (certificate_path, key_path) = match config.certificate_mode {
-        CertificateMode::SelfSigned => ensure_self_signed_certificate(config)?,
+        CertificateMode::SelfSigned => ensure_self_signed_certificate(config, root)?,
         CertificateMode::Domain => {
             if config.subscription_mode == SubscriptionMode::Direct {
                 let directory = crate::config::DeploymentStore::certificate_directory_absolute(
@@ -1103,12 +1114,15 @@ fn certificate_tls_config(config: &DeploymentConfig) -> Result<Value, Subscripti
 /// Generates and pins a long-lived self-signed certificate for the subscription
 /// host, or reuses the pinned copy. The certificate stays valid for 36500 days,
 /// matching the sing-box-yg default, so the proxy listeners never break on an
-/// expired administrator-managed certificate.
+/// expired administrator-managed certificate. Files are created private
+/// (directory 0750, key and certificate 0640) so the TLS private key is never
+/// world-readable, even before the daemon-storage preparation runs.
 fn ensure_self_signed_certificate(
     config: &DeploymentConfig,
+    root: &Path,
 ) -> Result<(String, String), SubscriptionError> {
     let server_name = config.protocol_server_name();
-    let directory = Path::new(crate::config::CERTIFICATES_ABSOLUTE_PATH).join(server_name);
+    let directory = self_signed_certificate_directory(root, server_name);
     let certificate_path = directory.join("cert.pem");
     let key_path = directory.join("key.pem");
     if certificate_path.is_file() && key_path.is_file() {
@@ -1131,12 +1145,55 @@ fn ensure_self_signed_certificate(
         .self_signed(&key_pair)
         .map_err(|error| SubscriptionError::Certificate(error.to_string()))?;
     fs::create_dir_all(&directory).map_err(SubscriptionError::Artifact)?;
-    fs::write(&certificate_path, certificate.pem()).map_err(SubscriptionError::Artifact)?;
-    fs::write(&key_path, key_pair.serialize_pem()).map_err(SubscriptionError::Artifact)?;
+    restrict_directory_permissions(&directory)?;
+    write_private_file(&certificate_path, certificate.pem().as_bytes())?;
+    write_private_file(&key_path, key_pair.serialize_pem().as_bytes())?;
     Ok((
         certificate_path.to_string_lossy().into_owned(),
         key_path.to_string_lossy().into_owned(),
     ))
+}
+
+/// The directory holding the long-lived self-signed certificate for a protocol
+/// SNI. The live host uses the absolute path consumed by the generated sing-box
+/// configuration and the service accounts; a fixture root keeps every write
+/// inside that root so tests and `--root` operations never touch host storage.
+fn self_signed_certificate_directory(root: &Path, server_name: &str) -> std::path::PathBuf {
+    if root == Path::new("/") {
+        Path::new(crate::config::CERTIFICATES_ABSOLUTE_PATH).join(server_name)
+    } else {
+        root.join(crate::config::CERTIFICATES_RELATIVE_PATH)
+            .join(server_name)
+    }
+}
+
+fn restrict_directory_permissions(directory: &Path) -> Result<(), SubscriptionError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o750))
+            .map_err(SubscriptionError::Artifact)?;
+    }
+    #[cfg(not(unix))]
+    let _ = directory;
+    Ok(())
+}
+
+fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), SubscriptionError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o640)
+            .open(path)
+            .and_then(|mut file| file.write_all(contents))
+            .map_err(SubscriptionError::Artifact)
+    }
+    #[cfg(not(unix))]
+    fs::write(path, contents).map_err(SubscriptionError::Artifact)
 }
 
 /// Clients connecting to a self-signed certificate must be told to skip
@@ -1215,7 +1272,7 @@ mod tests {
             Some("www.cloudflare.com".into()),
         )
         .expect("a Direct VLESS deployment is valid");
-        let artifacts = generated_artifacts(&config).expect("artifacts generate");
+        let artifacts = generated_artifacts(&config, fixture.path()).expect("artifacts generate");
         let references = artifacts
             .iter()
             .map(|(name, contents)| (*name, contents.as_bytes()))
@@ -1279,6 +1336,62 @@ mod tests {
             uri.contains("insecure=1"),
             "URI clients skip certificate verification"
         );
+    }
+
+    #[test]
+    fn self_signed_certificates_are_generated_inside_the_deployment_root_with_private_permissions()
+    {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let config = DeploymentConfig::new(
+            SubscriptionMode::IpFallback,
+            "203.0.113.7".into(),
+            None,
+            Some(2080),
+            "ens3".into(),
+            vec![ManagedProtocol::Hysteria2],
+            None,
+        )
+        .expect("an IP fallback Hysteria2 deployment is valid");
+
+        let artifacts = generated_artifacts(&config, fixture.path()).expect("artifacts generate");
+
+        let server: serde_json::Value = serde_json::from_str(
+            &artifacts
+                .iter()
+                .find(|(name, _)| *name == "sing-box-server.json")
+                .map(|(_, contents)| contents.clone())
+                .expect("server artifact is present"),
+        )
+        .expect("server configuration is JSON");
+        let certificate_path = server["inbounds"][0]["tls"]["certificate_path"]
+            .as_str()
+            .expect("the TLS inbound references a certificate path");
+        assert!(
+            certificate_path.starts_with(fixture.path().to_str().expect("fixture path is UTF-8")),
+            "the self-signed certificate is written inside the deployment root: {certificate_path}"
+        );
+        let directory = fixture
+            .path()
+            .join("var/lib/sbctl/certificates/www.bing.com");
+        assert!(directory.join("key.pem").is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let key_mode = fs::metadata(directory.join("key.pem"))
+                .expect("private key exists")
+                .permissions()
+                .mode();
+            assert_eq!(
+                key_mode & 0o777,
+                0o640,
+                "the TLS private key is never world-readable"
+            );
+            let directory_mode = fs::metadata(&directory)
+                .expect("certificate directory exists")
+                .permissions()
+                .mode();
+            assert_eq!(directory_mode & 0o777, 0o750);
+        }
     }
 
     #[tokio::test]
@@ -1629,7 +1742,8 @@ mod tests {
 
         regenerate(&store, &config, Some(&accepting), true)
             .expect("a passing check allows the regeneration");
-        let expected = generated_artifacts(&config).expect("new artifacts are generated");
+        let expected =
+            generated_artifacts(&config, fixture.path()).expect("new artifacts are generated");
         for (name, contents) in &expected {
             assert_eq!(
                 artifact(&store, name),
@@ -1715,7 +1829,7 @@ mod tests {
     }
 
     fn write_initial_deployment(store: &DeploymentStore, config: &DeploymentConfig) {
-        let artifacts = generated_artifacts(config).expect("artifacts generate");
+        let artifacts = generated_artifacts(config, store.root()).expect("artifacts generate");
         let references = artifacts
             .iter()
             .map(|(name, contents)| (*name, contents.as_bytes()))
@@ -1753,7 +1867,8 @@ mod tests {
             result.is_err(),
             "a rejected check must fail the transaction"
         );
-        let expected = generated_artifacts(&old).expect("old artifacts are generated");
+        let expected =
+            generated_artifacts(&old, fixture.path()).expect("old artifacts are generated");
         for (name, contents) in &expected {
             assert_eq!(
                 artifact(&store, name),
@@ -1782,7 +1897,8 @@ mod tests {
         let snapshot =
             super::apply_config_transaction(&store, &new, Some(&accepting)).expect("transaction");
 
-        let expected = generated_artifacts(&new).expect("new artifacts are generated");
+        let expected =
+            generated_artifacts(&new, fixture.path()).expect("new artifacts are generated");
         for (name, contents) in &expected {
             assert_eq!(
                 artifact(&store, name),
@@ -1821,7 +1937,8 @@ mod tests {
         let store = DeploymentStore::new(fixture.path());
         let old = vless_config();
         write_initial_deployment(&store, &old);
-        let artifacts_before = generated_artifacts(&old).expect("old artifacts are generated");
+        let artifacts_before =
+            generated_artifacts(&old, fixture.path()).expect("old artifacts are generated");
         let active_before = fs::read(store.root().join("etc/sing-box/config.json"))
             .expect("active config is readable");
         let mut new = old.clone();
@@ -1864,7 +1981,8 @@ mod tests {
             super::apply_config_transaction(&store, &new, Some(&accepting)).expect("transaction");
         super::restore_config_transaction(&store, &snapshot).expect("restore succeeds");
 
-        let old_artifacts = generated_artifacts(&old).expect("old artifacts are generated");
+        let old_artifacts =
+            generated_artifacts(&old, fixture.path()).expect("old artifacts are generated");
         for (name, contents) in &old_artifacts {
             assert_eq!(
                 artifact(&store, name),

@@ -583,7 +583,7 @@ fn sing_box(root: &Path, command: SingBoxCommand) -> ExitCode {
         }
         SingBoxCommand::Remove => sbctl::lifecycle::remove_managed_sing_box(root)
             .map(|_| "sing-box removed".to_owned())
-            .map_err(|error| sbctl::update::UpdateError::DownloadFailed("sing-box", error)),
+            .map_err(sbctl::update::UpdateError::Operation),
     };
     match result {
         Ok(message) => {
@@ -756,10 +756,10 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
         let subscription_host =
             required_install_value(options.subscription_host, "Subscription host")?;
         let interface = options.interface.map(Ok).unwrap_or_else(|| {
-            sbctl::traffic::detect_default_route_interface(root).map_err(|_| {
-                sbctl::config::ConfigError::InvalidValue(
-                    "could not detect a default-route interface; specify --interface",
-                )
+            sbctl::traffic::detect_default_route_interface(root).map_err(|error| {
+                sbctl::config::ConfigError::StateContent(format!(
+                    "could not detect a default-route interface ({error}); specify --interface"
+                ))
             })
         })?;
         let protocols = select_protocols(&options.disable_protocol)?;
@@ -816,7 +816,7 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
                     .1
             }
         };
-        let artifacts = sbctl::subscription::generated_artifacts(&config)
+        let artifacts = sbctl::subscription::generated_artifacts(&config, root)
             .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
         let server = artifacts
             .iter()
@@ -860,7 +860,7 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
     match result {
         Ok(config) => {
             println!(
-                "installation completed\nenabled protocols: {}\nrequired firewall ports (not changed):\n{}\n\n再次进入管理菜单: sbctl menu",
+                "installation completed\nenabled protocols: {}\nrequired firewall ports (not changed):\n{}\n\n查看订阅地址: sbctl sub   订阅二维码: sbctl qr\n再次进入管理菜单: sbctl menu",
                 config
                     .enabled_protocols
                     .iter()
@@ -938,7 +938,8 @@ fn print_menu_header(root: &Path) {
             "系统: {os}   内核: {kernel}   处理器: {cpu}   BBR: {bbr}"
         ))
     );
-    match sbctl::config::DeploymentStore::new(root).load() {
+    let store = sbctl::config::DeploymentStore::new(root);
+    match store.load() {
         Ok(config) => {
             println!(
                 "{}",
@@ -962,7 +963,7 @@ fn print_menu_header(root: &Path) {
                 "{}",
                 sbctl::term::green(sbctl::lifecycle::service_status(root))
             );
-            match sbctl::traffic::report(&sbctl::config::DeploymentStore::new(root), &config) {
+            match sbctl::traffic::report(&store, &config) {
                 Ok(report) => {
                     let total = report.total();
                     let usage = if report.monthly_traffic_limit == 0 {
@@ -1509,11 +1510,11 @@ fn required_install_value(
         .read_line(&mut value)
         .map_err(sbctl::config::ConfigError::Storage)?;
     let value = value.trim().to_owned();
-    (!value.is_empty())
-        .then_some(value)
-        .ok_or(sbctl::config::ConfigError::InvalidValue(
-            "interactive installation requires a value",
+    (!value.is_empty()).then_some(value).ok_or_else(|| {
+        sbctl::config::ConfigError::StateContent(format!(
+            "{label} is required; supply it with the matching --flag or run interactively"
         ))
+    })
 }
 
 fn print_nodes(root: &Path) -> ExitCode {
@@ -1662,10 +1663,9 @@ fn print_subscription_urls(
     format: Option<sbctl::subscription::SubscriptionFormat>,
 ) -> ExitCode {
     let store = sbctl::config::DeploymentStore::new(root);
-    let is_ip_fallback = store.load().is_ok_and(|config| {
-        config.subscription_mode == sbctl::config::SubscriptionMode::IpFallback
-    });
     let result = store.load().and_then(|config| {
+        let is_ip_fallback =
+            config.subscription_mode == sbctl::config::SubscriptionMode::IpFallback;
         let formats = match format {
             Some(format) => vec![format],
             None => [
@@ -1680,11 +1680,11 @@ fn print_subscription_urls(
             .into_iter()
             .map(|format| sbctl::subscription::subscription_url(&config, format))
             .collect::<Result<Vec<_>, _>>()
-            .map(|urls| urls.join("\n"))
+            .map(|urls| (urls.join("\n"), is_ip_fallback))
             .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))
     });
     match result {
-        Ok(contents) => {
+        Ok((contents, is_ip_fallback)) => {
             if is_ip_fallback {
                 eprintln!(
                     "warning: IP fallback subscription uses unencrypted HTTP and is lower security"
@@ -1976,10 +1976,10 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
             anytls_port,
         } => {
             let interface = interface.map(Ok).unwrap_or_else(|| {
-                sbctl::traffic::detect_default_route_interface(root).map_err(|_| {
-                    sbctl::config::ConfigError::InvalidValue(
-                        "could not detect a default-route interface; specify --interface",
-                    )
+                sbctl::traffic::detect_default_route_interface(root).map_err(|error| {
+                    sbctl::config::ConfigError::StateContent(format!(
+                        "could not detect a default-route interface ({error}); specify --interface"
+                    ))
                 })
             });
             interface.and_then(|interface| {
@@ -1994,7 +1994,6 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
                     protocol_ports(vless_port, vmess_port, hysteria2_port, tuic_port, anytls_port),
                 )?;
                 config.protocol_sni = protocol_sni;
-                config.subscription_listen_port = listen_port;
                 config.monthly_traffic_limit = monthly_traffic_limit;
                 config.accounting_policy = accounting_policy.into();
                 if let Some(timezone) = accounting_timezone {
@@ -2004,6 +2003,12 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
                     config.client_display_timezone = timezone;
                 }
                 config.anchored_reset_at = anchored_reset_at;
+                // A missing --listen-port keeps the 2080 loopback default that a
+                // fresh external-proxy deployment already carries; an explicit
+                // value (or an explicit non-external-proxy mode) decides below.
+                if listen_port.is_some() {
+                    config.subscription_listen_port = listen_port;
+                }
                 config.validate()?;
                 if let Some(port) = config.subscription_listen_port {
                     sbctl::subscription::ensure_external_proxy_listener_available(port)
@@ -2014,7 +2019,7 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
                     .iter()
                     .any(sbctl::config::ManagedProtocol::has_generated_subscription_artifacts)
                 {
-                    sbctl::subscription::generated_artifacts(&config).map_err(|error| {
+                    sbctl::subscription::generated_artifacts(&config, root).map_err(|error| {
                         sbctl::config::ConfigError::StateContent(error.to_string())
                     })?
                 } else {
@@ -2199,7 +2204,7 @@ fn commit_config_change(
         let binary = sing_box_bin.unwrap_or_else(|| root.join("usr/local/bin/sing-box"));
         match existing {
             None => {
-                let artifacts = sbctl::subscription::generated_artifacts(new)
+                let artifacts = sbctl::subscription::generated_artifacts(new, root)
                     .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
                 let server = artifacts
                     .iter()
@@ -2287,7 +2292,12 @@ fn restart_services_with_rollback(
 ) -> Result<(), sbctl::config::ConfigError> {
     if let Err(error) = sbctl::lifecycle::restart_services(root) {
         rollback();
-        let _ = sbctl::lifecycle::restart_services(root);
+        if let Err(rollback_error) = sbctl::lifecycle::restart_services(root) {
+            eprintln!(
+                "warning: the rollback restart failed too ({rollback_error}); inspect \
+                 `systemctl status sing-box.service sbctl.service` before retrying"
+            );
+        }
         return Err(sbctl::config::ConfigError::StateContent(error));
     }
     Ok(())
@@ -2307,7 +2317,12 @@ fn rotate_subscription_credential(root: &Path) -> ExitCode {
         store.replace(&config)?;
         restart_services_with_rollback(root, || {
             config.subscription_credential = previous;
-            let _ = store.replace(&config);
+            if let Err(error) = store.replace(&config) {
+                eprintln!(
+                    "warning: restoring the previous subscription credential failed ({error}); \
+                     the rotated credential may still be active"
+                );
+            }
         })?;
         Ok(config)
     });

@@ -1381,11 +1381,16 @@ fn enforce_live_file_owner(root: &Path, path: &Path) -> Result<(), ConfigError> 
                 "managed path is outside root",
             ))
         })?
-        .to_string_lossy();
-    let (user, owner, mode) = if relative == "etc/sing-box/config.json" {
-        ("sing-box", "sing-box:sing-box", 0o640u32)
-    } else {
-        ("sbctl", "sbctl:sbctl", 0o600u32)
+        .to_string_lossy()
+        .into_owned();
+    let (user, owner, mode) = match relative.as_str() {
+        "etc/sing-box/config.json" => ("sing-box", "sing-box:sing-box", 0o640u32),
+        // The managed service binaries must stay root-owned and executable:
+        // sbctl.service and sing-box.service run under their own accounts and
+        // exec these paths, so treating them like state files (0600 sbctl:sbctl)
+        // would leave every updated binary unexecutable and break the services.
+        "usr/local/bin/sbctl" | "usr/local/bin/sing-box" => ("root", "root:root", 0o755u32),
+        _ => ("sbctl", "sbctl:sbctl", 0o600u32),
     };
     // The dedicated service account is created during the installation
     // transaction, after the configuration is first written. Until it exists

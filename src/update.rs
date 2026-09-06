@@ -37,6 +37,8 @@ pub enum UpdateError {
     MissingDownloadUrl(&'static str),
     #[error("download of {0} failed: {1}")]
     DownloadFailed(&'static str, String),
+    #[error("sing-box operation failed: {0}")]
+    Operation(String),
     #[error("sbctl candidate health check failed: {0}")]
     SbctlHealth(String),
     #[error("sing-box candidate configuration check failed: {0}")]
@@ -83,22 +85,26 @@ pub fn host_arch() -> &'static str {
 pub fn fetch_latest_manifest() -> Result<ReleaseManifest, UpdateError> {
     let temporary = tempfile::NamedTempFile::new()?;
     let url = manifest_url_for_arch(host_arch());
-    let status = Command::new("curl")
+    let output = Command::new("curl")
         .args([
             "--fail",
             "--location",
             "--silent",
             "--show-error",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "120",
             "--output",
         ])
         .arg(temporary.path())
         .arg(&url)
-        .status()
+        .output()
         .map_err(|error| UpdateError::DownloadFailed("manifest", error.to_string()))?;
-    if !status.success() {
+    if !output.status.success() {
         return Err(UpdateError::DownloadFailed(
             "manifest",
-            format!("curl exited with {status}"),
+            curl_diagnostic("manifest", &output),
         ));
     }
     Ok(crate::release::verify_manifest(temporary.path())?)
@@ -132,23 +138,27 @@ fn download_artifact(
         fs::create_dir_all(parent)?;
     }
     let temporary = output.with_extension("download.tmp");
-    let status = Command::new("curl")
+    let download = Command::new("curl")
         .args([
             "--fail",
             "--location",
             "--silent",
             "--show-error",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "600",
             "--output",
         ])
         .arg(&temporary)
         .arg(url)
-        .status()
+        .output()
         .map_err(|error| UpdateError::DownloadFailed(name, error.to_string()))?;
-    if !status.success() {
+    if !download.status.success() {
         let _ = fs::remove_file(&temporary);
         return Err(UpdateError::DownloadFailed(
             name,
-            format!("curl exited with {status}"),
+            curl_diagnostic(name, &download),
         ));
     }
     let result = verify_artifact(name, &temporary, &artifact.sha256);
@@ -165,6 +175,17 @@ fn download_artifact(
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+/// Builds the download-failure diagnostic: curl's stderr when it has content,
+/// otherwise the plain exit status.
+fn curl_diagnostic(name: &str, output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if stderr.is_empty() {
+        format!("curl exited with {}", output.status)
+    } else {
+        format!("curl failed for {name}: {stderr}")
+    }
 }
 
 pub fn verify_sing_box_artifact(
@@ -196,11 +217,17 @@ pub fn apply_sing_box(
 
     let rollback = rollback_directory(store.root());
     let backup = backup(store, &rollback, &config)?;
-    store.write_relative_locked("usr/local/bin/sing-box", &fs::read(candidate)?)?;
+    write_managed_binary(store, "usr/local/bin/sing-box", &fs::read(candidate)?)?;
     if let Err(error) = crate::lifecycle::restart_sing_box_service(store.root()) {
         restore(store, &backup)
             .map_err(|rollback_error| UpdateError::Rollback(rollback_error.to_string()))?;
-        let _ = crate::lifecycle::restart_sing_box_service(store.root());
+        if let Err(rollback_error) = crate::lifecycle::restart_sing_box_service(store.root()) {
+            eprintln!(
+                "warning: the rollback restart failed too ({}); inspect \
+                 `systemctl status sing-box.service` before retrying",
+                rollback_error
+            );
+        }
         return Err(UpdateError::ServiceHealth(error));
     }
     Ok(rollback)
@@ -230,13 +257,23 @@ pub fn apply(
 
     let rollback = rollback_directory(store.root());
     let backup = backup(store, &rollback, &config)?;
-    store.write_relative_locked("usr/local/bin/sbctl", &fs::read(sbctl_candidate)?)?;
-    store.write_relative_locked("usr/local/bin/sing-box", &fs::read(sing_box_candidate)?)?;
+    write_managed_binary(store, "usr/local/bin/sbctl", &fs::read(sbctl_candidate)?)?;
+    write_managed_binary(
+        store,
+        "usr/local/bin/sing-box",
+        &fs::read(sing_box_candidate)?,
+    )?;
 
     if let Err(error) = crate::lifecycle::restart_services(store.root()) {
         restore(store, &backup)
             .map_err(|rollback_error| UpdateError::Rollback(rollback_error.to_string()))?;
-        let _ = crate::lifecycle::restart_services(store.root());
+        if let Err(rollback_error) = crate::lifecycle::restart_services(store.root()) {
+            eprintln!(
+                "warning: the rollback restart failed too ({}); inspect \
+                 `systemctl status sing-box.service sbctl.service` before retrying",
+                rollback_error
+            );
+        }
         return Err(UpdateError::ServiceHealth(error));
     }
     // Ensure the loaded configuration was valid before acknowledging the update.
@@ -300,11 +337,41 @@ fn restore(store: &DeploymentStore, backup: &[BackupEntry]) -> Result<(), Config
     for entry in backup {
         let path = store.root().join(&entry.relative);
         match &entry.contents {
-            Some(contents) => store.write_relative_locked(&entry.relative, contents)?,
+            Some(contents) => {
+                store.write_relative_locked(&entry.relative, contents)?;
+                if entry.relative.starts_with("usr/local/bin/") {
+                    set_executable(&path)?;
+                }
+            }
             None if path.exists() => fs::remove_file(path)?,
             None => {}
         }
     }
+    Ok(())
+}
+
+/// Replaces a managed service binary atomically and keeps it executable.
+/// `write_relative_locked` alone creates the new file 0600, so the executable
+/// bit is restored explicitly here; on the live host the ownership enforcement
+/// additionally re-asserts root:root 0755.
+fn write_managed_binary(
+    store: &DeploymentStore,
+    relative: &str,
+    contents: &[u8],
+) -> Result<(), UpdateError> {
+    store.write_relative_locked(relative, contents)?;
+    set_executable(&store.root().join(relative))?;
+    Ok(())
+}
+
+fn set_executable(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -339,6 +406,46 @@ fn check_sbctl_candidate(candidate: &Path) -> Result<(), UpdateError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_binary_writes_and_restores_keep_the_executable_bit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = tempfile::TempDir::new().expect("temporary root is created");
+        let store = crate::config::DeploymentStore::new(fixture.path());
+        let contents = b"updated sing-box";
+
+        write_managed_binary(&store, "usr/local/bin/sing-box", contents)
+            .expect("the binary is written");
+
+        let path = fixture.path().join("usr/local/bin/sing-box");
+        assert_eq!(fs::read(&path).expect("binary readable"), contents);
+        let mode = fs::metadata(&path)
+            .expect("binary metadata")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o755,
+            "an updated binary must stay root-executable, not 0600"
+        );
+
+        let backup = vec![BackupEntry {
+            relative: "usr/local/bin/sing-box".to_owned(),
+            contents: Some(b"known-good sing-box".to_vec()),
+        }];
+        restore(&store, &backup).expect("the rollback restore succeeds");
+        let mode = fs::metadata(&path)
+            .expect("binary metadata")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o755,
+            "a restored binary must stay executable"
+        );
+    }
 
     #[test]
     fn manifest_url_for_arch_uses_arch_key() {
