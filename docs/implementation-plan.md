@@ -4,7 +4,7 @@
 
 将当前项目从“功能原型”完善为可发布的 Rust 控制面：
 
-- 保留五种协议和三种订阅格式；
+- 保留五种协议和四种订阅格式；
 - 吸收 `vps-sub-meter` Shell 脚本中的有效能力；
 - 使用指定网卡的 RX+TX 作为 VPS 总流量；
 - 支持自然月、锚定月、首个重置时间、时区和已用流量人工修正；
@@ -100,7 +100,7 @@ sbctl traffic set-used --rx <BYTES> --tx <BYTES>
 - 源文件异常时返回 200；
 - 使用 `999 TiB` 假装无限额度。
 
-### 3. 五协议与三种订阅格式
+### 3. 五协议与四种订阅格式
 
 保留以下 Managed protocol：
 
@@ -115,6 +115,7 @@ sbctl traffic set-used --rx <BYTES> --tx <BYTES>
 - sing-box JSON；
 - Clash/Mihomo YAML；
 - URI 文本。
+- Base64 URI 文本（Shadowrocket、V2rayN 等）。
 
 所有格式使用同一组生成节点和独立协议凭据：
 
@@ -199,7 +200,7 @@ manifest 还必须声明经过测试的 sing-box 版本兼容矩阵；安装或�
 - `subscription-userinfo` 只描述 VPS 网卡总流量；
 - monthly traffic limit 第一版只展示，不执行断流；
 - “账期重置”和“订阅格式刷新”是两个独立概念；
-- 五协议与三格式属于当前产品范围；
+- 五协议与四格式属于当前产品范围；
 - Direct HTTPS 由 systemd socket activation 实现；
 - root 只用于管理员生命周期操作，不作为长驻数据面权限；
 - 上游兼容是行为兼容，不是接管上游文件布局或服务。
@@ -253,7 +254,7 @@ manifest 还必须声明经过测试的 sing-box 版本兼容矩阵；安装或�
 - 时区、自然月和锚定月；
 - 首个重置日期和时间；
 - 短月处理和 counter rollback；
-- sing-box JSON、Clash/Mihomo YAML、URI 三种订阅格式；
+- sing-box JSON、Clash/Mihomo YAML、URI 与 Base64 URI 四种订阅格式；
 - 原子工件更新；
 - 证书/私钥匹配检查；
 - systemd service、socket 和 timer 生命周期。
@@ -298,7 +299,7 @@ manifest 还必须声明经过测试的 sing-box 版本兼容矩阵；安装或�
 - 手工设置总已用流量；
 - 手工设置 RX/TX；
 - `download=RX`、`upload=TX`；
-- 五协议三格式生成；
+- 五协议四格式生成；
 - query credential 返回 404；
 - 错误状态返回 503 且不泄露 credential；
 - manifest 签名成功、签名失败、digest 失败；
@@ -332,7 +333,7 @@ manifest 还必须声明经过测试的 sing-box 版本兼容矩阵；安装或�
 
 ## 已确定的约束
 
-- 五协议和三种订阅格式属于当前版本范围；
+- 五协议和四种订阅格式属于当前版本范围；
 - `vps-sub-meter` 作为行为参考，但 sbctl 统一采用 RX+TX；
 - VPS 刷新时区默认 America/Los_Angeles，客户端显示时区默认 Asia/Shanghai，二者可独立选择；
 - 锚定月允许 1–31 日，短月按月末处理；

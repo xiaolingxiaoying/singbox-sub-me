@@ -147,6 +147,7 @@ mod tests {
     use super::{Clock, FixedClock, Runtime};
     use chrono::{TimeZone, Utc};
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
@@ -174,6 +175,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn fixture_runtime_executes_a_rooted_command_without_touching_the_live_host() {
         let fixture = TempDir::new().unwrap();
         let command = fixture.path().join("usr/bin/systemctl");

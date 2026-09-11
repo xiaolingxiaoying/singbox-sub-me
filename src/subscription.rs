@@ -30,6 +30,7 @@ use crate::config::{
 const SING_BOX_ARTIFACT: &str = "subscription-sing-box.json";
 const CLASH_ARTIFACT: &str = "subscription-clash.yaml";
 const URI_ARTIFACT: &str = "subscription-uri.txt";
+const BASE64_URI_ARTIFACT: &str = "subscription-base64-uri.txt";
 const SING_BOX_SERVER_ARTIFACT: &str = "sing-box-server.json";
 const ARTIFACTS_RELATIVE_DIR: &str = "var/lib/sbctl/artifacts";
 const ACTIVE_CONFIG_RELATIVE_PATH: &str = "etc/sing-box/config.json";
@@ -39,6 +40,7 @@ pub enum SubscriptionFormat {
     SingBox,
     Clash,
     Uri,
+    Base64Uri,
 }
 
 impl SubscriptionFormat {
@@ -47,6 +49,7 @@ impl SubscriptionFormat {
             Self::SingBox => "sing-box.json",
             Self::Clash => "clash.yaml",
             Self::Uri => "uri",
+            Self::Base64Uri => "uri.txt",
         }
     }
 
@@ -55,6 +58,7 @@ impl SubscriptionFormat {
             Self::SingBox => SING_BOX_ARTIFACT,
             Self::Clash => CLASH_ARTIFACT,
             Self::Uri => URI_ARTIFACT,
+            Self::Base64Uri => BASE64_URI_ARTIFACT,
         }
     }
 
@@ -63,6 +67,7 @@ impl SubscriptionFormat {
             Self::SingBox => "application/json; charset=utf-8",
             Self::Clash => "application/yaml; charset=utf-8",
             Self::Uri => "text/plain; charset=utf-8",
+            Self::Base64Uri => "text/plain; charset=utf-8",
         }
     }
 }
@@ -287,6 +292,7 @@ pub fn generated_artifacts(
 ) -> Result<Vec<(&'static str, String)>, SubscriptionError> {
     ensure_subscription_nodes(config)?;
     let nodes = crate::canonical::nodes(config);
+    let uri = uri(config, &nodes)?;
     Ok(vec![
         (
             SING_BOX_SERVER_ARTIFACT,
@@ -294,7 +300,8 @@ pub fn generated_artifacts(
         ),
         (SING_BOX_ARTIFACT, sing_box(config, &nodes)?),
         (CLASH_ARTIFACT, clash(config, &nodes)?),
-        (URI_ARTIFACT, uri(config, &nodes)?),
+        (URI_ARTIFACT, uri.clone()),
+        (BASE64_URI_ARTIFACT, base64_uri(&uri)),
     ])
 }
 
@@ -785,6 +792,7 @@ fn parse_route(target: &str) -> Option<(&str, SubscriptionFormat)> {
         "sing-box.json" => SubscriptionFormat::SingBox,
         "clash.yaml" => SubscriptionFormat::Clash,
         "uri" => SubscriptionFormat::Uri,
+        "uri.txt" => SubscriptionFormat::Base64Uri,
         _ => return None,
     };
     parts.next().is_none().then_some((credential, format))
@@ -1063,6 +1071,10 @@ fn uri(config: &DeploymentConfig, nodes: &[CanonicalNode]) -> Result<String, Sub
     Ok(uris)
 }
 
+fn base64_uri(uri: &str) -> String {
+    base64::engine::general_purpose::STANDARD.encode(uri.as_bytes())
+}
+
 /// The certificate path written into the sing-box server configuration for the
 /// TLS-terminating Managed protocols. Direct subscription mode uses the pinned
 /// copy that the deploy hook grants to the `sbctl` and `sing-box` accounts.
@@ -1222,6 +1234,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -1470,6 +1483,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_tls_listener_serves_base64_uri_with_the_standard_traffic_headers() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let (store, config, credential) = seed_direct_subscription(&fixture);
+        seed_direct_certificate(&fixture, &store, &config);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral listener is available");
+        let port = listener.local_addr().expect("listener address").port();
+
+        let handler = tokio::spawn(super::serve_tls_listener(
+            listener,
+            Arc::new(store.clone()),
+            Arc::new(config),
+            Some(1),
+        ));
+
+        let response = tls_get(port, &format!("/sub/{credential}/uri.txt")).await;
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("content-type: text/plain; charset=utf-8"));
+        assert!(response.contains("subscription-userinfo:"));
+        let (_, body) = response
+            .split_once("\r\n\r\n")
+            .expect("the response separates headers and body");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(body.trim())
+                .expect("the response body is standard Base64"),
+            fs::read(
+                store
+                    .root()
+                    .join("var/lib/sbctl/artifacts/subscription-uri.txt")
+            )
+            .expect("the canonical URI artifact is readable")
+        );
+        handler.await.expect("handler completes").expect("no error");
+    }
+
+    #[tokio::test]
     async fn direct_tls_listener_rejects_a_handshake_whose_sni_is_not_the_subscription_host() {
         let fixture = TempDir::new().expect("temporary root is created");
         let (store, config, _) = seed_direct_subscription(&fixture);
@@ -1645,9 +1696,19 @@ mod tests {
     }
 
     fn checker(fixture: &TempDir, accepts: bool) -> PathBuf {
+        #[cfg(windows)]
+        let path = fixture.path().join("sing-box-check.cmd");
+        #[cfg(not(windows))]
         let path = fixture.path().join("sing-box-check");
         fs::write(
             &path,
+            #[cfg(windows)]
+            if accepts {
+                "@exit /b 0\r\n"
+            } else {
+                "@exit /b 1\r\n"
+            },
+            #[cfg(not(windows))]
             if accepts {
                 "#!/bin/sh\nexit 0\n"
             } else {
@@ -1683,6 +1744,7 @@ mod tests {
             ("subscription-sing-box.json", "old sing-box".as_bytes()),
             ("subscription-clash.yaml", "old clash".as_bytes()),
             ("subscription-uri.txt", "old uri".as_bytes()),
+            ("subscription-base64-uri.txt", "old Base64 URI".as_bytes()),
         ] {
             store
                 .write_artifact(name, contents)

@@ -1065,6 +1065,8 @@ fn vless_reality_ip_fallback_exports_consistent_subscription_formats() {
         .expect("Clash subscription is cached");
     let uri = fs::read_to_string(artifacts.join("subscription-uri.txt"))
         .expect("URI subscription is cached");
+    let base64_uri = fs::read_to_string(artifacts.join("subscription-base64-uri.txt"))
+        .expect("Base64 URI subscription is cached");
     assert!(sing_box.contains("\"type\": \"vless\""));
     assert!(server.contains("\"private_key\""));
     assert!(sing_box.contains("198.51.100.9"));
@@ -1075,6 +1077,13 @@ fn vless_reality_ip_fallback_exports_consistent_subscription_formats() {
     for value in ["www.cloudflare.com", "security=reality", "xtls-rprx-vision"] {
         assert!(uri.contains(value), "URI contains {value}");
     }
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(base64_uri.trim())
+            .expect("Base64 URI subscription decodes"),
+        uri.as_bytes(),
+        "the Base64 URI subscription is an exact encoding of the canonical URI artifact"
+    );
 
     Command::cargo_bin("sbctl")
         .expect("sbctl binary is built")
@@ -1088,6 +1097,21 @@ fn vless_reality_ip_fallback_exports_consistent_subscription_formats() {
         .assert()
         .success()
         .stdout(predicate::str::contains(format!("/sub/{credential}/uri")));
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "sub",
+            "--format",
+            "base64-uri",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "/sub/{credential}/uri.txt"
+        )));
 }
 
 #[test]
@@ -1631,6 +1655,7 @@ fn regenerate_validates_before_replacing_artifacts_and_the_active_config() {
         "subscription-sing-box.json",
         "subscription-clash.yaml",
         "subscription-uri.txt",
+        "subscription-base64-uri.txt",
     ];
     let snapshot = || {
         let mut files = Vec::new();
@@ -1769,6 +1794,7 @@ fn proxy_credentials_cannot_read_the_subscription_and_the_subscription_credentia
         "subscription-sing-box.json",
         "subscription-clash.yaml",
         "subscription-uri.txt",
+        "subscription-base64-uri.txt",
     ] {
         let contents =
             fs::read_to_string(fixture.path().join("var/lib/sbctl/artifacts").join(name))
@@ -3410,9 +3436,10 @@ fn seed_service_accounts(fixture: &TempDir) {
 
 /// A systemctl stub that starts units successfully but reports every unit as
 /// inactive, so the install health check phase fails after a successful start.
-fn write_systemctl_health_failing_fixture(fixture: &TempDir) {
+fn write_systemctl_health_failing_fixture(_fixture: &TempDir) {
     #[cfg(unix)]
     {
+        let fixture = _fixture;
         use std::os::unix::fs::PermissionsExt;
         let path = fixture.path().join("usr/bin/systemctl");
         fs::create_dir_all(path.parent().expect("systemctl has a parent"))

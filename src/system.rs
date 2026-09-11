@@ -179,6 +179,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn enable_bbr_applies_missing_settings_and_persists_a_drop_in() {
         let fixture = PathFixture::new();
         write_proc(

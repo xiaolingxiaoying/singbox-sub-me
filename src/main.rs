@@ -369,6 +369,7 @@ enum CliSubscriptionFormat {
     SingBox,
     Clash,
     Uri,
+    Base64Uri,
 }
 
 #[derive(Debug, Subcommand)]
@@ -405,6 +406,7 @@ impl From<CliSubscriptionFormat> for sbctl::subscription::SubscriptionFormat {
             CliSubscriptionFormat::SingBox => Self::SingBox,
             CliSubscriptionFormat::Clash => Self::Clash,
             CliSubscriptionFormat::Uri => Self::Uri,
+            CliSubscriptionFormat::Base64Uri => Self::Base64Uri,
         }
     }
 }
@@ -1099,13 +1101,14 @@ fn menu_subscriptions(root: &Path) {
         clear_menu_screen();
         print_menu_header(root);
         print_menu_section("订阅中心");
-        println!("1. 查看三种订阅地址");
+        println!("1. 查看四种订阅地址");
         println!("2. 显示 sing-box 二维码");
         println!("3. 显示 Clash/Mihomo 二维码");
         println!("4. 显示 URI 二维码");
-        println!("5. 配置订阅入口");
-        println!("6. 轮换订阅凭据（旧链接立即失效）");
-        println!("7. 重新生成订阅工件");
+        println!("5. 显示 Base64 URI 二维码（Shadowrocket / V2rayN）");
+        println!("6. 配置订阅入口");
+        println!("7. 轮换订阅凭据（旧链接立即失效）");
+        println!("8. 重新生成订阅工件");
         println!("0. 返回");
         match read_menu_choice("请选择 [0]: ").as_deref() {
             Some("0") | None => return,
@@ -1126,23 +1129,30 @@ fn menu_subscriptions(root: &Path) {
                 pause_menu();
             }
             Some("5") => {
-                run_topic_wizard(root, sbctl::wizard::ConfigurationTopic::Subscription);
+                print_subscription_qr(
+                    root,
+                    Some(sbctl::subscription::SubscriptionFormat::Base64Uri),
+                );
                 pause_menu();
             }
             Some("6") => {
+                run_topic_wizard(root, sbctl::wizard::ConfigurationTopic::Subscription);
+                pause_menu();
+            }
+            Some("7") => {
                 if confirm_menu_action("确认轮换订阅凭据？旧订阅 URL 将立即失效") {
                     rotate_subscription_credential(root);
                 }
                 pause_menu();
             }
-            Some("7") => {
+            Some("8") => {
                 if confirm_menu_action("确认重新生成并校验订阅工件？") {
                     regenerate(root, None);
                 }
                 pause_menu();
             }
             Some(_) => {
-                eprintln!("无效选择，请输入 0 到 7。");
+                eprintln!("无效选择，请输入 0 到 8。");
                 pause_menu();
             }
         }
@@ -1672,6 +1682,7 @@ fn print_subscription_urls(
                 sbctl::subscription::SubscriptionFormat::SingBox,
                 sbctl::subscription::SubscriptionFormat::Clash,
                 sbctl::subscription::SubscriptionFormat::Uri,
+                sbctl::subscription::SubscriptionFormat::Base64Uri,
             ]
             .into_iter()
             .collect(),
@@ -1717,6 +1728,9 @@ fn print_subscription_qr(
                 sbctl::subscription::SubscriptionFormat::SingBox => "sing-box",
                 sbctl::subscription::SubscriptionFormat::Clash => "clash/mihomo",
                 sbctl::subscription::SubscriptionFormat::Uri => "uri",
+                sbctl::subscription::SubscriptionFormat::Base64Uri => {
+                    "Base64 URI（Shadowrocket / V2rayN）"
+                }
             };
             println!("{label} 订阅二维码：");
             println!("{url}");

@@ -230,13 +230,13 @@ pub fn run<C: Prompts>(
 
     let accounting_timezone = ask_required(
         prompts,
-        "VPS 刷新时区（IANA）",
+        "VPS 刷新时区（1 美西 / 2 美东 / 3 中国 / 或直接输入 IANA）",
         Some(
             existing
                 .map(|config| config.accounting_timezone.clone())
                 .unwrap_or_else(|| "America/Los_Angeles".to_owned()),
         ),
-        parse_timezone,
+        parse_accounting_timezone,
     )?;
 
     let client_display_timezone = ask_required(
@@ -485,9 +485,9 @@ pub fn run_topic<C: Prompts>(
             .unwrap_or(0);
             accounting_timezone = ask_required(
                 prompts,
-                "VPS 刷新时区（IANA）",
+                "VPS 刷新时区（1 美西 / 2 美东 / 3 中国 / 或直接输入 IANA）",
                 Some(accounting_timezone.clone()),
-                parse_timezone,
+                parse_accounting_timezone,
             )?;
             client_display_timezone = ask_required(
                 prompts,
@@ -725,6 +725,15 @@ fn parse_timezone(value: &str) -> Result<String, String> {
     Ok(value)
 }
 
+fn parse_accounting_timezone(value: &str) -> Result<String, String> {
+    match value.trim() {
+        "1" => Ok("America/Los_Angeles".to_owned()),
+        "2" => Ok("America/New_York".to_owned()),
+        "3" => Ok("Asia/Shanghai".to_owned()),
+        _ => parse_timezone(value),
+    }
+}
+
 fn parse_policy(value: &str) -> Result<AccountingPolicy, String> {
     match value.trim().to_ascii_lowercase().as_str() {
         "natural-month" | "natural" | "1" => Ok(AccountingPolicy::NaturalMonth),
@@ -817,6 +826,28 @@ mod tests {
                 .iter()
                 .any(|message| message.contains("新的统计周期")),
             "display-only timezone changes must not warn about resetting accounting"
+        );
+    }
+
+    #[test]
+    fn traffic_topic_accepts_the_east_coast_timezone_preset() {
+        let config = ip_fallback_config();
+        let answers = ["", "2", "", "", ""];
+        let mut prompts = ScriptPrompts::new(&answers, &[true]);
+
+        let outcome = run_topic(&config, ConfigurationTopic::Traffic, &mut prompts)
+            .expect("traffic topic completes");
+
+        let WizardOutcome::Changed(updated) = outcome else {
+            panic!("selecting the east coast preset must update the configuration");
+        };
+        assert_eq!(updated.accounting_timezone, "America/New_York");
+        assert!(
+            prompts
+                .reports()
+                .iter()
+                .any(|message| message.contains("新的统计周期")),
+            "changing the accounting timezone warns that a new period begins"
         );
     }
 

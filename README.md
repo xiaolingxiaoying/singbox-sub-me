@@ -20,10 +20,11 @@
 - 每个启用协议使用独立的 Proxy credential 和 Protocol listener port。
 - 端口支持手动指定，也支持自动分配。
 - 自动端口范围为 `10000–65535`，并统一检查 TCP/UDP 冲突和系统占用。
-- 生成三种订阅格式：
+- 生成四种订阅格式：
   - sing-box JSON
   - Clash/Mihomo YAML
   - URI 文本
+  - Base64 URI 文本（Shadowrocket、V2rayN 等）
 - 订阅凭据与协议凭据分离，只接受路径凭据，不接受 query 参数认证。
 - 支持 Direct、External proxy、IP fallback 三种订阅模式。
 - 支持 VPS 流量统计、自然月/锚定月账期和 `subscription-userinfo`。
@@ -212,6 +213,7 @@ sbctl sub
 sbctl sub --format sing-box
 sbctl sub --format clash
 sbctl sub --format uri
+sbctl sub --format base64-uri
 
 # 轮换订阅凭据（旧订阅 URL 立即失效）
 sbctl credential rotate
@@ -245,11 +247,12 @@ sbctl uninstall --purge
 /sub/<subscription-credential>/sing-box.json
 /sub/<subscription-credential>/clash.yaml
 /sub/<subscription-credential>/uri
+/sub/<subscription-credential>/uri.txt
 ```
 
 `subscription-credential` 与任何协议的 UUID、password 都不同。订阅响应会包含动态生成的 `subscription-userinfo`，其中的流量统计是整张配置网卡的 VPS traffic，不代表单个协议或用户的流量。
 
-新部署默认使用 America/Los_Angeles 作为 VPS 刷新时区、Asia/Shanghai 作为客户端参考显示时区；需要自定义周期时，可在配置向导中选择 `anchored-month`，并设置 IANA 时区与首次重置时间。菜单中的流量输入按 GiB 处理（兼容 `GB` 后缀，按 1024³ bytes 换算），内部保存精确 byte 数。流量上限目前用于展示和订阅元数据，不会主动阻断 sing-box 数据面。
+新部署默认使用 America/Los_Angeles 作为 VPS 刷新时区、Asia/Shanghai 作为客户端参考显示时区；流量向导可快捷选择美西、美东（America/New_York）和中国时区，也接受任意 IANA 时区。需要自定义周期时，可在配置向导中选择 `anchored-month`，并设置首次重置时间。菜单中的流量输入按 GiB 处理（兼容 `GB` 后缀，按 1024³ bytes 换算），内部保存精确 byte 数。流量上限目前用于展示和订阅元数据，不会主动阻断 sing-box 数据面。
 
 ## 性能调优（可选）
 

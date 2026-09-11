@@ -83,7 +83,7 @@
 
 | 模式 | 核心验证 | 通过条件 |
 | --- | --- | --- |
-| IP fallback | VLESS Reality、指定高位 HTTP 端口、路径凭据 | 正确路径返回三种订阅；错误或 query 凭据为 404；服务重启后仍可用。 |
+| IP fallback | VLESS Reality、指定高位 HTTP 端口、路径凭据 | 正确路径返回四种订阅；错误或 query 凭据为 404；服务重启后仍可用。 |
 | External proxy | loopback 订阅服务与管理员反向代理 | sbctl 不占用公网 80/443；代理后的 HTTPS 订阅正常；五种节点输出与配置一致。 |
 | Direct | ACME、80/443 socket activation、非 root 服务 | 证书申请/续期、HTTPS 订阅和 HTTP-01 挑战均成功；`sbctl` 与 sing-box 均以专用非 root 账户运行。 |
 

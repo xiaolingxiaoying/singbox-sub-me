@@ -6,14 +6,17 @@
 //! and `LISTEN_FDS` and routes each one by its local port: 80 serves the ACME
 //! HTTP-01 challenge, 443 serves the TLS subscription. (ADR-0011)
 
+#[cfg(unix)]
 use std::env;
 use std::io;
 use std::net::TcpListener;
+#[cfg(unix)]
 use std::os::fd::FromRawFd;
 
 use thiserror::Error;
 
 /// The first descriptor systemd passes, per the `sd_listen_fds` protocol.
+#[cfg(unix)]
 const FIRST_FD: i32 = 3;
 
 #[derive(Debug, Error)]
@@ -26,6 +29,8 @@ pub enum SocketActivationError {
     InvalidFds,
     #[error("could not read listener descriptor {0}: {1}")]
     Listener(usize, io::Error),
+    #[error("Direct HTTPS socket activation is only supported on Unix systemd hosts")]
+    UnsupportedPlatform,
 }
 
 /// Validates the systemd `LISTEN_PID`/`LISTEN_FDS` variables and returns the
@@ -50,6 +55,7 @@ pub fn parse_listen_fds(pid: &str, fds: &str) -> Result<usize, SocketActivationE
 /// with its bound local port. Descriptors begin at `FIRST_FD` and are closed
 /// when the returned listeners are dropped. Only call after a real socket
 /// activation handoff; the environment variables are the handoff marker.
+#[cfg(unix)]
 pub fn receive_listeners() -> Result<Vec<(u16, TcpListener)>, SocketActivationError> {
     let pid = env::var("LISTEN_PID").map_err(|_| SocketActivationError::NotSocketActivated)?;
     let fds = env::var("LISTEN_FDS").map_err(|_| SocketActivationError::NotSocketActivated)?;
@@ -64,6 +70,11 @@ pub fn receive_listeners() -> Result<Vec<(u16, TcpListener)>, SocketActivationEr
         listeners.push((port, listener));
     }
     Ok(listeners)
+}
+
+#[cfg(not(unix))]
+pub fn receive_listeners() -> Result<Vec<(u16, TcpListener)>, SocketActivationError> {
+    Err(SocketActivationError::UnsupportedPlatform)
 }
 
 /// The role a Direct HTTPS listener plays, decided solely by its local port.
@@ -130,9 +141,15 @@ mod tests {
 
     #[test]
     fn receive_listeners_requires_a_socket_activation_handoff() {
+        #[cfg(unix)]
         assert!(matches!(
             super::receive_listeners(),
             Err(super::SocketActivationError::NotSocketActivated)
+        ));
+        #[cfg(not(unix))]
+        assert!(matches!(
+            super::receive_listeners(),
+            Err(super::SocketActivationError::UnsupportedPlatform)
         ));
     }
 
