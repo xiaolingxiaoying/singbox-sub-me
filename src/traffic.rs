@@ -10,7 +10,6 @@ use crate::config::{AccountingPolicy, ConfigError, DeploymentConfig, DeploymentS
 use crate::runtime::Runtime;
 
 const STATE_SCHEMA_VERSION: u32 = 2;
-const PENDING_PERIOD_IDENTITY: &str = "pending-first-reset";
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 /// Parses the human-facing traffic amount used by the interactive menu.
@@ -252,8 +251,6 @@ pub enum TrafficError {
         "accounting state belongs to a previous period; the reset task has not run for the current period"
     )]
     StateStale,
-    #[error("traffic correction cannot apply before the first reset")]
-    PendingFirstReset,
     #[error(
         "total correction target {target} bytes is below the currently reported total {current} bytes"
     )]
@@ -288,9 +285,6 @@ pub fn reset_with_runtime<C: crate::runtime::Clock>(
     runtime: &Runtime<C>,
 ) -> Result<TrafficReport, TrafficError> {
     let period = accounting_period(config, runtime.now_utc())?;
-    if period.pending() {
-        return Ok(pending_report(config, &period));
-    }
     let measurements = read_measurements(runtime, &config.interface)?;
     let mut reconciled = None;
     store.update_state(|prior| {
@@ -349,9 +343,6 @@ pub fn report_with_runtime<C: crate::runtime::Clock>(
     runtime: &Runtime<C>,
 ) -> Result<TrafficReport, TrafficError> {
     let period = accounting_period(config, runtime.now_utc())?;
-    if period.pending() {
-        return Ok(pending_report(config, &period));
-    }
     let state = store
         .read_state()?
         .ok_or(TrafficError::StateMissing)
@@ -395,9 +386,6 @@ pub fn set_used_with_runtime<C: crate::runtime::Clock>(
     target: CorrectionTarget,
 ) -> Result<CorrectionPreview, TrafficError> {
     let period = accounting_period(config, runtime.now_utc())?;
-    if period.pending() {
-        return Err(TrafficError::PendingFirstReset);
-    }
     let _lock = store
         .acquire_operation_lock()
         .map_err(TrafficError::Storage)?;
@@ -479,18 +467,6 @@ fn plan_correction(
             target_total,
         },
     })
-}
-
-fn pending_report(config: &DeploymentConfig, period: &AccountingPeriod) -> TrafficReport {
-    TrafficReport {
-        interface: config.interface.clone(),
-        received: 0,
-        transmitted: 0,
-        total_adjustment: 0,
-        monthly_traffic_limit: config.monthly_traffic_limit,
-        accounting_period: period.identity().to_owned(),
-        next_reset: period.next_reset,
-    }
 }
 
 fn report_from_state(
@@ -594,7 +570,6 @@ struct AccountingPeriod {
     cycle_key: String,
     identity: String,
     next_reset: DateTime<Utc>,
-    pending: bool,
 }
 
 impl AccountingPeriod {
@@ -603,16 +578,6 @@ impl AccountingPeriod {
             cycle_key: identity.clone(),
             identity,
             next_reset,
-            pending: false,
-        }
-    }
-
-    fn pending_first_reset(first_reset: DateTime<Utc>) -> Self {
-        Self {
-            cycle_key: format!("pending:{}", first_reset.to_rfc3339()),
-            identity: PENDING_PERIOD_IDENTITY.to_owned(),
-            next_reset: first_reset,
-            pending: true,
         }
     }
 
@@ -622,10 +587,6 @@ impl AccountingPeriod {
 
     fn identity(&self) -> &str {
         &self.identity
-    }
-
-    fn pending(&self) -> bool {
-        self.pending
     }
 }
 
@@ -660,11 +621,6 @@ fn accounting_period(
                 reset.hour(),
                 reset.minute(),
             )?;
-            if local_now < first_reset {
-                return Ok(AccountingPeriod::pending_first_reset(
-                    first_reset.with_timezone(&Utc),
-                ));
-            }
             let candidate = anchored_datetime(
                 timezone,
                 local_now.year(),
@@ -687,7 +643,7 @@ fn accounting_period(
                 candidate
             };
             let (year, month) = next_month(start.year(), start.month());
-            let next = anchored_datetime(
+            let scheduled_next = anchored_datetime(
                 timezone,
                 year,
                 month,
@@ -695,6 +651,16 @@ fn accounting_period(
                 reset.hour(),
                 reset.minute(),
             )?;
+            // Keep traffic metering live from the current monthly boundary even
+            // when the configured first anchor is still in the future. This
+            // matches vps-sub-meter: the first anchor caps the initial period
+            // and becomes its next reset, rather than suppressing all usage
+            // until that instant.
+            let next = if local_now < first_reset {
+                first_reset
+            } else {
+                scheduled_next
+            };
             AccountingPeriod::active(start.to_rfc3339(), next.with_timezone(&Utc))
         }
     })
@@ -827,15 +793,14 @@ mod tests {
     }
 
     #[test]
-    fn anchored_month_before_the_first_reset_is_a_valid_pending_state() {
+    fn anchored_month_before_the_first_reset_starts_the_current_period() {
         let mut config = config();
         config.accounting_policy = AccountingPolicy::AnchoredMonth;
         config.anchored_reset_at = Some("2024-03-31T09:30".into());
         let now = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
         let period = accounting_period(&config, now).unwrap();
 
-        assert!(period.pending());
-        assert_eq!(period.identity(), "pending-first-reset");
+        assert_eq!(period.identity(), "2024-01-31T09:30:00+00:00");
         assert_eq!(period.next_reset.to_rfc3339(), "2024-03-31T09:30:00+00:00");
     }
 
@@ -888,7 +853,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_first_reset_reports_zero_usage_and_the_first_reset_instant() {
+    fn anchored_month_before_the_first_reset_tracks_live_usage_until_the_anchor() {
         let fixture = TempDir::new().unwrap();
         let store = DeploymentStore::new(fixture.path());
         let mut config = config();
@@ -902,9 +867,12 @@ mod tests {
         assert_eq!(report.received, 0);
         assert_eq!(report.transmitted, 0);
         assert_eq!(report.total(), 0);
-        assert_eq!(report.accounting_period, "pending-first-reset");
+        assert_eq!(report.accounting_period, "2024-04-15T12:00:00+00:00");
         assert_eq!(report.next_reset.to_rfc3339(), "2024-06-15T12:00:00+00:00");
-        assert!(!fixture.path().join("var/lib/sbctl/state.json").exists());
+        assert!(fixture.path().join("var/lib/sbctl/state.json").exists());
+
+        write_interface_fixture(&fixture, 130, 260, "boot-a");
+        assert_eq!(report_at(&store, &config, now).unwrap().total(), 90);
     }
 
     #[test]
@@ -1490,7 +1458,7 @@ mod tests {
     }
 
     #[test]
-    fn correction_is_rejected_before_the_first_reset() {
+    fn correction_is_available_before_the_first_reset() {
         let fixture = TempDir::new().unwrap();
         let store = DeploymentStore::new(fixture.path());
         let mut config = config();
@@ -1499,10 +1467,11 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2024, 5, 1, 0, 0, 0).unwrap();
         write_interface_fixture(&fixture, 100, 200, "boot-a");
 
-        let error = set_used_at(&store, &config, now, CorrectionTarget::Total(500)).unwrap_err();
+        reset_at(&store, &config, now).unwrap();
+        let preview = set_used_at(&store, &config, now, CorrectionTarget::Total(500)).unwrap();
 
-        assert!(matches!(error, super::TrafficError::PendingFirstReset));
-        assert!(!fixture.path().join("var/lib/sbctl/state.json").exists());
+        assert_eq!(preview.target_total, 500);
+        assert!(fixture.path().join("var/lib/sbctl/state.json").exists());
     }
 
     #[test]

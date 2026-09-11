@@ -3026,7 +3026,7 @@ fn configuration_init_defaults_the_refresh_and_client_display_timezones() {
 }
 
 #[test]
-fn anchored_month_before_the_first_reset_reports_pending_first_reset_with_zero_usage() {
+fn anchored_month_before_the_first_reset_starts_a_trackable_current_period() {
     let fixture = TempDir::new().expect("temporary root is created");
     write_traffic_fixture(&fixture, 100, 200, "boot-a");
 
@@ -3064,13 +3064,21 @@ fn anchored_month_before_the_first_reset_reports_pending_first_reset_with_zero_u
         .args([
             "--root",
             fixture.path().to_str().expect("fixture path is UTF-8"),
+            "accounting-reset",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
             "traffic",
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "accounting period: pending-first-reset",
-        ))
+        .stdout(predicate::str::contains("accounting period: pending-first-reset").not())
         .stdout(predicate::str::contains("total: 0 bytes"))
         .stdout(predicate::str::contains(
             "next reset: 2099-01-01T00:00:00+00:00",

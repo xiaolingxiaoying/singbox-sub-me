@@ -49,16 +49,12 @@ The onboarding defaults of America/Los_Angeles for the VPS refresh timezone and 
 _Avoid_: System timezone pair, client device timezone
 
 **First reset instant**:
-The administrator-selected date and local time at which an Anchored-month reset schedule first becomes active. Before this instant, the deployment has no active anchored accounting period.
-_Avoid_: Installation time, billing start
+The administrator-selected date and local time at which an Anchored-month schedule first resets. Traffic begins accumulating in the current schedule-aligned period immediately; when this instant is in the future, it caps that initial period.
+_Avoid_: Installation time, delayed traffic start
 
 **Accounting reset**:
 The transition from one Accounting period to the next, including establishing a new network-counter baseline. It is independent from rebuilding or serving a Subscription format.
 _Avoid_: Subscription refresh, traffic deletion
-
-**Pending first reset**:
-The valid pre-period state of an Anchored-month reset before its First reset instant. It reports zero VPS traffic for the not-yet-started period and exposes the first reset instant as the next reset.
-_Avoid_: Broken accounting, missing period
 
 **Traffic correction**:
 An administrator-authored adjustment to the current Accounting period's reported VPS traffic when the measured amount is known to be wrong. A total-only correction does not invent RX/TX direction values.

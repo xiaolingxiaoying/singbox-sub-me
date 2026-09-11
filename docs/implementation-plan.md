@@ -24,7 +24,7 @@
 - `anchored_reset_at` 使用 `YYYY-MM-DDTHH:MM` 格式；
 - 默认 VPS 刷新时区为 `America/Los_Angeles`，默认客户端显示时区为 `Asia/Shanghai`；
 - 锚定日允许 1–31 日，短月自动收敛到当月最后一天；
-- 首个锚定时间之前不产生有效账期，已用流量显示为 0，下一次重置显示为首个锚定时间。
+- 首个锚定时间在未来时，立即从当前按锚定日对齐的周期累计流量；首个锚定时间作为该初始周期的下一次重置。
 
 状态文件需要明确保存：
 
@@ -62,7 +62,7 @@ sbctl traffic set-used --rx <BYTES> --tx <BYTES>
 - `sbctl-accounting-reset.service/timer`；
 - 管理员显式执行的流量修正命令。
 
-普通 `sbctl traffic`、`sbctl status` 和订阅 HTTP 请求只读。首个锚定时间之前返回合法的 `pending-first-reset` 状态，不视为故障。
+普通 `sbctl traffic`、`sbctl status` 和订阅 HTTP 请求只读；首个锚定时间在未来不会暂停流量统计。
 
 不存在的本地时间和 DST 重复的含糊本地时间均拒绝保存，要求管理员重新选择时间。
 
@@ -85,7 +85,7 @@ sbctl traffic set-used --rx <BYTES> --tx <BYTES>
 - 默认路由接口探测；
 - 用户确认或显式覆盖接口；
 - cycle key；
-- 首个 anchor 前状态；
+- 首个未来 anchor 作为初始周期的重置边界；
 - 短月收敛；
 - counter rollback 检测；
 - `Persistent=true`；
@@ -288,7 +288,7 @@ manifest 还必须声明经过测试的 sing-box 版本兼容矩阵；安装或�
 
 - 自然月边界；
 - 锚定月首个日期；
-- 首个锚定时间之前；
+- 首个未来锚定时间前的实时累计；
 - 1–31 日锚定；
 - 28/29/30/31 日短月收敛；
 - DST 和非法/不存在的本地时间；

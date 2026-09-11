@@ -134,10 +134,11 @@ curl --silent --output /dev/null "http://127.0.0.1:2088/sub/$corrupt_credential/
 grep -F -- "$corrupt_credential" "$work/corrupt.err" >/dev/null && fail 'corrupt-state diagnostic leaked the Subscription credential'
 wait
 
-# Pending-first-reset is a valid 200 with zero traffic and the first reset, not a 5xx.
+# A future first anchor keeps traffic metering live and uses that anchor as the next reset.
 fixture_root_for pending "$platform"
 "$sbctl" --root "$root" config init --mode ip-fallback --subscription-host 127.0.0.1 --http-port 2089 --interface ens3 --protocol vless-reality --reality-decoy-sni www.cloudflare.com --accounting-policy anchored-month --accounting-timezone UTC --anchored-reset-at "$(date -d '+2 months' +%Y-%m-%dT%H:%M)"
 pending_credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' "$root/etc/sbctl/config.toml")
+"$sbctl" --root "$root" accounting-reset >/dev/null
 "$sbctl" --root "$root" serve --max-requests 2 &
 sleep 1
 pending_response=$(curl --silent --show-error --include "http://127.0.0.1:2089/sub/$pending_credential/uri")
@@ -148,7 +149,9 @@ curl --silent --output /dev/null "http://127.0.0.1:2089/sub/wrong-credential/uri
 # status --json reports the current period without exposing the credential.
 status_json=$("$sbctl" --root "$root" status --json)
 contains "$status_json" '"configured": true'
-contains "$status_json" '"accounting_period": "pending-first-reset"'
+if printf '%s' "$status_json" | grep -F -- '"accounting_period": "pending-first-reset"' >/dev/null; then
+  fail 'future first anchor suppressed the active accounting period'
+fi
 contains "$status_json" '"total": 0'
 if printf '%s' "$status_json" | grep -F -- "$pending_credential" >/dev/null; then
   fail 'status --json exposed the Subscription credential'
@@ -184,7 +187,7 @@ if "$sbctl" --root "$root" traffic set-used --bytes 100 --rx 5 >/dev/null 2>&1; 
   fail 'conflicting traffic correction arguments were accepted'
 fi
 
-# Anchored-month before its first reset is a valid pending state; DST collisions are rejected.
+# Anchored-month starts metering before a future first reset; DST collisions are rejected.
 fixture_root_for anchored "$platform"
 if "$sbctl" --root "$root" config init --mode ip-fallback --subscription-host 127.0.0.1 --http-port 2084 --interface ens3 --protocol vless-reality --reality-decoy-sni www.cloudflare.com --accounting-policy anchored-month --accounting-timezone America/New_York --anchored-reset-at 2024-03-10T02:30 >"$work/dst.out" 2>&1; then
   fail 'nonexistent DST anchored reset was accepted'
@@ -195,7 +198,10 @@ if "$sbctl" --root "$root" config init --mode ip-fallback --subscription-host 12
 fi
 grep -F 'ambiguous in the accounting timezone' "$work/dst2.out" >/dev/null || fail 'missing ambiguous DST diagnostic'
 "$sbctl" --root "$root" config init --mode ip-fallback --subscription-host 127.0.0.1 --http-port 2083 --interface ens3 --protocol vless-reality --reality-decoy-sni www.cloudflare.com --accounting-policy anchored-month --accounting-timezone UTC --anchored-reset-at "$(date -d '+2 months' +%Y-%m-%dT%H:%M)"
-contains "$("$sbctl" --root "$root" traffic)" 'accounting period: pending-first-reset'
+"$sbctl" --root "$root" accounting-reset >/dev/null
+if "$sbctl" --root "$root" traffic | grep -F -- 'accounting period: pending-first-reset' >/dev/null; then
+  fail 'future first anchor suppressed traffic metering'
+fi
 contains "$("$sbctl" --root "$root" traffic)" 'total: 0 bytes'
 
 # Reverse-proxy mode must bind loopback and return all formats from the five-node set.
@@ -205,7 +211,7 @@ reverse_credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' "$ro
 "$sbctl" --root "$root" accounting-reset >/dev/null
 "$sbctl" --root "$root" serve --max-requests 4 &
 sleep 1
-for format in sing-box.json clash.yaml uri; do
+for format in sing-box.json clash.yaml uri uri.txt; do
   curl --silent --show-error --dump-header "$work/$format.headers" --output "$work/$format.body" "http://127.0.0.1:2081/sub/$reverse_credential/$format"
   grep -F 'HTTP/1.1 200 OK' "$work/$format.headers" >/dev/null || fail "reverse-proxy $format did not respond"
   grep -Fi 'subscription-userinfo:' "$work/$format.headers" >/dev/null || fail "reverse-proxy $format lacks traffic metadata"
