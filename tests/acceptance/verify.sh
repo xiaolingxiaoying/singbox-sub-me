@@ -209,7 +209,7 @@ fixture_root_for reverse "$platform"
 "$sbctl" --root "$root" config init --mode external-proxy --subscription-host sub.example.test --listen-port 2081 --interface ens3 --protocol vless-reality --protocol vmess-websocket --protocol hysteria2 --protocol tuic --protocol anytls --reality-decoy-sni www.cloudflare.com --sing-box-bin "$fake_sing_box"
 reverse_credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' "$root/etc/sbctl/config.toml")
 "$sbctl" --root "$root" accounting-reset >/dev/null
-"$sbctl" --root "$root" serve --max-requests 4 &
+"$sbctl" --root "$root" serve --max-requests 5 &
 sleep 1
 for format in sing-box.json clash.yaml uri uri.txt; do
   curl --silent --show-error --dump-header "$work/$format.headers" --output "$work/$format.body" "http://127.0.0.1:2081/sub/$reverse_credential/$format"
