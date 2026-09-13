@@ -1039,6 +1039,10 @@ fn clash(config: &DeploymentConfig, nodes: &[CanonicalNode]) -> Result<String, S
         "proxy-groups:\n",
         "  - name: 🌍选择代理节点\n",
         "    type: select\n",
+        // The selector holds DIRECT, so latency tests must use a URL that is
+        // reachable without a proxy; gstatic would time out from China.
+        "    url: http://connect.rom.miui.com/generate_204\n",
+        "    interval: 300\n",
         "    proxies:\n",
         "      - ♻️自动选择\n",
         "      - DIRECT\n",
@@ -1396,7 +1400,7 @@ mod tests {
         let uri = uri(&config, &nodes).expect("uri artifacts generate");
 
         assert!(
-            clash.contains("  - name: 🌍选择代理节点\n    type: select\n    proxies:\n      - ♻️自动选择\n      - DIRECT\n"),
+            clash.contains("  - name: 🌍选择代理节点\n    type: select\n    url: http://connect.rom.miui.com/generate_204\n    interval: 300\n    proxies:\n      - ♻️自动选择\n      - DIRECT\n"),
             "clash subscription exposes the manual selection group"
         );
         assert!(
