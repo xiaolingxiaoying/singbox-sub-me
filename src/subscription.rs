@@ -883,6 +883,23 @@ fn sing_box(
     )
 }
 
+/// Hosts without an IPv6 route cannot dial the AAAA addresses the default
+/// resolution strategy prefers, so their server configuration pins IPv4 even
+/// when the deployment never opted in; the explicit flag forces the same
+/// restriction on dual-stack hosts.
+fn ipv4_only_required(config: &DeploymentConfig) -> bool {
+    config.ipv4_only || !host_has_ipv6_route()
+}
+
+/// UDP `connect` performs a route lookup without sending a packet, which makes
+/// it a cheap probe for an IPv6 default route.
+fn host_has_ipv6_route() -> bool {
+    let Ok(socket) = std::net::UdpSocket::bind("[::]:0") else {
+        return false;
+    };
+    socket.connect("[2001:4860:4860::8888]:443").is_ok()
+}
+
 fn sing_box_server(
     config: &DeploymentConfig,
     nodes: &[CanonicalNode],
@@ -940,6 +957,16 @@ fn sing_box_server(
                 "listen_port": port, "users": [{"password": password}],
                 "tls": server_tls(tls_server_name, &certificate, &[])}),
         });
+    }
+    if ipv4_only_required(config) {
+        for inbound in &mut inbounds {
+            inbound["domain_strategy"] = json!("ipv4_only");
+            if inbound["type"] == "vless" {
+                // Reality dials its camouflage server independently
+                // of the inbound's destination resolver.
+                inbound["tls"]["reality"]["handshake"]["domain_strategy"] = json!("ipv4_only");
+            }
+        }
     }
     Ok(
         serde_json::to_string_pretty(&json!({"inbounds": inbounds}))
@@ -1005,6 +1032,34 @@ fn clash(config: &DeploymentConfig, nodes: &[CanonicalNode]) -> Result<String, S
         };
         proxies.push_str(&entry);
     }
+    proxies.push_str(
+        "mode: rule\nproxy-groups:\n  - name: sbctl-proxy\n    type: select\n    proxies:\n",
+    );
+    for node in nodes {
+        proxies.push_str(&format!("      - {}\n", node.tag()));
+    }
+    proxies.push_str(concat!(
+        "dns:\n  enable: true\n  ipv6: false\n",
+        "  enhanced-mode: fake-ip\n  fake-ip-range: 198.18.0.1/16\n",
+        "  fake-ip-filter:\n    - '+.lan'\n    - '+.local'\n",
+        "  use-hosts: false\n  use-system-hosts: false\n",
+        "  nameserver:\n    - 'https://1.1.1.1/dns-query#sbctl-proxy'\n",
+        "    - 'https://8.8.8.8/dns-query#sbctl-proxy'\n",
+        "  proxy-server-nameserver:\n    - https://223.5.5.5/dns-query\n",
+        "rules:\n",
+        "  - DOMAIN-SUFFIX,chatgpt.com,sbctl-proxy\n",
+        "  - DOMAIN-SUFFIX,openai.com,sbctl-proxy\n",
+        "  - DOMAIN-SUFFIX,oaistatic.com,sbctl-proxy\n",
+        "  - DOMAIN-SUFFIX,oaiusercontent.com,sbctl-proxy\n",
+        "  - DOMAIN-SUFFIX,x.com,sbctl-proxy\n",
+        "  - DOMAIN-SUFFIX,twitter.com,sbctl-proxy\n",
+        "  - DOMAIN-SUFFIX,twimg.com,sbctl-proxy\n",
+        "  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve\n",
+        "  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve\n",
+        "  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve\n",
+        "  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve\n",
+        "  - MATCH,sbctl-proxy\n",
+    ));
     Ok(proxies)
 }
 
@@ -1736,6 +1791,30 @@ mod tests {
             Some("www.cloudflare.com".into()),
         )
         .expect("an IP fallback VLESS deployment is valid")
+    }
+
+    #[test]
+    fn ipv4_only_survives_persistence_and_reaches_the_reality_handshake() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let mut config = vless_config();
+        config.ipv4_only = true;
+        store.initialize(&config).unwrap();
+        let config = store.load().unwrap();
+        let artifacts = generated_artifacts(&config, fixture.path()).unwrap();
+        let server: serde_json::Value = serde_json::from_str(
+            &artifacts
+                .iter()
+                .find(|(name, _)| *name == "sing-box-server.json")
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        assert_eq!(server["inbounds"][0]["domain_strategy"], "ipv4_only");
+        assert_eq!(
+            server["inbounds"][0]["tls"]["reality"]["handshake"]["domain_strategy"],
+            "ipv4_only"
+        );
     }
 
     fn write_old_artifacts(store: &DeploymentStore) {

@@ -45,6 +45,11 @@ pub struct DeploymentConfig {
     #[serde(default)]
     pub certificate_mode: CertificateMode,
     pub interface: String,
+    /// Force server-side domain resolution, including the independent
+    /// Reality handshake dialer, to IPv4 even on dual-stack hosts. IPv4-only
+    /// is also applied automatically on hosts without an IPv6 route.
+    #[serde(default)]
+    pub ipv4_only: bool,
     pub enabled_protocols: Vec<ManagedProtocol>,
     pub reality_decoy_sni: Option<String>,
     /// TLS server name used by the certificate-based Managed protocols
@@ -314,6 +319,7 @@ impl DeploymentConfig {
             subscription_listen_port,
             certificate_mode: CertificateMode::SelfSigned,
             interface,
+            ipv4_only: false,
             enabled_protocols,
             reality_decoy_sni,
             protocol_sni: None,
@@ -422,6 +428,7 @@ impl DeploymentConfig {
             subscription_listen_port: *subscription_listen_port,
             certificate_mode: certificate_mode.clone(),
             interface: interface.clone(),
+            ipv4_only: existing.is_some_and(|config| config.ipv4_only),
             enabled_protocols: enabled_protocols.clone(),
             reality_decoy_sni: reality_decoy_sni.clone(),
             protocol_sni: protocol_sni.clone(),
