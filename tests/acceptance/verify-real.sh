@@ -50,7 +50,8 @@ service_user=$(systemctl show -p User --value sbctl.service)
 credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' /etc/sbctl/config.toml)
 [ -n "$credential" ] || fail 'subscription credential was not persisted'
 for format in sing-box.json clash.yaml uri; do
-  response=$(curl --silent --show-error --include "http://127.0.0.1:2080/sub/$credential/$format")
+  response=$(curl --silent --show-error --include --retry 5 --retry-connrefused --retry-delay 1 \
+    "http://127.0.0.1:2080/sub/$credential/$format")
   contains "$response" 'HTTP/1.1 200 OK'
   contains "$response" 'subscription-userinfo:'
 done
@@ -99,7 +100,8 @@ systemctl is-active --quiet sbctl.service || fail 'IP fallback sbctl.service is 
 systemctl is-active --quiet sing-box.service || fail 'IP fallback sing-box.service is not active'
 
 credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' /etc/sbctl/config.toml)
-response=$(curl --silent --show-error --include "http://127.0.0.1:2081/sub/$credential/uri")
+response=$(curl --silent --show-error --include --retry 5 --retry-connrefused --retry-delay 1 \
+  "http://127.0.0.1:2081/sub/$credential/uri")
 contains "$response" 'HTTP/1.1 200 OK'
 contains "$response" 'vless://'
 

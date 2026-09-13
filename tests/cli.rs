@@ -1708,10 +1708,21 @@ fn regenerate_validates_before_replacing_artifacts_and_the_active_config() {
     );
     for name in artifact_names {
         let contents = fs::read_to_string(artifacts.join(name)).expect("artifact is readable");
-        assert!(
-            contents.contains("www.apple.com"),
-            "{name} carries the new canonical node field"
-        );
+        if name == "subscription-base64-uri.txt" {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(contents.as_bytes())
+                .expect("base64 URI subscription is valid standard Base64");
+            let decoded = String::from_utf8(decoded).expect("base64 URI subscription is UTF-8");
+            assert!(
+                decoded.contains("www.apple.com"),
+                "{name} carries the new canonical node field"
+            );
+        } else {
+            assert!(
+                contents.contains("www.apple.com"),
+                "{name} carries the new canonical node field"
+            );
+        }
     }
     assert!(
         fs::read_to_string(&active)
