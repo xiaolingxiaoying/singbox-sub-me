@@ -968,10 +968,12 @@ fn sing_box_server(
             }
         }
     }
-    Ok(
-        serde_json::to_string_pretty(&json!({"inbounds": inbounds}))
-            .expect("JSON values serialize"),
-    )
+    Ok(serde_json::to_string_pretty(&json!({
+        // Connection-level debug logging would expose proxied destinations.
+        "log": {"level": "info"},
+        "inbounds": inbounds
+    }))
+    .expect("JSON values serialize"))
 }
 
 fn clash(config: &DeploymentConfig, nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
@@ -1815,6 +1817,25 @@ mod tests {
             server["inbounds"][0]["tls"]["reality"]["handshake"]["domain_strategy"],
             "ipv4_only"
         );
+    }
+
+    #[test]
+    fn server_artifact_pins_info_logging() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let config = vless_config();
+        store.initialize(&config).unwrap();
+        let config = store.load().unwrap();
+        let artifacts = generated_artifacts(&config, fixture.path()).unwrap();
+        let server: serde_json::Value = serde_json::from_str(
+            &artifacts
+                .iter()
+                .find(|(name, _)| *name == "sing-box-server.json")
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        assert_eq!(server["log"]["level"], "info");
     }
 
     fn write_old_artifacts(store: &DeploymentStore) {
