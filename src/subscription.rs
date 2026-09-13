@@ -1034,9 +1034,26 @@ fn clash(config: &DeploymentConfig, nodes: &[CanonicalNode]) -> Result<String, S
         };
         proxies.push_str(&entry);
     }
-    proxies.push_str(
-        "mode: rule\nproxy-groups:\n  - name: sbctl-proxy\n    type: select\n    proxies:\n",
-    );
+    proxies.push_str(concat!(
+        "mode: rule\n",
+        "proxy-groups:\n",
+        "  - name: 🌍选择代理节点\n",
+        "    type: select\n",
+        "    proxies:\n",
+        "      - ♻️自动选择\n",
+        "      - DIRECT\n",
+    ));
+    for node in nodes {
+        proxies.push_str(&format!("      - {}\n", node.tag()));
+    }
+    proxies.push_str(concat!(
+        "  - name: ♻️自动选择\n",
+        "    type: url-test\n",
+        "    url: http://www.gstatic.com/generate_204\n",
+        "    interval: 300\n",
+        "    tolerance: 50\n",
+        "    proxies:\n",
+    ));
     for node in nodes {
         proxies.push_str(&format!("      - {}\n", node.tag()));
     }
@@ -1045,22 +1062,20 @@ fn clash(config: &DeploymentConfig, nodes: &[CanonicalNode]) -> Result<String, S
         "  enhanced-mode: fake-ip\n  fake-ip-range: 198.18.0.1/16\n",
         "  fake-ip-filter:\n    - '+.lan'\n    - '+.local'\n",
         "  use-hosts: false\n  use-system-hosts: false\n",
-        "  nameserver:\n    - 'https://1.1.1.1/dns-query#sbctl-proxy'\n",
-        "    - 'https://8.8.8.8/dns-query#sbctl-proxy'\n",
+        "  nameserver:\n    - 'https://1.1.1.1/dns-query#🌍选择代理节点'\n",
+        "    - 'https://8.8.8.8/dns-query#🌍选择代理节点'\n",
         "  proxy-server-nameserver:\n    - https://223.5.5.5/dns-query\n",
         "rules:\n",
-        "  - DOMAIN-SUFFIX,chatgpt.com,sbctl-proxy\n",
-        "  - DOMAIN-SUFFIX,openai.com,sbctl-proxy\n",
-        "  - DOMAIN-SUFFIX,oaistatic.com,sbctl-proxy\n",
-        "  - DOMAIN-SUFFIX,oaiusercontent.com,sbctl-proxy\n",
-        "  - DOMAIN-SUFFIX,x.com,sbctl-proxy\n",
-        "  - DOMAIN-SUFFIX,twitter.com,sbctl-proxy\n",
-        "  - DOMAIN-SUFFIX,twimg.com,sbctl-proxy\n",
-        "  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve\n",
-        "  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve\n",
-        "  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve\n",
-        "  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve\n",
-        "  - MATCH,sbctl-proxy\n",
+        "  - DOMAIN-SUFFIX,chatgpt.com,🌍选择代理节点\n",
+        "  - DOMAIN-SUFFIX,openai.com,🌍选择代理节点\n",
+        "  - DOMAIN-SUFFIX,oaistatic.com,🌍选择代理节点\n",
+        "  - DOMAIN-SUFFIX,oaiusercontent.com,🌍选择代理节点\n",
+        "  - DOMAIN-SUFFIX,x.com,🌍选择代理节点\n",
+        "  - DOMAIN-SUFFIX,twitter.com,🌍选择代理节点\n",
+        "  - DOMAIN-SUFFIX,twimg.com,🌍选择代理节点\n",
+        "  - GEOIP,LAN,DIRECT\n",
+        "  - GEOIP,CN,DIRECT\n",
+        "  - MATCH,🌍选择代理节点\n",
     ));
     Ok(proxies)
 }
@@ -1379,6 +1394,26 @@ mod tests {
         let sing_box = sing_box(&config, &nodes).expect("sing-box artifacts generate");
         let clash = clash(&config, &nodes).expect("clash artifacts generate");
         let uri = uri(&config, &nodes).expect("uri artifacts generate");
+
+        assert!(
+            clash.contains("  - name: 🌍选择代理节点\n    type: select\n    proxies:\n      - ♻️自动选择\n      - DIRECT\n"),
+            "clash subscription exposes the manual selection group"
+        );
+        assert!(
+            clash.contains("  - name: ♻️自动选择\n    type: url-test\n    url: http://www.gstatic.com/generate_204\n    interval: 300\n    tolerance: 50\n"),
+            "clash subscription exposes the automatic selection group"
+        );
+        for rule in [
+            "  - DOMAIN-SUFFIX,chatgpt.com,🌍选择代理节点\n",
+            "  - GEOIP,LAN,DIRECT\n",
+            "  - GEOIP,CN,DIRECT\n",
+            "  - MATCH,🌍选择代理节点\n",
+        ] {
+            assert!(
+                clash.contains(rule),
+                "clash subscription carries rule: {rule}"
+            );
+        }
 
         for artifact in [&sing_box, &clash, &uri] {
             assert!(
