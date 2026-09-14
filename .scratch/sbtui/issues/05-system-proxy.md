@@ -25,3 +25,4 @@ Blocked by: 04
 ## Comments
 
 - 2026-09-14：Windows 注册表 + InternetSetOptionW 刷新已实现；macOS networksetup、Linux gsettings 分支已实现（CI 覆盖编译）。
+- 2026-09-14（收口）：enable 前把原代理状态写入 `cache/system-proxy-backup.json`，disable 恢复该状态（Windows 注册表三值；macOS 用 `-getwebproxy`/`-getsecurewebproxy` 捕获并经 networksetup 回放；Linux 保持关断）；退出时若系统代理仍开启，会先提示「再按 q 保留，或 p 关闭后退出」。

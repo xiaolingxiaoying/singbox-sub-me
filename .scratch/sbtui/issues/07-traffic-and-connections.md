@@ -22,3 +22,4 @@ Blocked by: 04
 ## Comments
 
 - 2026-09-14：速率（connections 总量差分）、连接表、关闭连接、subscription-userinfo 展示已实现。
+- 2026-09-14（收口）：更正上一条——`subscription-userinfo` 此前并未解析。现已在 `subscription::fetch` 读取该响应头（`parse_userinfo`），仪表盘显示「已用/总量/剩余」；速率改为优先轮询 `/traffic`（`first_traffic_sample` 从流式响应取首个样本），失败回退 connections 差分；新增 `X` 关闭全部连接、`S` 切换连接表排序（下载/上传/主机/目标）。

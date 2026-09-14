@@ -22,3 +22,4 @@ Blocked by: 04
 ## Comments
 
 - 2026-09-14：日志页（内核日志文件）与规则页已实现（Logs 页按 r 切换，静态渲染激活配置的 route.rules 与 rule_set 来源）。
+- 2026-09-14（收口）：新增 `Space` 暂停/恢复日志滚动、`l` 级别过滤（全部/info+/warn+/error）、`c` 复制当前行（OSC 52，支持 SSH）；标题栏显示暂停与过滤状态。

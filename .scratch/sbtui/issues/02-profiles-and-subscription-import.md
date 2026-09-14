@@ -26,3 +26,4 @@ Blocked by: 01
 ## Comments
 
 - 2026-09-14：URL 归一化、订阅下载（镜像前缀）、sing-box JSON/Base64 URI 解析转换、档案增删激活已实现（单测覆盖）。
+- 2026-09-14（收口）：新增 `f` 本地文件导入、`e` 修改选中档案链接、`Delete` 二次确认删除；`update_subscription` 在下载失败且存在缓存时显式回退并提示，不再报错中断。

@@ -24,3 +24,4 @@ Blocked by: 03
 ## Comments
 
 - 2026-09-14：代理页组/节点列表、Enter 切换、t/T 延迟测试、出站模式显示已实现。
+- 2026-09-14（收口）：新增本地 mock server 单测覆盖 `/proxies`、`/configs`（GET/PATCH）、`/proxies/<node>/delay`、`/connections`、`/traffic` 与 DELETE 关闭连接；测试暴露并修复了 `ProxyGroup/ProxyNode` 缺 `name` 默认值导致真实响应丢字段、`ConnectionsSnapshot` 未映射 camelCase 总量的 bug。

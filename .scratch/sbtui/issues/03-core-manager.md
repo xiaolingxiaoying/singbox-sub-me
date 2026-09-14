@@ -24,3 +24,4 @@ Blocked by: 02
 ## Comments
 
 - 2026-09-14：内核下载（zip 解包、SHA-256、平台识别）、check/启动/停止、clash_api 健康等待已实现。
+- 2026-09-14（收口）：下载时 Windows 一并解包 `wintun.dll`（缺失即报错）；tick 循环用 `try_wait` 检测异常退出并**指数退避自动重启**（2/4/8/16/30s，手动停止不复活），退出/崩溃时同步关闭系统代理；`restart_backoff` 单测覆盖。
