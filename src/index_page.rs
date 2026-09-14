@@ -64,7 +64,7 @@ code {{ background: #8882; border-radius: .3rem; padding: 0 .3rem; }}\n\
 {rows}\n\
 <h2>客户端导入</h2>\n\
 <ul>\n\
-<li><strong>Shadowrocket（iOS）</strong>：扫码或粘贴 <code>shadowrocket.txt</code> 链接 → 首页添加配置 → 自动更新。</li>\n\
+<li><strong>Shadowrocket（iOS）</strong>：扫码或粘贴 <code>shadowrocket.txt</code> 链接 → 首页添加配置 → 自动更新。五协议均受支持，最低版本：VLESS Reality 2.2.16、TUIC 2.2.12、Hysteria2 2.2.35、AnyTLS 2.2.64；低于对应版本时该协议节点不会被识别（其余节点仍可正常导入）。</li>\n\
 <li><strong>Clash Party / mihomo 客户端</strong>：粘贴 <code>clash.yaml</code> 链接导入订阅；旧版内核使用 <code>clash-1.18.yaml</code>。</li>\n\
 <li><strong>sing-box（SFA / SFI / SFW）</strong>：按已安装内核版本选择对应 <code>sing-box-&lt;版本&gt;.json</code>；不确定就用 <code>sing-box-full.json</code>。</li>\n\
 <li><strong>V2rayN / 其他</strong>：粘贴 <code>uri.txt</code>（Base64 URI）或复制 <code>uri</code> 明文分享链接。</li>\n\

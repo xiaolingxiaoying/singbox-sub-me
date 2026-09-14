@@ -2117,6 +2117,10 @@ fn subscription_matrix_routes_serve_content_types_and_reject_bad_paths() {
     let index = http_get(port, &format!("/sub/{credential}/index"));
     assert!(index.starts_with("HTTP/1.1 200 OK"), "index serves 200");
     assert!(index.contains("content-type: text/html; charset=utf-8"));
+    assert!(
+        index.contains("AnyTLS 2.2.64"),
+        "the index page documents the Shadowrocket protocol floors"
+    );
 
     for path in [
         "bogus",
