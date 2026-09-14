@@ -67,3 +67,24 @@ jobs:
           SING_BOX_BIN_1_13: ${{ github.workspace }}/sing-box-1.13.21/sing-box
           SING_BOX_BIN_1_14: ${{ github.workspace }}/sing-box-1.14.0/sing-box
         run: cargo test --test version_profiles -- --ignored --nocapture
+
+  mihomo-profiles:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Download a pinned mihomo core
+        run: |
+          set -euo pipefail
+          mkdir -p mihomo
+          curl -fsSL --retry 3 -o mihomo/mihomo.gz \
+            "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.30/mihomo-linux-amd64-compatible-v1.19.30.gz"
+          gunzip -c mihomo/mihomo.gz > mihomo/mihomo
+          chmod +x mihomo/mihomo
+          mihomo/mihomo -v
+      - name: Load every generated clash artifact in mihomo
+        env:
+          MIHOMO_BIN: ${{ github.workspace }}/mihomo/mihomo
+        run: cargo test --test clash_mihomo -- --ignored --nocapture
