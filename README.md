@@ -222,7 +222,8 @@ sbctl sub --format clash / clash-1.18 / uri / base64-uri / shadowrocket
 
 # 二维码（终端渲染；默认 sing-box-full）
 sbctl qr
-sbctl qr --format shadowrocket
+sbctl qr shadowrocket   # 指定格式（位置参数）
+sbctl qr --all          # 渲染矩阵中全部格式的二维码
 
 # 轮换订阅凭据（旧订阅 URL 立即失效）
 sbctl credential rotate

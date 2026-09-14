@@ -62,4 +62,21 @@ mod tests {
         assert!(rendered.contains("\x1b[0m"), "missing ANSI reset");
         assert!(rendered.contains('█'), "missing half-block modules");
     }
+
+    #[test]
+    fn renders_a_parseable_svg_for_the_same_payload_as_the_terminal_code() {
+        let url = "https://example.com/sub/abc/index";
+        let svg = render_svg(url).expect("svg should render");
+        assert!(svg.contains("<svg"), "missing svg root element");
+        assert!(svg.contains("</svg>"), "missing svg close tag");
+        assert!(svg.contains("width") && svg.contains("height"));
+        assert_eq!(svg, render_svg(url).expect("svg is deterministic"));
+        // The same payload renders in both representations, and a different
+        // payload produces a different document.
+        assert!(render_ansi(url).is_ok());
+        assert_ne!(
+            svg,
+            render_svg("https://example.com/sub/other").expect("svg renders")
+        );
+    }
 }

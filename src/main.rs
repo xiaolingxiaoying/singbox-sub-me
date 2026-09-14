@@ -123,9 +123,14 @@ enum Command {
         format: Option<sbctl::subscription::SubscriptionFormat>,
     },
     /// Print a terminal QR code for a generated subscription representation.
+    /// Pass a format (default `sing-box-full`) or `--all` for the whole matrix.
     Qr {
-        #[arg(long, value_name = "FORMAT", value_parser = parse_cli_format)]
+        /// Subscription format to render; defaults to `sing-box-full`.
+        #[arg(value_name = "FORMAT", value_parser = parse_cli_format)]
         format: Option<sbctl::subscription::SubscriptionFormat>,
+        /// Render a terminal QR code for every format in the subscription matrix.
+        #[arg(long, conflicts_with = "format")]
+        all: bool,
     },
     /// Rotate the Subscription credential so previous subscription URLs stop working.
     Credential {
@@ -585,7 +590,7 @@ fn main() -> ExitCode {
         Command::SingBox { command } => sing_box(root, command),
         Command::Release { command } => release(command),
         Command::Sub { format } => print_subscription_urls(root, format),
-        Command::Qr { format } => print_subscription_qr(root, format),
+        Command::Qr { format, all } => print_subscription_qr(root, format, all),
         Command::Credential { command } => run_credential(root, command),
         Command::Serve { bind, max_requests } => serve_subscription(root, bind, max_requests),
         Command::Certificate { command } => run_certificate(root, command),
@@ -1258,15 +1263,24 @@ fn menu_subscriptions(root: &Path) {
                 print_subscription_qr(
                     root,
                     Some(sbctl::subscription::SubscriptionFormat::SingBoxFull),
+                    false,
                 );
                 pause_menu();
             }
             Some("3") => {
-                print_subscription_qr(root, Some(sbctl::subscription::SubscriptionFormat::SingBox));
+                print_subscription_qr(
+                    root,
+                    Some(sbctl::subscription::SubscriptionFormat::SingBox),
+                    false,
+                );
                 pause_menu();
             }
             Some("4") => {
-                print_subscription_qr(root, Some(sbctl::subscription::SubscriptionFormat::Clash));
+                print_subscription_qr(
+                    root,
+                    Some(sbctl::subscription::SubscriptionFormat::Clash),
+                    false,
+                );
                 pause_menu();
             }
             Some("5") => {
@@ -1275,17 +1289,23 @@ fn menu_subscriptions(root: &Path) {
                     Some(sbctl::subscription::SubscriptionFormat::ClashLegacy(
                         sbctl::subscription::CLASH_LEGACY_VERSION,
                     )),
+                    false,
                 );
                 pause_menu();
             }
             Some("6") => {
-                print_subscription_qr(root, Some(sbctl::subscription::SubscriptionFormat::Uri));
+                print_subscription_qr(
+                    root,
+                    Some(sbctl::subscription::SubscriptionFormat::Uri),
+                    false,
+                );
                 pause_menu();
             }
             Some("7") => {
                 print_subscription_qr(
                     root,
                     Some(sbctl::subscription::SubscriptionFormat::Base64Uri),
+                    false,
                 );
                 pause_menu();
             }
@@ -1293,6 +1313,7 @@ fn menu_subscriptions(root: &Path) {
                 print_subscription_qr(
                     root,
                     Some(sbctl::subscription::SubscriptionFormat::Shadowrocket),
+                    false,
                 );
                 pause_menu();
             }
@@ -1909,24 +1930,35 @@ fn print_subscription_urls(
 fn print_subscription_qr(
     root: &Path,
     format: Option<sbctl::subscription::SubscriptionFormat>,
+    all: bool,
 ) -> ExitCode {
+    use sbctl::subscription::SubscriptionFormat;
     let store = sbctl::config::DeploymentStore::new(root);
     let result = store.load().and_then(|config| {
-        let format = format.unwrap_or(sbctl::subscription::SubscriptionFormat::SingBoxFull);
-        sbctl::subscription::subscription_url(&config, format)
-            .map(|url| (url, format))
-            .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))
+        let formats: Vec<SubscriptionFormat> = if all {
+            sbctl::subscription::subscription_matrix()
+                .into_iter()
+                .map(|info| info.format)
+                .collect()
+        } else {
+            vec![format.unwrap_or(SubscriptionFormat::SingBoxFull)]
+        };
+        let mut rendered = Vec::with_capacity(formats.len());
+        for format in formats {
+            let url = sbctl::subscription::subscription_url(&config, format)
+                .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+            let qr =
+                sbctl::qr::render_ansi(&url).map_err(sbctl::config::ConfigError::StateContent)?;
+            rendered.push((format, url, qr));
+        }
+        Ok(rendered)
     });
     match result {
-        Ok((url, format)) => {
-            println!("{} 订阅二维码：", format.display_label());
-            println!("{url}");
-            match sbctl::qr::render_ansi(&url) {
-                Ok(qr) => println!("{qr}"),
-                Err(error) => {
-                    eprintln!("qr rendering failed: {error}");
-                    return ExitCode::from(2);
-                }
+        Ok(rendered) => {
+            for (format, url, qr) in rendered {
+                println!("{} 订阅二维码：", format.display_label());
+                println!("{url}");
+                println!("{qr}");
             }
             ExitCode::SUCCESS
         }

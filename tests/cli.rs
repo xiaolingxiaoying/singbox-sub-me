@@ -2068,6 +2068,121 @@ fn ip_fallback_http_service_accepts_only_the_exact_credential_path_and_reports_v
 }
 
 #[test]
+fn subscription_matrix_routes_serve_content_types_and_reject_bad_paths() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let port = free_high_tcp_port();
+    let credential = initialize_ip_fallback_subscription(&fixture, port);
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "accounting-reset",
+        ])
+        .assert()
+        .success();
+    let stderr_log = fixture.path().join("serve.err");
+    let mut server = spawn_sbctl_serve(&fixture, port, 17, &stderr_log);
+
+    for (path, content_type) in [
+        ("sing-box.json", "application/json; charset=utf-8"),
+        ("sing-box-full.json", "application/json; charset=utf-8"),
+        ("sing-box-1.12.json", "application/json; charset=utf-8"),
+        ("sing-box-1.14.json", "application/json; charset=utf-8"),
+        ("clash.yaml", "application/yaml; charset=utf-8"),
+        ("clash-1.18.yaml", "application/yaml; charset=utf-8"),
+        ("uri", "text/plain; charset=utf-8"),
+        ("uri.txt", "text/plain; charset=utf-8"),
+        ("shadowrocket.txt", "text/plain; charset=utf-8"),
+    ] {
+        let response = http_get(port, &format!("/sub/{credential}/{path}"));
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "{path} must serve 200, got: {response}"
+        );
+        assert!(
+            response.contains(&format!("content-type: {content_type}")),
+            "{path} must carry {content_type}"
+        );
+        assert!(
+            response.contains("subscription-userinfo:"),
+            "{path} must carry traffic metadata"
+        );
+    }
+
+    let qr = http_get(port, &format!("/sub/{credential}/qr/uri"));
+    assert!(qr.starts_with("HTTP/1.1 200 OK"), "qr route serves 200");
+    assert!(qr.contains("content-type: image/svg+xml"));
+    assert!(qr.contains("<svg"), "qr route serves an SVG document");
+    let index = http_get(port, &format!("/sub/{credential}/index"));
+    assert!(index.starts_with("HTTP/1.1 200 OK"), "index serves 200");
+    assert!(index.contains("content-type: text/html; charset=utf-8"));
+
+    for path in [
+        "bogus",
+        "sing-box-1.09.json",
+        "clash-1.17.yaml",
+        "uri/extra",
+    ] {
+        assert!(
+            http_get(port, &format!("/sub/{credential}/{path}"))
+                .starts_with("HTTP/1.1 404 Not Found"),
+            "{path} must be a uniform 404"
+        );
+    }
+    assert!(
+        http_get(port, &format!("/sub/{credential}/uri?x=1")).starts_with("HTTP/1.1 404 Not Found"),
+        "a query parameter must be rejected"
+    );
+    assert!(
+        http_get(port, "/sub/wrong-credential/uri").starts_with("HTTP/1.1 404 Not Found"),
+        "an invalid credential must be a uniform 404"
+    );
+    assert!(
+        server
+            .wait()
+            .expect("server exits after the request limit")
+            .success()
+    );
+}
+
+#[test]
+fn qr_all_renders_every_matrix_format_and_a_positional_format_selects_one() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let port = free_high_tcp_port();
+    let _credential = initialize_ip_fallback_subscription(&fixture, port);
+    let root = fixture.path().to_str().expect("fixture path is UTF-8");
+
+    let all = Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(["--root", root, "qr", "--all"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(all.get_output().stdout.clone()).expect("stdout is UTF-8");
+    assert_eq!(
+        stdout.matches("\x1b[30;47m").count(),
+        sbctl::subscription::subscription_matrix().len(),
+        "qr --all renders one terminal code per matrix row"
+    );
+    assert!(
+        stdout.contains("Shadowrocket"),
+        "the matrix lists Shadowrocket"
+    );
+
+    let single = Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(["--root", root, "qr", "shadowrocket"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(single.get_output().stdout.clone()).expect("stdout is UTF-8");
+    assert_eq!(
+        stdout.matches("\x1b[30;47m").count(),
+        1,
+        "a positional format renders exactly one terminal code"
+    );
+}
+
+#[test]
 fn subscription_returns_a_redacted_503_for_missing_state_without_logging_the_credential() {
     let fixture = TempDir::new().expect("temporary root is created");
     let port = free_high_tcp_port();

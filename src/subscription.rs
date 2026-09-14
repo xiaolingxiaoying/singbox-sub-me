@@ -2137,6 +2137,154 @@ mod tests {
     }
 
     #[test]
+    fn parse_route_maps_every_matrix_route_and_rejects_malformed_paths() {
+        use super::{SubscriptionFormat, SubscriptionRoute, parse_route};
+        let credential = "cred";
+        let cases = [
+            (
+                "sing-box.json",
+                SubscriptionRoute::Format(SubscriptionFormat::SingBox),
+            ),
+            (
+                "sing-box-full.json",
+                SubscriptionRoute::Format(SubscriptionFormat::SingBoxFull),
+            ),
+            (
+                "clash.yaml",
+                SubscriptionRoute::Format(SubscriptionFormat::Clash),
+            ),
+            (
+                "clash-1.18.yaml",
+                SubscriptionRoute::Format(SubscriptionFormat::ClashLegacy(
+                    super::CLASH_LEGACY_VERSION,
+                )),
+            ),
+            ("uri", SubscriptionRoute::Format(SubscriptionFormat::Uri)),
+            (
+                "uri.txt",
+                SubscriptionRoute::Format(SubscriptionFormat::Base64Uri),
+            ),
+            (
+                "shadowrocket.txt",
+                SubscriptionRoute::Format(SubscriptionFormat::Shadowrocket),
+            ),
+            ("qr/uri", SubscriptionRoute::Qr(SubscriptionFormat::Uri)),
+            (
+                "qr/sing-box-full.json",
+                SubscriptionRoute::Qr(SubscriptionFormat::SingBoxFull),
+            ),
+            ("index", SubscriptionRoute::Index),
+        ];
+        for (path, route) in cases {
+            let target = format!("/sub/{credential}/{path}");
+            assert_eq!(
+                parse_route(&target),
+                Some((credential, route)),
+                "route {path} must parse"
+            );
+        }
+        for profile in super::SING_BOX_VERSION_PROFILES {
+            let target = format!("/sub/{credential}/sing-box-{}.json", profile.version);
+            assert_eq!(
+                parse_route(&target),
+                Some((
+                    credential,
+                    SubscriptionRoute::Format(SubscriptionFormat::SingBoxVersion(profile.version)),
+                )),
+                "version profile {} must parse",
+                profile.version
+            );
+        }
+    }
+
+    #[test]
+    fn parse_route_rejects_query_unknown_and_trailing_paths() {
+        use super::parse_route;
+        for target in [
+            "/sub/cred/uri?credential=cred",
+            "/sub/cred/bogus",
+            "/sub/cred/sing-box-1.09.json",
+            "/sub/cred/clash-1.17.yaml",
+            "/sub/cred/uri/extra",
+            "/sub/cred/qr",
+            "/sub/cred/qr/index",
+            "/sub/cred",
+            "/sub/",
+            "/other/cred/uri",
+        ] {
+            assert!(parse_route(target).is_none(), "must reject {target}");
+        }
+        // An empty credential parses but can never match the real one, so the
+        // handler still returns a uniform 404 before reading any artifact.
+        assert_eq!(
+            parse_route("/sub//uri"),
+            Some((
+                "",
+                super::SubscriptionRoute::Format(super::SubscriptionFormat::Uri)
+            ))
+        );
+    }
+
+    #[test]
+    fn route_url_builds_matrix_links_for_formats_qr_and_index() {
+        use super::{SubscriptionFormat, SubscriptionRoute, route_url, subscription_url};
+        let fixture = TempDir::new().expect("temporary root is created");
+        let (_store, config, credential) = seed_direct_subscription(&fixture);
+        let base = format!("https://sub.example.test/sub/{credential}");
+        assert_eq!(
+            subscription_url(&config, SubscriptionFormat::SingBox).expect("url builds"),
+            format!("{base}/sing-box.json")
+        );
+        assert_eq!(
+            route_url(&config, SubscriptionRoute::Qr(SubscriptionFormat::Uri))
+                .expect("qr url builds"),
+            format!("{base}/qr/uri")
+        );
+        assert_eq!(
+            route_url(&config, SubscriptionRoute::Index).expect("index url builds"),
+            format!("{base}/index")
+        );
+    }
+
+    #[test]
+    fn the_bare_sing_box_artifact_stays_outbounds_only_and_legacy_uri_forms_are_stable() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let (_store, config, _) = seed_direct_subscription(&fixture);
+        let snapshot =
+            |artifacts: Vec<(String, String)>| -> std::collections::BTreeMap<String, String> {
+                artifacts.into_iter().collect()
+            };
+        let first =
+            snapshot(generated_artifacts(&config, fixture.path()).expect("artifacts generate"));
+        let second =
+            snapshot(generated_artifacts(&config, fixture.path()).expect("artifacts regenerate"));
+        for name in [
+            "subscription-sing-box.json",
+            "subscription-uri.txt",
+            "subscription-base64-uri.txt",
+        ] {
+            assert_eq!(first[name], second[name], "{name} must be deterministic");
+        }
+        let bare: serde_json::Value = serde_json::from_str(&first["subscription-sing-box.json"])
+            .expect("bare artifact is JSON");
+        let object = bare.as_object().expect("bare artifact is a JSON object");
+        assert_eq!(
+            object.len(),
+            1,
+            "the bare sing-box artifact must stay outbounds-only"
+        );
+        assert!(object.contains_key("outbounds"));
+        let base64 = first["subscription-base64-uri.txt"].clone();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(base64.trim())
+                .expect("base64 artifact decodes"),
+            first["subscription-uri.txt"].as_bytes(),
+            "the base64 artifact must stay the exact URI artifact"
+        );
+    }
+
+    #[test]
     fn no_domain_ip_fallback_artifacts_use_the_fake_protocol_sni_and_insecure_tls() {
         let config = DeploymentConfig::new_with_ports(
             SubscriptionMode::IpFallback,
