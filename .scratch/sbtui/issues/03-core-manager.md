@@ -25,3 +25,4 @@ Blocked by: 02
 
 - 2026-09-14：内核下载（zip 解包、SHA-256、平台识别）、check/启动/停止、clash_api 健康等待已实现。
 - 2026-09-14（收口）：下载时 Windows 一并解包 `wintun.dll`（缺失即报错）；tick 循环用 `try_wait` 检测异常退出并**指数退避自动重启**（2/4/8/16/30s，手动停止不复活），退出/崩溃时同步关闭系统代理；`restart_backoff` 单测覆盖。
+- 2026-09-14（Ubuntu VM 实测修复）：原下载 URL 拼错（无版本号的 `sing-box-<os>-<arch>.zip`，实际 Linux/macOS 是带版本的 `.tar.gz`、Windows 才 `.zip`），实测 404。改为经 GitHub API 解析 tag（或使用固定版本）后下载版本化资产，并按平台解压（zip / tar.gz）；新增 `release_asset_name` 回归单测。VM 实测 `d` 成功下载并解包 sing-box 1.14.0（`sing-box version` 正常）。

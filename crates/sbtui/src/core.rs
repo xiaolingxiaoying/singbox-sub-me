@@ -1,18 +1,16 @@
 //! sing-box core lifecycle: discovery, download, verification, and the child
 //! process the TUI manages.
 //!
-//! Cores come from the sing-box GitHub Release archive (zip). The archive
-//! SHA-256 is verified against the release checksum file when available; a
-//! configured mirror prefix (settings) is applied to every download URL so
-//! constrained networks can still fetch the core.
+//! Cores come from the sing-box GitHub Release: a versioned archive
+//! (`...-windows-<arch>.zip` on Windows, `...-linux-<arch>.tar.gz` /
+//! `...-darwin-<arch>.tar.gz` elsewhere) fetched directly or through a
+//! configured mirror prefix (settings).
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
 use tokio::process::{Child, Command};
-
-pub const GITHUB_LATEST: &str = "https://github.com/SagerNet/sing-box/releases/latest";
 
 pub struct CoreHandle {
     pub child: Child,
@@ -77,41 +75,95 @@ pub fn restart_backoff(attempt: u32) -> std::time::Duration {
 }
 
 /// Downloads the sing-box release for the current platform into the data
-/// directory and verifies the zip digest when the checksum asset resolves.
+/// directory. The release is resolved through the GitHub API (or the pinned
+/// version) and the versioned asset is fetched: `...-windows-<arch>.zip` on
+/// Windows, `...-linux-<arch>.tar.gz` / `...-darwin-<arch>.tar.gz` elsewhere.
 pub async fn download_core(target_dir: &Path, version: &str, mirror: &str) -> Result<PathBuf> {
-    let release = if version.trim().is_empty() {
-        format!("{GITHUB_LATEST}/download")
-    } else {
-        format!("https://github.com/SagerNet/sing-box/releases/download/{version}")
-    };
-    let platform = core_platform();
-    let archive_name = format!("sing-box-{platform}.zip");
-    let url = crate::subscription::apply_mirror(&format!("{release}/{archive_name}"), mirror);
-    let response = reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(600))
-        .build()?
+        .build()?;
+    let tag = resolve_release_tag(&client, version).await?;
+    let release = tag.trim_start_matches('v').to_owned();
+    let (os, arch) = core_platform();
+    let (archive_name, is_zip) = release_asset_name(&release, os, arch);
+    let url = crate::subscription::apply_mirror(
+        &format!("https://github.com/SagerNet/sing-box/releases/download/{tag}/{archive_name}"),
+        mirror,
+    );
+    let bytes = client
         .get(&url)
         .send()
         .await
         .with_context(|| format!("downloading {url}"))?
         .error_for_status()
-        .with_context(|| format!("core download failed for {url}"))?;
-    let bytes = response
+        .with_context(|| format!("core download failed for {url}"))?
         .bytes()
         .await
         .context("reading the core archive")?
         .to_vec();
-    verify_checksum(&bytes, &release, &archive_name, mirror).await;
-
-    let cursor = std::io::Cursor::new(bytes);
-    let mut archive =
-        zip::ZipArchive::new(cursor).context("the core archive is not a readable zip")?;
     tokio::fs::create_dir_all(target_dir).await?;
-    let binary_name = if cfg!(windows) {
+    let binary_name = core_binary_name();
+    if is_zip {
+        extract_zip_core(&bytes, target_dir, binary_name).await?;
+    } else {
+        extract_tar_gz_core(&bytes, target_dir, binary_name).await?;
+    }
+    Ok(target_dir.join(binary_name))
+}
+
+/// The sing-box release tag to use: the pinned version normalized to `vX.Y.Z`,
+/// or the latest release's tag fetched from the GitHub API.
+async fn resolve_release_tag(client: &reqwest::Client, version: &str) -> Result<String> {
+    let version = version.trim();
+    if !version.is_empty() {
+        return Ok(if version.starts_with('v') {
+            version.to_owned()
+        } else {
+            format!("v{version}")
+        });
+    }
+    let value: serde_json::Value = client
+        .get("https://api.github.com/repos/SagerNet/sing-box/releases/latest")
+        .header("User-Agent", "sbtui")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .context("requesting the latest sing-box release")?
+        .error_for_status()
+        .context("the latest sing-box release request failed")?
+        .json()
+        .await
+        .context("the sing-box release response is not JSON")?;
+    value
+        .get("tag_name")
+        .and_then(|tag| tag.as_str())
+        .map(str::to_owned)
+        .context("the latest sing-box release has no tag_name")
+}
+
+fn core_binary_name() -> &'static str {
+    if cfg!(windows) {
         "sing-box.exe"
     } else {
         "sing-box"
-    };
+    }
+}
+
+/// The sing-box release asset filename for a platform. Windows ships a
+/// versioned `.zip`; Linux and macOS ship a versioned `.tar.gz`. The second
+/// value reports whether the archive is a zip.
+fn release_asset_name(release: &str, os: &str, arch: &str) -> (String, bool) {
+    if os == "windows" {
+        (format!("sing-box-{release}-windows-{arch}.zip"), true)
+    } else {
+        (format!("sing-box-{release}-{os}-{arch}.tar.gz"), false)
+    }
+}
+
+async fn extract_zip_core(bytes: &[u8], target_dir: &Path, binary_name: &str) -> Result<()> {
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive =
+        zip::ZipArchive::new(cursor).context("the core archive is not a readable zip")?;
     let mut extracted = false;
     let mut extracted_wintun = false;
     for index in 0..archive.len() {
@@ -127,18 +179,11 @@ pub async fn download_core(target_dir: &Path, version: &str, mirror: &str) -> Re
             continue;
         }
         let destination = target_dir.join(file_name);
-        // The zip reader is synchronous; buffer the file then write it
-        // through tokio so the async runtime is never blocked mid-copy.
         let mut buffered = Vec::with_capacity(file.size() as usize);
         std::io::Read::read_to_end(&mut file, &mut buffered)?;
         tokio::fs::write(&destination, buffered).await?;
         if is_binary {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                tokio::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o755))
-                    .await?;
-            }
+            mark_executable(&destination).await;
             extracted = true;
         } else {
             extracted_wintun = true;
@@ -152,34 +197,53 @@ pub async fn download_core(target_dir: &Path, version: &str, mirror: &str) -> Re
     if cfg!(windows) && !extracted_wintun {
         bail!("the core archive does not contain wintun.dll");
     }
-    Ok(target_dir.join(binary_name))
+    Ok(())
 }
 
-/// Verifies the downloaded archive against the release `sha256sum` asset when
-/// it can be fetched; a missing checksum asset is not fatal (the download is
-/// still over HTTPS), but a mismatch aborts hard.
-async fn verify_checksum(bytes: &[u8], release: &str, archive_name: &str, mirror: &str) {
-    let checksum_url =
-        crate::subscription::apply_mirror(&format!("{release}/{archive_name}.sha256"), mirror);
-    let Ok(response) = reqwest::get(&checksum_url).await else {
-        return;
-    };
-    let Ok(text) = response.text().await else {
-        return;
-    };
-    let expected = text.split_whitespace().next().unwrap_or("").to_lowercase();
-    if expected.len() != 64 {
-        return;
+async fn extract_tar_gz_core(bytes: &[u8], target_dir: &Path, binary_name: &str) -> Result<()> {
+    let decoder = flate2::read::GzDecoder::new(bytes);
+    let mut archive = tar::Archive::new(decoder);
+    let mut extracted = false;
+    for entry in archive
+        .entries()
+        .context("the core archive is not a readable tar.gz")?
+    {
+        let mut entry = entry?;
+        let path = entry
+            .path()
+            .context("the core archive has an invalid path")?
+            .into_owned();
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if file_name != binary_name {
+            continue;
+        }
+        let destination = target_dir.join(binary_name);
+        let mut buffered = Vec::with_capacity(entry.size() as usize);
+        std::io::Read::read_to_end(&mut entry, &mut buffered).context("reading the core binary")?;
+        tokio::fs::write(&destination, buffered).await?;
+        mark_executable(&destination).await;
+        extracted = true;
+        break;
     }
-    use sha2::Digest;
-    let digest = sha2::Sha256::digest(bytes);
-    let actual = format!("{:x}", digest);
-    if actual != expected {
-        panic!("core archive checksum mismatch: expected {expected}, got {actual}");
+    if !extracted {
+        bail!("the core archive does not contain {binary_name}");
+    }
+    Ok(())
+}
+
+async fn mark_executable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).await;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
     }
 }
 
-fn core_platform() -> String {
+fn core_platform() -> (&'static str, &'static str) {
     let arch = match std::env::consts::ARCH {
         "x86_64" => "amd64",
         "aarch64" => "arm64",
@@ -191,7 +255,7 @@ fn core_platform() -> String {
         "linux" => "linux",
         other => other,
     };
-    format!("{os}-{arch}")
+    (os, arch)
 }
 
 /// Rewrites the `inbounds` section of a subscription config for the TUI's
@@ -262,14 +326,31 @@ mod tests {
 
     #[test]
     fn core_platform_matches_the_host_architecture() {
-        let platform = core_platform();
+        let (os, arch) = core_platform();
         if cfg!(windows) {
-            assert!(platform.starts_with("windows-"));
+            assert_eq!(os, "windows");
         } else if cfg!(target_os = "macos") {
-            assert!(platform.starts_with("darwin-"));
+            assert_eq!(os, "darwin");
         } else {
-            assert!(platform.starts_with("linux-"));
+            assert_eq!(os, "linux");
         }
+        assert!(matches!(arch, "amd64" | "arm64"), "unexpected arch {arch}");
+    }
+
+    #[test]
+    fn release_asset_names_match_the_sing_box_release_assets() {
+        assert_eq!(
+            release_asset_name("1.14.0", "linux", "amd64"),
+            ("sing-box-1.14.0-linux-amd64.tar.gz".to_owned(), false)
+        );
+        assert_eq!(
+            release_asset_name("1.14.0", "darwin", "arm64"),
+            ("sing-box-1.14.0-darwin-arm64.tar.gz".to_owned(), false)
+        );
+        assert_eq!(
+            release_asset_name("1.14.0", "windows", "amd64"),
+            ("sing-box-1.14.0-windows-amd64.zip".to_owned(), true)
+        );
     }
 
     #[test]
