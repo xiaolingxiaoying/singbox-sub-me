@@ -7,9 +7,10 @@ sbtui 是一个跑在终端里的 sing-box 代理客户端（TUI），对标 Cla
 
 ```bash
 cargo build --release -p sbtui
-# Windows: target/release/sbtui.exe
-# 首次运行建议先看数据目录位置
-sbtui --print-dir
+# 产出两个等价的客户端二进制：
+#   Windows: target/release/sbtui.exe 和 target/release/ly.exe
+#   Linux/macOS: target/release/sbtui 和 target/release/ly
+# `ly` 是短启动名（对齐服务端 sbctl 的 `ly`），运行的是同一个 TUI。
 ```
 
 数据目录：Windows `%APPDATA%\sbtui`，Linux/macOS `~/.config/sbtui`。
@@ -17,12 +18,12 @@ sbtui --print-dir
 
 ## 安装与 `ly` 快捷方式
 
-客户端提供 `ly` 启动命令（与服务端 sbctl 的 `ly` 相对应；客户端机器上 `ly` 打开 sbtui）：
+`ly` 与 `sbtui` 是同一个客户端编译出的两个二进制，客户端机器上运行 `ly` 即打开 TUI。
 
-- **Linux / macOS**：把 `sbtui` 与 `packaging/install.sh` 放在一起，然后
+- **Linux / macOS**：把 `sbtui`、`ly` 与 `packaging/install.sh` 放在一起，然后
 
   ```bash
-  sudo sh install.sh          # 安装到 /usr/local/bin，并建立 /usr/local/bin/ly → sbtui
+  sudo sh install.sh          # 安装到 /usr/local/bin/{sbtui,ly}
   ly                          # 等同 sbtui
   ```
 
@@ -30,10 +31,8 @@ sbtui --print-dir
 
   ```powershell
   powershell -ExecutionPolicy Bypass -File install.ps1
-  ly                          # 任意终端可用（写入 %LOCALAPPDATA%\Microsoft\WindowsApps\ly.cmd）
+  ly                          # 任意终端可用（ly.exe 写入 %LOCALAPPDATA%\Microsoft\WindowsApps）
   ```
-
-  也可直接把 `packaging\ly.cmd` 与 `sbtui.exe` 放同一目录，运行 `ly.cmd`。
 
 ## 首次使用（5 步）
 

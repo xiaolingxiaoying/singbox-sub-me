@@ -1,26 +1,29 @@
-# Install sbtui for the current user and expose a global `ly` shortcut.
+# Install the sbtui client and its `ly` shortcut binary for the current user.
 #
-# sbtui.exe is copied to %LOCALAPPDATA%\Programs\sbtui\, and a `ly.cmd` wrapper
-# is written into %LOCALAPPDATA%\Microsoft\WindowsApps (already on PATH), so
-# typing `ly` in any terminal opens the client. No administrator rights needed.
+# Both binaries are copied into %LOCALAPPDATA%\Programs\sbtui, and a copy of
+# `ly.exe` (plus `sbtui.exe`) is placed in %LOCALAPPDATA%\Microsoft\WindowsApps
+# which is already on PATH, so typing `ly` (or `sbtui`) in any terminal opens
+# the client. No administrator rights needed.
 $ErrorActionPreference = 'Stop'
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$exe = Join-Path $here 'sbtui.exe'
-if (-not (Test-Path $exe)) {
-    throw "sbtui.exe not found next to install.ps1 ($here)"
+$target = Join-Path $env:LOCALAPPDATA 'Programs\sbtui'
+$bin = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps'
+New-Item -ItemType Directory -Force -Path $target, $bin | Out-Null
+
+$found = $false
+foreach ($name in 'sbtui.exe', 'ly.exe') {
+    $src = Join-Path $here $name
+    if (-not (Test-Path $src)) { continue }
+    Copy-Item $src (Join-Path $target $name) -Force
+    Copy-Item $src (Join-Path $bin $name) -Force
+    $found = $true
 }
 
-$target = Join-Path $env:LOCALAPPDATA 'Programs\sbtui'
-New-Item -ItemType Directory -Force -Path $target | Out-Null
-Copy-Item $exe (Join-Path $target 'sbtui.exe') -Force
+if (-not $found) {
+    throw "no sbtui.exe / ly.exe next to install.ps1 ($here)"
+}
 
-$bin = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps'
-New-Item -ItemType Directory -Force -Path $bin | Out-Null
-$launcher = Join-Path $bin 'ly.cmd'
-$content = "@echo off`r`n`"$target\sbtui.exe`" %*`r`n"
-Set-Content -Path $launcher -Value $content -Encoding Ascii
-
-Write-Host "installed: $target\sbtui.exe"
-Write-Host "shortcut:  $launcher (run: ly)"
-& (Join-Path $target 'sbtui.exe') --version
+Write-Host "installed: $target"
+Write-Host "on PATH:   $bin\ly.exe (run: ly)"
+& (Join-Path $bin 'ly.exe') --version

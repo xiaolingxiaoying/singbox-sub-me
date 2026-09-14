@@ -1,28 +1,30 @@
 #!/bin/sh
-# Install sbtui and expose the `ly` shortcut (the client-side counterpart of
-# the server-side sbctl `ly`). Run next to the downloaded binary, or point
-# SBTUI_BINARY at it.
+# Install the sbtui client and its `ly` shortcut binary (the client-side
+# counterpart of the server-side sbctl `ly`). Put the binaries next to this
+# script, or point SBTUI_DIR at the directory that holds them.
 set -eu
-dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+dir=${SBTUI_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}
 prefix=${PREFIX:-/usr/local}
 
-binary=${SBTUI_BINARY:-}
-if [ -z "$binary" ]; then
-  if [ -x "$dir/sbtui" ]; then
-    binary="$dir/sbtui"
-  else
-    binary=$(command -v sbtui || true)
+install -d "$prefix/bin"
+installed=0
+for name in sbtui ly; do
+  if [ -x "$dir/$name" ]; then
+    install -m 0755 "$dir/$name" "$prefix/bin/$name"
+    installed=$((installed + 1))
   fi
+done
+
+# Fall back to a symlink when only the sbtui binary was shipped.
+if [ -x "$prefix/bin/sbtui" ] && [ ! -e "$prefix/bin/ly" ]; then
+  ln -sf "$prefix/bin/sbtui" "$prefix/bin/ly"
 fi
 
-if [ -z "$binary" ] || [ ! -x "$binary" ]; then
-  echo "sbtui binary not found; put it next to install.sh or set SBTUI_BINARY" >&2
+if [ "$installed" -eq 0 ] && [ ! -x "$prefix/bin/sbtui" ]; then
+  echo "no sbtui/ly binary found next to install.sh; set SBTUI_DIR" >&2
   exit 2
 fi
 
-install -d "$prefix/bin"
-install -m 0755 "$binary" "$prefix/bin/sbtui"
-ln -sf "$prefix/bin/sbtui" "$prefix/bin/ly"
 echo "installed: $prefix/bin/sbtui"
 echo "shortcut:  $prefix/bin/ly"
-"$prefix/bin/sbtui" --version
+"$prefix/bin/ly" --version

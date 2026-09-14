@@ -59,10 +59,13 @@ jobs:
         include:
           - os: windows-latest
             artifact: sbtui-windows-amd64.exe
+            shortcut: ly-windows-amd64.exe
           - os: macos-14
             artifact: sbtui-macos-arm64
+            shortcut: ly-macos-arm64
           - os: ubuntu-22.04
             artifact: sbtui-linux-amd64
+            shortcut: ly-linux-amd64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -74,18 +77,20 @@ jobs:
           set -euo pipefail
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp target/release/sbtui.exe "${{ matrix.artifact }}"
-            cp crates/sbtui/packaging/ly.cmd ly.cmd
+            cp target/release/ly.exe "${{ matrix.shortcut }}"
           else
             cp target/release/sbtui "${{ matrix.artifact }}"
-            cp crates/sbtui/packaging/install.sh sbtui-install.sh
-            chmod +x sbtui-install.sh "${{ matrix.artifact }}"
+            cp target/release/ly "${{ matrix.shortcut }}"
+            chmod +x "${{ matrix.artifact }}" "${{ matrix.shortcut }}"
           fi
+          cp crates/sbtui/packaging/install.sh sbtui-install.sh
+          chmod +x sbtui-install.sh
       - uses: actions/upload-artifact@v4
         with:
           name: sbtui-bin-${{ matrix.os }}
           path: |
             ${{ matrix.artifact }}
-            ly.cmd
+            ${{ matrix.shortcut }}
             sbtui-install.sh
 
   acceptance:
@@ -138,7 +143,7 @@ jobs:
           gh release upload "$RELEASE_TAG" \
             sbctl-linux-amd64 sbctl-linux-arm64 sing-box-linux-amd64 sing-box-linux-arm64 \
             sbtui-windows-amd64.exe sbtui-macos-arm64 sbtui-linux-amd64 \
-            ly.cmd sbtui-install.sh \
+            ly-windows-amd64.exe ly-macos-arm64 ly-linux-amd64 sbtui-install.sh \
             --repo "$GITHUB_REPOSITORY" --clobber
       - name: Install tooling for manifest signing
         run: |
