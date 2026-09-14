@@ -37,6 +37,8 @@ struct ProxyBackup {
     windows: Option<WindowsBackup>,
     #[serde(default)]
     macos: Option<MacosBackup>,
+    #[serde(default)]
+    linux: Option<LinuxBackup>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -57,6 +59,15 @@ struct MacosBackup {
     secure_port: String,
 }
 
+/// The GNOME proxy values captured on Linux; values keep gsettings' own
+/// quoting (for example `'manual'`) so they can be written back verbatim.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct LinuxBackup {
+    mode: String,
+    http_host: String,
+    http_port: String,
+}
+
 fn backup_path() -> Option<std::path::PathBuf> {
     crate::settings::data_dir()
         .ok()
@@ -75,14 +86,19 @@ fn capture_backup() {
     #[cfg(windows)]
     let backup = ProxyBackup {
         windows: capture_windows(),
-        macos: None,
+        ..Default::default()
     };
     #[cfg(target_os = "macos")]
     let backup = ProxyBackup {
-        windows: None,
         macos: capture_macos(),
+        ..Default::default()
     };
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let backup = ProxyBackup {
+        linux: capture_linux(),
+        ..Default::default()
+    };
+    #[cfg(not(any(windows, unix)))]
     let backup = ProxyBackup::default();
     if let Ok(text) = serde_json::to_string_pretty(&backup) {
         let _ = std::fs::write(&path, text);
@@ -103,7 +119,7 @@ fn restore_backup() -> Result<()> {
     };
     // Keep the fields referenced on every platform (the apply arms are
     // cfg-gated), so the deserialized value is never "unused".
-    let _has_state = backup.windows.is_some() || backup.macos.is_some();
+    let _has_state = backup.windows.is_some() || backup.macos.is_some() || backup.linux.is_some();
     #[cfg(windows)]
     if let Some(window) = backup.windows.as_ref() {
         apply_windows(window)?;
@@ -111,6 +127,10 @@ fn restore_backup() -> Result<()> {
     #[cfg(target_os = "macos")]
     if let Some(macos) = backup.macos.as_ref() {
         apply_macos(macos)?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if let Some(linux) = backup.linux.as_ref() {
+        apply_linux(linux)?;
     }
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -403,6 +423,46 @@ fn set_proxy(server: &str) -> Result<()> {
     anyhow::bail!(
         "此桌面环境未自动应用系统代理；请手动设置环境变量：export http_proxy=http://{server} https_proxy=http://{server} all_proxy=socks5://{server}"
     )
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn capture_linux() -> Option<LinuxBackup> {
+    let get = |schema: &str, key: &str| -> Option<String> {
+        let output = std::process::Command::new("gsettings")
+            .args(["get", schema, key])
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    Some(LinuxBackup {
+        mode: get("org.gnome.system.proxy", "mode")?,
+        http_host: get("org.gnome.system.proxy.http", "host")?,
+        http_port: get("org.gnome.system.proxy.http", "port")?,
+    })
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn apply_linux(backup: &LinuxBackup) -> Result<()> {
+    let set = |schema: &str, key: &str, value: &str| -> Result<()> {
+        let status = std::process::Command::new("gsettings")
+            .args(["set", schema, key, value])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("gsettings set {schema} {key} exited with {status}");
+        }
+        Ok(())
+    };
+    if backup.mode == "'manual'" {
+        set("org.gnome.system.proxy.http", "host", &backup.http_host)?;
+        set("org.gnome.system.proxy.http", "port", &backup.http_port)?;
+        set("org.gnome.system.proxy", "mode", "'manual'")?;
+    } else {
+        set("org.gnome.system.proxy", "mode", "'none'")?;
+    }
+    Ok(())
 }
 
 #[cfg(windows)]

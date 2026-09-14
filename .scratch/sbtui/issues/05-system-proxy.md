@@ -26,3 +26,4 @@ Blocked by: 04
 
 - 2026-09-14：Windows 注册表 + InternetSetOptionW 刷新已实现；macOS networksetup、Linux gsettings 分支已实现（CI 覆盖编译）。
 - 2026-09-14（收口）：enable 前把原代理状态写入 `cache/system-proxy-backup.json`，disable 恢复该状态（Windows 注册表三值；macOS 用 `-getwebproxy`/`-getsecurewebproxy` 捕获并经 networksetup 回放；Linux 保持关断）；退出时若系统代理仍开启，会先提示「再按 q 保留，或 p 关闭后退出」。
+- 2026-09-14（Ubuntu VM 实测修复）：在 Ubuntu 22.04 桌面 VM 中验证时发现——关闭系统代理走了「恢复备份」分支，但 Linux 分支此前不记录/恢复状态，导致 gsettings 仍停留在 `manual`。已让 Linux 也捕获并回放 `org.gnome.system.proxy` 的 mode/host/port。实测：基线 `none` → 按 `p` 变 `manual`（127.0.0.1:2080，备份记录 `mode='none'`）→ 再按 `p` 恢复 `none` 且删除备份。
