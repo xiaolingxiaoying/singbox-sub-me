@@ -230,6 +230,7 @@ sbctl credential rotate
 
 # Direct 模式证书
 sbctl certificate obtain --email admin@example.com
+sbctl certificate obtain --no-email        # 免邮箱（--register-unsafely-without-email，需二次确认）
 sbctl certificate renew
 sbctl certificate verify
 sbctl certificate status   # 有效期、SAN、剩余天数、deploy hook

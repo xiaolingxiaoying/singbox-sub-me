@@ -224,12 +224,28 @@ fn load_directory_at(
     })
 }
 
+/// Validates an ACME registration email: one `@`, a non-empty local part, a
+/// valid domain, and no whitespace. It is only ever used for expiry notices.
+pub fn acme_email_is_valid(email: &str) -> bool {
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && !domain.is_empty()
+        && email.matches('@').count() == 1
+        && !email.contains(char::is_whitespace)
+        && crate::config::host_is_valid(domain)
+}
+
 /// Obtains a certificate with Certbot's webroot authenticator, then validates
-/// and pins it so the daemon and sing-box can serve it immediately.
+/// and pins it so the daemon and sing-box can serve it immediately. A `None`
+/// (or empty) email registers without one via
+/// `--register-unsafely-without-email`; callers are responsible for the
+/// explicit user confirmation that path requires.
 pub fn obtain(
     store: &DeploymentStore,
     config: &DeploymentConfig,
-    email: &str,
+    email: Option<&str>,
 ) -> Result<ValidatedCertificate, CertificateError> {
     obtain_with_runtime(&Runtime::live(store.root()), store, config, email)
 }
@@ -238,26 +254,29 @@ pub fn obtain_with_runtime<C: crate::runtime::Clock>(
     runtime: &Runtime<C>,
     store: &DeploymentStore,
     config: &DeploymentConfig,
-    email: &str,
+    email: Option<&str>,
 ) -> Result<ValidatedCertificate, CertificateError> {
     require_direct(config)?;
+    let webroot = store.acme_webroot();
+    let webroot = webroot.to_string_lossy();
+    let mut args: Vec<&str> = vec![
+        "certonly",
+        "--webroot",
+        "--webroot-path",
+        webroot.as_ref(),
+        "--domain",
+        config.subscription_host.as_str(),
+    ];
+    match email.map(str::trim).filter(|email| !email.is_empty()) {
+        Some(email) => {
+            args.push("--email");
+            args.push(email);
+        }
+        None => args.push("--register-unsafely-without-email"),
+    }
+    args.extend_from_slice(&["--agree-tos", "--non-interactive", "--keep-until-expiring"]);
     let (status, output) = runtime
-        .run_command_output(
-            "certbot",
-            &[
-                "certonly",
-                "--webroot",
-                "--webroot-path",
-                &store.acme_webroot().to_string_lossy(),
-                "--domain",
-                &config.subscription_host,
-                "--email",
-                email,
-                "--agree-tos",
-                "--non-interactive",
-                "--keep-until-expiring",
-            ],
-        )
+        .run_command_output("certbot", &args)
         .map_err(|error| CertificateError::Certbot(error.to_string()))?;
     certbot_result(status, output)?;
     publish(store, config)
@@ -744,6 +763,30 @@ mod tests {
         let pinned_validated = crate::certificate::load_pinned(&store, &config)
             .expect("the pinned copy is independently loadable");
         assert_eq!(pinned_validated.fingerprint, validated.fingerprint);
+    }
+
+    #[test]
+    fn acme_email_validation_accepts_typical_addresses_and_rejects_malformed_ones() {
+        for valid in ["admin@example.com", "a.b+tag@sub.example.co.uk"] {
+            assert!(
+                super::acme_email_is_valid(valid),
+                "{valid} must be accepted"
+            );
+        }
+        for invalid in [
+            "",
+            "no-at-symbol",
+            "@example.com",
+            "user@",
+            "user@@example.com",
+            "user name@example.com",
+            "user@exa mple.com",
+        ] {
+            assert!(
+                !super::acme_email_is_valid(invalid),
+                "{invalid} must be rejected"
+            );
+        }
     }
 
     #[test]

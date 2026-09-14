@@ -2183,6 +2183,55 @@ fn qr_all_renders_every_matrix_format_and_a_positional_format_selects_one() {
 }
 
 #[test]
+fn certificate_obtain_requires_a_valid_email_or_a_confirmed_no_email_path() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let root = fixture.path().to_str().expect("fixture path is UTF-8");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            root,
+            "certificate",
+            "obtain",
+            "--email",
+            "not-an-email",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("邮箱格式无效"));
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(["--root", root, "certificate", "obtain"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("请提供 --email"));
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(["--root", root, "certificate", "obtain", "--no-email"])
+        .write_stdin("n\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("未确认免邮箱注册"));
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            root,
+            "certificate",
+            "obtain",
+            "--email",
+            "admin@example.com",
+            "--no-email",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
 fn subscription_returns_a_redacted_503_for_missing_state_without_logging_the_credential() {
     let fixture = TempDir::new().expect("temporary root is created");
     let port = free_high_tcp_port();

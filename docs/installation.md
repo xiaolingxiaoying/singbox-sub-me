@@ -65,3 +65,44 @@ sbctl sing-box remove
 `sing-box update` 会先用候选二进制执行 `sing-box check`，再替换二进制并检查
 systemd 服务；失败时恢复 rollback 目录中的旧二进制。完整的 `sbctl update` 仍然
 保留同时升级控制面和数据面的能力。
+
+## 证书状态与后续必做清单
+
+Direct 模式下，`sbctl certificate status` 显示证书路径、SAN 覆盖、有效期与剩余天数、
+deploy hook 是否在位，以及 certificate 缺失或过期时的修复命令（`sbctl certificate
+obtain --email <邮箱>` / `sbctl certificate renew`）。`sbctl status` 也会在剩余天数
+少于 14 天时给出续期提醒。
+
+签发证书时邮箱只用于 ACME 到期通知。确实不需要邮箱时使用显式的免邮箱路径，它会先要求
+交互式确认：
+
+```bash
+sbctl certificate obtain --email admin@example.com
+# 或者：确认后用 --register-unsafely-without-email 注册
+sbctl certificate obtain --no-email
+```
+
+安装或签发完成后，按输出清单手动放行端口（sbctl 永不自动修改防火墙）。协议端口见
+`sbctl node`：VLESS Reality、VMess WebSocket、AnyTLS 使用 TCP；Hysteria2、TUIC 使用 UDP。
+
+```bash
+# Direct 模式需要 80/443
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+# 逐协议放行（示例）
+sudo ufw allow <vless端口>/tcp
+sudo ufw allow <hysteria2端口>/udp
+
+# DNS 自检：应返回 VPS 公网 IP
+dig +short sub.example.com
+
+# 订阅自检（凭据见 sbctl sub 输出）
+curl -fsS https://sub.example.com/sub/<凭据>/uri | head
+curl -fsS -o /dev/null -w '%{http_code}\n' https://sub.example.com/sub/<凭据>/index      # 200
+curl -fsS -o /dev/null -w '%{http_code}\n' https://sub.example.com/sub/<凭据>/qr/uri     # 200
+```
+
+External proxy 模式由反向代理负责 TLS，清单不含证书步骤，改为提示 Caddy/Nginx 反代
+`127.0.0.1:<subscription_listen_port>`。IP fallback 模式订阅为明文 HTTP，无证书步骤，
+但需放行高位订阅端口并提醒其安全边界。手动联测步骤见
+`docs/subscription-modes-testing.md`。

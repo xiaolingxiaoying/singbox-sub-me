@@ -92,11 +92,9 @@ pub fn run<C: Prompts>(
     )?;
 
     let certbot_email = if mode == SubscriptionMode::Direct {
-        ask_value(
+        ask_certbot_email(
             prompts,
-            "Certbot 证书邮箱（仅用于 ACME 到期通知，可留空跳过）",
             existing.and_then(|config| config.certbot_email.clone()),
-            parse_certbot_email,
         )?
     } else {
         None
@@ -366,12 +364,7 @@ pub fn run_topic<C: Prompts>(
                 parse_optional_host,
             )?;
             certbot_email = if mode == SubscriptionMode::Direct {
-                ask_value(
-                    prompts,
-                    "Certbot 证书邮箱（仅用于 ACME 到期通知，可留空跳过）",
-                    certbot_email.clone(),
-                    parse_certbot_email,
-                )?
+                ask_certbot_email(prompts, certbot_email.clone())?
             } else {
                 None
             };
@@ -804,6 +797,37 @@ fn parse_certbot_email(value: &str) -> Result<String, String> {
     }
 }
 
+/// Asks for the Certbot registration email. An empty answer only skips ACME
+/// email registration after an explicit confirmation, matching Certbot's
+/// `--register-unsafely-without-email` behavior.
+fn ask_certbot_email<C: Prompts>(
+    prompts: &mut C,
+    existing: Option<String>,
+) -> Result<Option<String>, WizardError> {
+    let mut current = existing;
+    loop {
+        let email = ask_value(
+            prompts,
+            "Certbot 证书邮箱（仅用于 ACME 到期通知；留空可不使用邮箱）",
+            current.clone(),
+            parse_certbot_email,
+        )?;
+        match email {
+            Some(email) if !email.trim().is_empty() => return Ok(Some(email)),
+            _ => {
+                if prompts.confirm(
+                    "确认不使用邮箱注册证书（--register-unsafely-without-email）？",
+                    false,
+                )? {
+                    return Ok(None);
+                }
+                prompts.report("未确认免邮箱注册；请填写证书邮箱。");
+                current = None;
+            }
+        }
+    }
+}
+
 fn parse_dns_mode(value: &str) -> Result<crate::config::ClientDnsMode, String> {
     match value.trim().to_ascii_lowercase().as_str() {
         "fake-ip" | "1" => Ok(crate::config::ClientDnsMode::FakeIp),
@@ -1081,7 +1105,7 @@ mod tests {
             "",
             "",
         ];
-        let mut prompts = ScriptPrompts::new(&answers, &[true]);
+        let mut prompts = ScriptPrompts::new(&answers, &[true, true]);
 
         let outcome =
             run(None, Some("ens3".to_owned()), &mut prompts).expect("a fresh wizard completes");

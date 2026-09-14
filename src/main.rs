@@ -338,8 +338,13 @@ enum TrafficCommand {
 enum CertificateCommand {
     /// Obtain a certificate using Certbot's webroot authenticator.
     Obtain {
+        /// ACME registration email (only used for expiry notices).
+        #[arg(long, value_name = "EMAIL", conflicts_with = "no_email")]
+        email: Option<String>,
+        /// Register without an email via --register-unsafely-without-email
+        /// (requires an interactive confirmation).
         #[arg(long)]
-        email: String,
+        no_email: bool,
     },
     /// Renew certificates and safely reload the sbctl service if they changed.
     Renew,
@@ -1756,6 +1761,30 @@ fn restart(root: &Path, sing_box_bin: Option<PathBuf>) -> ExitCode {
     }
 }
 
+/// Resolves the ACME registration email for `certificate obtain`. The no-email
+/// path is only returned after an explicit interactive confirmation.
+fn resolve_obtain_email(email: Option<&str>, no_email: bool) -> Result<Option<String>, String> {
+    if no_email {
+        if confirm_menu_action("确认不使用邮箱注册证书（--register-unsafely-without-email）？")
+        {
+            return Ok(None);
+        }
+        return Err("已取消：未确认免邮箱注册。".to_owned());
+    }
+    let Some(email) = email else {
+        return Err("请提供 --email <邮箱>，或使用 --no-email 跳过（需二次确认）。".to_owned());
+    };
+    let email = email.trim().to_owned();
+    if sbctl::certificate::acme_email_is_valid(&email) {
+        Ok(Some(email))
+    } else {
+        Err(
+            "邮箱格式无效（示例 admin@example.com）；该邮箱仅用于证书到期通知。确实不需要时请用 --no-email 并二次确认。"
+                .to_owned(),
+        )
+    }
+}
+
 fn run_certificate(root: &Path, command: CertificateCommand) -> ExitCode {
     let store = sbctl::config::DeploymentStore::new(root);
     if let CertificateCommand::Status = command {
@@ -1770,10 +1799,22 @@ fn run_certificate(root: &Path, command: CertificateCommand) -> ExitCode {
             }
         };
     }
+    // The no-email ACME path is explicit and confirmed before touching config.
+    let obtain_email = if let CertificateCommand::Obtain { email, no_email } = &command {
+        match resolve_obtain_email(email.as_deref(), *no_email) {
+            Ok(email) => email,
+            Err(message) => {
+                eprintln!("certificate operation failed: {message}");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        None
+    };
     let result = store.load().and_then(|config| {
-        match command {
-            CertificateCommand::Obtain { email } => {
-                sbctl::certificate::obtain(&store, &config, &email)
+        match &command {
+            CertificateCommand::Obtain { .. } => {
+                sbctl::certificate::obtain(&store, &config, obtain_email.as_deref())
             }
             CertificateCommand::Renew => sbctl::certificate::renew(&store, &config),
             CertificateCommand::Verify => sbctl::certificate::deploy_hook(&store, &config),
