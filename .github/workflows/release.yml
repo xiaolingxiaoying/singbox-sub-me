@@ -52,6 +52,36 @@ jobs:
           name: sbctl-${{ matrix.arch }}
           path: sbctl-linux-${{ matrix.arch }}
 
+  build-sbtui:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: sbtui-windows-amd64.exe
+          - os: macos-14
+            artifact: sbtui-macos-arm64
+          - os: ubuntu-22.04
+            artifact: sbtui-linux-amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p sbtui
+      - name: Stage the desktop binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp target/release/sbtui.exe "${{ matrix.artifact }}"
+          else
+            cp target/release/sbtui "${{ matrix.artifact }}"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbtui-bin-${{ matrix.os }}
+          path: ${{ matrix.artifact }}
+
   acceptance:
     needs: build-sbctl
     runs-on: ubuntu-24.04
@@ -65,13 +95,17 @@ jobs:
         run: SBCTL_ARTIFACT="$GITHUB_WORKSPACE/sbctl-linux-amd64" sh tests/acceptance/run.sh
 
   package:
-    needs: [build-sbctl, acceptance]
+    needs: [build-sbctl, build-sbtui, acceptance]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: sbctl-*
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sbtui-*
           merge-multiple: true
       - name: Download and verify official sing-box archives
         env:
@@ -97,6 +131,7 @@ jobs:
             gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --title "$RELEASE_TAG" --generate-notes
           gh release upload "$RELEASE_TAG" \
             sbctl-linux-amd64 sbctl-linux-arm64 sing-box-linux-amd64 sing-box-linux-arm64 \
+            sbtui-windows-amd64.exe sbtui-macos-arm64 sbtui-linux-amd64 \
             --repo "$GITHUB_REPOSITORY" --clobber
       - name: Install tooling for manifest signing
         run: |

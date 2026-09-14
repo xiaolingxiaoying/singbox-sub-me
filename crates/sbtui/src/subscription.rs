@@ -1,0 +1,378 @@
+//! Subscription normalization, fetching, and parsing.
+//!
+//! Any sbctl subscription link (any format suffix, QR or index link) is
+//! normalized to the same credential's `sing-box-full.json` URL so the
+//! sing-box core always receives a full client configuration. Plain
+//! sing-box JSON URLs and Base64 URI lists are also accepted.
+
+use anyhow::{Context, Result, bail};
+use base64::Engine;
+use serde::{Deserialize, Serialize};
+
+/// The canonical client profile the TUI manages.
+pub const TARGET_FORMAT: &str = "sing-box-full.json";
+
+/// Rewrites any sbctl subscription URL (any `/sub/<cred>/<suffix>` form,
+/// including `qr/...` and `index`) into the same credential's
+/// `sing-box-full.json` link. Non-`/sub/` URLs are returned unchanged.
+pub fn normalize_url(input: &str) -> String {
+    let trimmed = input.trim();
+    let Some(path_start) = trimmed.find("/sub/") else {
+        return trimmed.to_owned();
+    };
+    let (base, rest) = trimmed.split_at(path_start + "/sub/".len());
+    // rest = "<credential>/<format...>"; drop QR prefixes and any extra
+    // segments, then swap the format suffix.
+    let mut segments = rest.split('/').filter(|s| !s.is_empty());
+    let Some(credential) = segments.next() else {
+        return trimmed.to_owned();
+    };
+    let credential = credential.trim_end_matches('/');
+    format!("{base}{credential}/{TARGET_FORMAT}")
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NodeSummary {
+    pub tag: String,
+    pub protocol: String,
+    pub server: String,
+    pub port: u64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SubscriptionSnapshot {
+    pub nodes: Vec<NodeSummary>,
+    /// Raw sing-box full client configuration JSON text.
+    pub raw: String,
+}
+
+/// Downloads the subscription body with the configured mirror prefix.
+pub async fn fetch(url: &str, mirror: &str) -> Result<String> {
+    let url = apply_mirror(url, mirror);
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("requesting {url}"))?
+        .error_for_status()
+        .with_context(|| format!("subscription endpoint returned an error for {url}"))?;
+    Ok(response.text().await?)
+}
+
+pub fn apply_mirror(url: &str, mirror: &str) -> String {
+    let mirror = mirror.trim().trim_end_matches('/');
+    if mirror.is_empty() || url.starts_with(mirror) {
+        url.to_owned()
+    } else {
+        format!("{mirror}/{url}")
+    }
+}
+
+/// Extracts a node summary from a sing-box outbound object.
+pub fn summarize(outbounds: &[serde_json::Value]) -> Result<SubscriptionSnapshot> {
+    let mut nodes = Vec::new();
+    for outbound in outbounds {
+        let kind = outbound
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if matches!(kind, "selector" | "urltest" | "direct" | "block") {
+            continue;
+        }
+        let tag = outbound
+            .get("tag")
+            .and_then(|v| v.as_str())
+            .context("outbound lacks a tag")?;
+        nodes.push(NodeSummary {
+            tag: tag.to_owned(),
+            protocol: kind.to_owned(),
+            server: outbound
+                .get("server")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            port: outbound
+                .get("server_port")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_default(),
+        });
+    }
+    nodes.sort_by(|a, b| a.tag.cmp(&b.tag));
+    nodes.dedup_by(|a, b| a.tag == b.tag);
+    Ok(SubscriptionSnapshot {
+        nodes,
+        raw: String::new(),
+    })
+}
+
+/// Parses any supported subscription body into a snapshot with its raw
+/// sing-box configuration. URI lists are converted to equivalent outbounds.
+pub fn parse(body: &str) -> Result<SubscriptionSnapshot> {
+    let trimmed = body.trim_start();
+    if trimmed.starts_with('{') {
+        let value: serde_json::Value =
+            serde_json::from_str(trimmed).context("subscription is not valid JSON")?;
+        let outbounds = value
+            .get("outbounds")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .context("sing-box subscription lacks an outbounds array")?;
+        let mut snapshot = summarize(&outbounds)?;
+        snapshot.raw = trimmed.to_owned();
+        return Ok(snapshot);
+    }
+    if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(body.trim()) {
+        let text = String::from_utf8(decoded).context("base64 subscription is not UTF-8")?;
+        if text.contains("://") {
+            return parse_uri_list(&text);
+        }
+    }
+    if body.contains("://") {
+        return parse_uri_list(body);
+    }
+    bail!("subscription body is not a sing-box JSON or URI list")
+}
+
+/// Converts share URIs (vless/vmess/hysteria2/tuic/anytls) into sing-box
+/// outbounds. Only the fields the TUI and the core need are preserved.
+pub fn parse_uri_list(text: &str) -> Result<SubscriptionSnapshot> {
+    let mut outbounds = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(outbound) = parse_uri(line)? {
+            outbounds.push(outbound);
+        }
+    }
+    let mut snapshot = summarize(&outbounds)?;
+    snapshot.raw = serde_json::to_string_pretty(&serde_json::json!({ "outbounds": outbounds }))
+        .expect("JSON values serialize");
+    Ok(snapshot)
+}
+
+fn parse_uri(line: &str) -> Result<Option<serde_json::Value>> {
+    let (scheme, rest) = line.split_once("://").context("URI lacks a scheme")?;
+    let (userinfo, host_part) = match rest.split_once('@') {
+        Some((user, host)) => (user, host),
+        None => ("", rest),
+    };
+    let (host_port, query, fragment) = split_uri_tail(host_part);
+    let host_port = host_port.trim_end_matches('/');
+    let (host, port_str) = host_port.rsplit_once(':').unwrap_or((host_port, ""));
+    let port: u64 = if port_str.is_empty() {
+        443
+    } else {
+        port_str.parse().context("URI port is not a number")?
+    };
+    let params = parse_query(query);
+    let tag = fragment.clone().unwrap_or_else(|| host.to_owned());
+    let insecure = params.get("insecure").map(|v| v == "1" || v == "true");
+    let sni = params.get("sni").cloned();
+
+    let tls = |server_name: Option<String>| {
+        let mut tls = serde_json::json!({ "enabled": true });
+        if let Some(name) = server_name {
+            tls["server_name"] = serde_json::json!(name);
+        }
+        if let Some(true) = insecure {
+            tls["insecure"] = serde_json::json!(true);
+        }
+        tls
+    };
+
+    let outbound = match scheme {
+        "vless" => {
+            let mut value = serde_json::json!({
+                "type": "vless", "tag": tag, "server": host, "server_port": port,
+                "uuid": userinfo, "flow": params.get("flow").cloned().unwrap_or_default(),
+                "tls": tls(sni),
+            });
+            if params
+                .get("security")
+                .map(|s| s == "reality")
+                .unwrap_or(false)
+            {
+                value["tls"]["reality"] = serde_json::json!({
+                    "enabled": true,
+                    "public_key": params.get("pbk").cloned().unwrap_or_default(),
+                    "short_id": params.get("sid").cloned().unwrap_or_default(),
+                });
+                value["tls"]["utls"] = serde_json::json!({
+                    "enabled": true,
+                    "fingerprint": params.get("fp").cloned().unwrap_or_else(|| "chrome".into()),
+                });
+            }
+            value
+        }
+        "vmess" => {
+            // v2rayN base64 JSON link.
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(userinfo)
+                .context("vmess payload is not base64")?;
+            let payload: serde_json::Value =
+                serde_json::from_slice(&decoded).context("vmess payload is not JSON")?;
+            let mut value = serde_json::json!({
+                "type": "vmess", "tag": tag, "server": host, "server_port": port,
+                "uuid": payload.get("id").cloned().unwrap_or_default(),
+                "security": payload.get("scy").cloned().unwrap_or_else(|| "auto".into()),
+                "alter_id": payload.get("aid").and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok())).unwrap_or(0),
+                "tls": tls(payload.get("sni").and_then(|v| v.as_str()).map(str::to_owned)),
+            });
+            if payload.get("net").and_then(|v| v.as_str()) == Some("ws") {
+                let mut transport = serde_json::json!({ "type": "ws" });
+                if let Some(path) = payload.get("path").and_then(|v| v.as_str()) {
+                    transport["path"] = serde_json::json!(path);
+                }
+                value["transport"] = transport;
+            }
+            value
+        }
+        "hysteria2" | "hy2" => serde_json::json!({
+            "type": "hysteria2", "tag": tag, "server": host, "server_port": port,
+            "password": percent_decode(userinfo),
+            "tls": { "enabled": true, "server_name": sni, "alpn": ["h3"],
+                "insecure": insecure.unwrap_or(false) }
+        }),
+        "tuic" => {
+            let (uuid, password) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+            serde_json::json!({
+                "type": "tuic", "tag": tag, "server": host, "server_port": port,
+                "uuid": uuid, "password": password,
+                "congestion_control": params.get("congestion_control").cloned().unwrap_or_else(|| "bbr".into()),
+                "udp_relay_mode": params.get("udp_relay_mode").cloned().unwrap_or_else(|| "native".into()),
+                "tls": { "enabled": true, "server_name": sni, "alpn": ["h3"],
+                    "insecure": insecure.unwrap_or(false) }
+            })
+        }
+        "anytls" => serde_json::json!({
+            "type": "anytls", "tag": tag, "server": host, "server_port": port,
+            "password": percent_decode(userinfo),
+            "tls": { "enabled": true, "server_name": sni, "insecure": insecure.unwrap_or(false) }
+        }),
+        "ss" | "trojan" | "ssr" => {
+            // Not a Managed protocol; skip quietly so a mixed list still loads.
+            return Ok(None);
+        }
+        other => bail!("unsupported URI scheme: {other}"),
+    };
+    Ok(Some(outbound))
+}
+
+fn split_uri_tail(rest: &str) -> (&str, &str, Option<String>) {
+    let (host_query, fragment) = match rest.split_once('#') {
+        Some((left, right)) => (left, Some(percent_decode(right))),
+        None => (rest, None),
+    };
+    let (host_port, query) = match host_query.split_once('?') {
+        Some((left, right)) => (left, right),
+        None => (host_query, ""),
+    };
+    (host_port, query, fragment)
+}
+
+fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        map.entry(percent_decode(key))
+            .or_insert_with(|| percent_decode(value));
+    }
+    map
+}
+
+/// Percent-decodes a URI component; invalid escapes pass through unchanged.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or("");
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_every_sbctl_suffix_to_the_full_profile() {
+        let base = "https://sub.example.test/sub";
+        for suffix in [
+            "sing-box.json",
+            "clash.yaml",
+            "clash-1.18.yaml",
+            "uri",
+            "uri.txt",
+            "shadowrocket.txt",
+            "sing-box-1.12.json",
+            "qr/uri",
+            "index",
+        ] {
+            assert_eq!(
+                normalize_url(&format!("{base}/cred-abc/{suffix}")),
+                format!("{base}/cred-abc/{TARGET_FORMAT}"),
+                "suffix {suffix} should normalize"
+            );
+        }
+        assert_eq!(
+            normalize_url("https://other/sub/xyz"),
+            format!("https://other/sub/xyz/{TARGET_FORMAT}"),
+        );
+    }
+
+    #[test]
+    fn parses_a_base64_uri_list_with_all_five_protocols() {
+        let uris = [
+            "vless://uuid-x@example.com:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.cloudflare.com&fp=chrome&pbk=pub-key&sid=abcd&type=tcp#vless-node",
+            "hysteria2://pass%40word@example.com:8443?insecure=1&sni=www.bing.com#hy2-node",
+            "tuic://uuid-y:pass@example.com:8443?congestion_control=bbr&udp_relay_mode=native&alpn=h3&insecure=0&sni=www.bing.com#tuic-node",
+            "anytls://pass@example.com:443/?insecure=0&sni=www.bing.com#anytls-node",
+        ]
+        .join("\n");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&uris);
+        let snapshot = parse(&encoded).expect("base64 URI list parses");
+        assert_eq!(snapshot.nodes.len(), 4);
+        let mut protocols: Vec<&str> = snapshot.nodes.iter().map(|n| n.protocol.as_str()).collect();
+        protocols.sort();
+        assert_eq!(protocols, vec!["anytls", "hysteria2", "tuic", "vless"]);
+        // The converted outbounds must be a runnable sing-box config skeleton.
+        let value: serde_json::Value = serde_json::from_str(&snapshot.raw).expect("raw is JSON");
+        assert_eq!(value["outbounds"].as_array().map(Vec::len), Some(4));
+    }
+
+    #[test]
+    fn parses_a_sing_box_full_profile_and_skips_groups() {
+        let body = serde_json::json!({
+            "outbounds": [
+                {"type": "selector", "tag": "🚀节点选择", "outbounds": ["a"]},
+                {"type": "vless", "tag": "a", "server": "1.2.3.4", "server_port": 443, "uuid": "u"},
+                {"type": "direct", "tag": "direct"}
+            ]
+        })
+        .to_string();
+        let snapshot = parse(&body).expect("full profile parses");
+        assert_eq!(snapshot.nodes.len(), 1);
+        assert_eq!(snapshot.nodes[0].tag, "a");
+    }
+
+    #[test]
+    fn percent_decode_handles_escapes_and_passes_through_garbage() {
+        assert_eq!(percent_decode("pass%40word"), "pass@word");
+        assert_eq!(percent_decode("plain"), "plain");
+        assert_eq!(percent_decode("bad%2"), "bad%2");
+    }
+}
