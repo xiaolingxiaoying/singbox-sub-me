@@ -285,8 +285,13 @@ enum OverrideCommand {
         #[arg(long, value_name = "PATH")]
         sing_box_bin: Option<PathBuf>,
     },
-    /// Validate the override templates without applying them.
-    Validate,
+    /// Validate the override templates and run the merged sing-box profile
+    /// through a real `sing-box check` when a core is available.
+    Validate {
+        /// sing-box binary used to validate the merged client profile.
+        #[arg(long, value_name = "PATH")]
+        sing_box_bin: Option<PathBuf>,
+    },
     /// Delete both override templates and regenerate the artifacts.
     Clear,
 }
@@ -2264,28 +2269,50 @@ fn run_config_override(root: &Path, command: OverrideCommand) -> ExitCode {
             );
             ExitCode::SUCCESS
         }
-        OverrideCommand::Validate => match sbctl::override_template::Overrides::load(root) {
-            Ok(overrides) => {
-                println!(
-                    "override 模板有效（sing-box: {}，clash: {}）",
-                    if overrides.sing_box.is_some() {
-                        "已配置"
-                    } else {
-                        "无"
-                    },
-                    if overrides.clash.is_some() {
-                        "已配置"
-                    } else {
-                        "无"
-                    }
-                );
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
+        OverrideCommand::Validate { sing_box_bin } => {
+            if let Err(error) = sbctl::override_template::Overrides::load(root) {
                 eprintln!("override 校验失败：{error}");
-                ExitCode::from(2)
+                return ExitCode::from(2);
             }
-        },
+            let store = sbctl::config::DeploymentStore::new(root);
+            let Ok(config) = store.load() else {
+                println!("override 模板结构有效（部署尚未初始化，跳过合并后真核 check）。");
+                return ExitCode::SUCCESS;
+            };
+            let artifacts = match sbctl::subscription::generated_artifacts(&config, root) {
+                Ok(artifacts) => artifacts,
+                Err(error) => {
+                    eprintln!("override 合并失败：{error}");
+                    return ExitCode::from(2);
+                }
+            };
+            let Some(binary) = resolve_sing_box_bin(root, sing_box_bin) else {
+                println!(
+                    "override 模板结构有效；未找到 sing-box 内核（用 --sing-box-bin 指定），跳过合并后真核 check。"
+                );
+                return ExitCode::SUCCESS;
+            };
+            let name = sbctl::subscription::SubscriptionFormat::SingBoxFull
+                .artifact_name()
+                .into_owned();
+            let Some((_, merged)) = artifacts.iter().find(|(artifact, _)| *artifact == name) else {
+                eprintln!("override 校验失败：缺少 sing-box-full 工件");
+                return ExitCode::from(2);
+            };
+            match sbctl::subscription::check_sing_box_config(&binary, merged) {
+                Ok(()) => {
+                    println!(
+                        "override 模板有效；合并后 sing-box 配置已通过真核 check（{}）。",
+                        binary.display()
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("override 合并后 sing-box check 失败：{error}");
+                    ExitCode::from(2)
+                }
+            }
+        }
         OverrideCommand::Edit {
             target,
             sing_box_bin,
@@ -2354,6 +2381,30 @@ fn run_config_override(root: &Path, command: OverrideCommand) -> ExitCode {
             regenerate(root, None)
         }
     }
+}
+
+/// Resolves the sing-box binary for an override validation: an explicit path,
+/// the managed installation path, or a `sing-box` available on `PATH`.
+fn resolve_sing_box_bin(root: &Path, explicit: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(binary) = explicit {
+        return Some(binary);
+    }
+    let managed = root.join("usr/local/bin/sing-box");
+    if managed.is_file() {
+        return Some(managed);
+    }
+    let on_path = PathBuf::from(if cfg!(windows) {
+        "sing-box.exe"
+    } else {
+        "sing-box"
+    });
+    std::process::Command::new(&on_path)
+        .arg("version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()
+        .map(|_| on_path)
 }
 
 fn regenerate(root: &Path, sing_box_bin: Option<PathBuf>) -> ExitCode {

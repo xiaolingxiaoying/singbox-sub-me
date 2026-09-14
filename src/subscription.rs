@@ -2285,6 +2285,90 @@ mod tests {
     }
 
     #[test]
+    fn client_overrides_merge_into_full_profiles_but_never_the_bare_artifact() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let (_store, config, _) = seed_direct_subscription(&fixture);
+        let overrides = fixture.path().join("etc/sbctl/overrides");
+        fs::create_dir_all(&overrides).expect("override directory is created");
+        fs::write(
+            overrides.join("sing-box-override.json"),
+            r#"{"route":{"rules":[{"domain_suffix":["novixlink"],"outbound":"🚀节点选择"}]}}"#,
+        )
+        .expect("sing-box override is written");
+        fs::write(
+            overrides.join("clash-override.yaml"),
+            "rules:\n  - DOMAIN-SUFFIX,novixlink,🚀选择代理节点\n",
+        )
+        .expect("clash override is written");
+        let artifacts = generated_artifacts(&config, fixture.path())
+            .expect("artifacts generate with overrides");
+        let get = |name: &str| {
+            artifacts
+                .iter()
+                .find(|(artifact, _)| artifact == name)
+                .map(|(_, contents)| contents.clone())
+                .unwrap_or_else(|| panic!("missing artifact {name}"))
+        };
+
+        let full: serde_json::Value =
+            serde_json::from_str(&get("subscription-sing-box-full.json")).expect("full is JSON");
+        assert_eq!(
+            full["route"]["rules"][0]["domain_suffix"][0], "novixlink",
+            "the override rule must be prepended to the generated route rules"
+        );
+        let versioned: serde_json::Value =
+            serde_json::from_str(&get("subscription-sing-box-1.12.json"))
+                .expect("versioned profile is JSON");
+        assert_eq!(
+            versioned["route"]["rules"][0]["domain_suffix"][0],
+            "novixlink"
+        );
+
+        let bare: serde_json::Value =
+            serde_json::from_str(&get("subscription-sing-box.json")).expect("bare is JSON");
+        assert!(
+            bare.get("route").is_none(),
+            "the historical bare artifact must never gain override fields"
+        );
+
+        for name in ["subscription-clash.yaml", "subscription-clash-1.18.yaml"] {
+            let clash: serde_yaml::Value =
+                serde_yaml::from_str(&get(name)).expect("clash artifact is YAML");
+            let rules = clash["rules"].as_sequence().expect("clash has rules");
+            assert!(
+                rules[0]
+                    .as_str()
+                    .expect("the first rule is a string")
+                    .contains("novixlink"),
+                "{name} must prepend the override rule"
+            );
+        }
+    }
+
+    #[test]
+    fn an_invalid_override_aborts_regeneration_and_preserves_the_previous_artifacts() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let (store, config, _) = seed_direct_subscription(&fixture);
+        regenerate(&store, &config, None, false).expect("baseline artifacts regenerate");
+        let baseline = artifact(&store, "subscription-sing-box-full.json");
+        let overrides = fixture.path().join("etc/sbctl/overrides");
+        fs::create_dir_all(&overrides).expect("override directory is created");
+        fs::write(overrides.join("sing-box-override.json"), "{ not valid json")
+            .expect("invalid override is written");
+
+        let error = regenerate(&store, &config, None, false).expect_err("invalid override aborts");
+        assert!(
+            matches!(error, super::SubscriptionError::Override(_)),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            artifact(&store, "subscription-sing-box-full.json"),
+            baseline,
+            "a rejected override must not touch the served artifacts"
+        );
+    }
+
+    #[test]
     fn no_domain_ip_fallback_artifacts_use_the_fake_protocol_sni_and_insecure_tls() {
         let config = DeploymentConfig::new_with_ports(
             SubscriptionMode::IpFallback,

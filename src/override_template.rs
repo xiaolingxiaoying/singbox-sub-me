@@ -196,6 +196,42 @@ mod tests {
     }
 
     #[test]
+    fn missing_files_are_empty_and_malformed_documents_are_rejected() {
+        use std::fs;
+
+        let directory = tempfile::tempdir().expect("temporary root is created");
+        let root = directory.path();
+        let empty = Overrides::load(root).expect("missing override files load as empty");
+        assert!(empty.sing_box.is_none() && empty.clash.is_none());
+
+        fs::create_dir_all(root.join("etc/sbctl/overrides"))
+            .expect("override directory is created");
+        let sing_box = root.join(SING_BOX_OVERRIDE_RELATIVE_PATH);
+        fs::write(&sing_box, "{ not json").expect("malformed JSON is written");
+        assert!(matches!(
+            Overrides::load(root),
+            Err(OverrideError::Json { .. })
+        ));
+
+        fs::write(&sing_box, "[]").expect("non-mapping JSON is written");
+        assert!(matches!(
+            Overrides::load(root),
+            Err(OverrideError::NotMapping { .. })
+        ));
+
+        fs::remove_file(&sing_box).expect("JSON override is removed");
+        fs::write(
+            root.join(CLASH_OVERRIDE_RELATIVE_PATH),
+            "- just\n- a\n- list\n",
+        )
+        .expect("non-mapping YAML is written");
+        assert!(matches!(
+            Overrides::load(root),
+            Err(OverrideError::NotMapping { .. })
+        ));
+    }
+
+    #[test]
     fn yaml_rules_are_prepended() {
         let mut base = serde_yaml::from_str("rules:\n  - generated\n").expect("yaml");
         let overlay = serde_yaml::from_str("rules:\n  - override\n").expect("yaml");
