@@ -165,7 +165,6 @@ async fn extract_zip_core(bytes: &[u8], target_dir: &Path, binary_name: &str) ->
     let mut archive =
         zip::ZipArchive::new(cursor).context("the core archive is not a readable zip")?;
     let mut extracted = false;
-    let mut extracted_wintun = false;
     for index in 0..archive.len() {
         let mut file = archive.by_index(index)?;
         let name = file.name().to_owned();
@@ -185,17 +184,10 @@ async fn extract_zip_core(bytes: &[u8], target_dir: &Path, binary_name: &str) ->
         if is_binary {
             mark_executable(&destination).await;
             extracted = true;
-        } else {
-            extracted_wintun = true;
         }
     }
     if !extracted {
         bail!("the core archive does not contain {binary_name}");
-    }
-    // TUN mode on Windows needs the wintun driver that ships beside the core;
-    // report the missing driver here instead of failing at TUN startup.
-    if cfg!(windows) && !extracted_wintun {
-        bail!("the core archive does not contain wintun.dll");
     }
     Ok(())
 }
@@ -300,6 +292,28 @@ pub fn adapt_inbounds(config_text: &str, mode: crate::system_proxy::TrafficMode)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_zip_without_wintun_still_extracts_the_core() {
+        use std::io::Write;
+
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut archive = zip::ZipWriter::new(cursor);
+        archive
+            .start_file("sing-box.exe", zip::write::SimpleFileOptions::default())
+            .expect("start core entry");
+        archive.write_all(b"test core").expect("write core entry");
+        let bytes = archive.finish().expect("finish archive").into_inner();
+        let target_dir = tempfile::tempdir().expect("temporary core directory");
+
+        extract_zip_core(&bytes, target_dir.path(), "sing-box.exe")
+            .await
+            .expect("a system-proxy core download must not require wintun.dll");
+
+        assert!(target_dir.path().join("sing-box.exe").is_file());
+        assert!(!target_dir.path().join("wintun.dll").exists());
+    }
 
     #[test]
     fn adapt_inbounds_switches_between_mixed_and_tun() {

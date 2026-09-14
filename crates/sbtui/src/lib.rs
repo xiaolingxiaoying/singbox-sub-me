@@ -544,7 +544,7 @@ async fn start_core(app: &mut App) -> Result<()> {
         }
         if cfg!(windows) && !settings::wintun_path(&app.dir).is_file() {
             anyhow::bail!(
-                "TUN 模式需要 wintun.dll：请在「设置」按 d 重新下载内核，或手动放入 {}",
+                "TUN 模式需要 wintun.dll：请将该文件放入 {}",
                 settings::wintun_path(&app.dir).display()
             );
         }
@@ -1121,7 +1121,7 @@ fn toggle_mode(app: &mut App) {
         && cfg!(windows)
         && !settings::wintun_path(&app.dir).is_file()
     {
-        "；⚠ 缺少 wintun.dll，请先在设置页按 d 重新下载内核"
+        "；⚠ 缺少 wintun.dll，请将该文件放入客户端 core 目录"
     } else {
         ""
     };
