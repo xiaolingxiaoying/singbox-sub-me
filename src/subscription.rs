@@ -2078,8 +2078,8 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::{
-        clash, clash_legacy, generated_artifacts, latest_version_profile, regenerate, shadowrocket,
-        sing_box, sing_box_full, uri,
+        SING_BOX_VERSION_PROFILES, SubscriptionFormat, clash, clash_legacy, generated_artifacts,
+        latest_version_profile, regenerate, shadowrocket, sing_box, sing_box_full, uri,
     };
     use crate::config::{
         DeploymentConfig, DeploymentStore, ManagedProtocol, ProtocolPorts, SubscriptionMode,
@@ -2366,6 +2366,95 @@ mod tests {
             baseline,
             "a rejected override must not touch the served artifacts"
         );
+    }
+
+    #[test]
+    fn minimal_rule_profile_drops_remote_rule_sets_while_standard_keeps_them() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let (_store, mut config, _) = seed_direct_subscription(&fixture);
+        let full = |config: &DeploymentConfig| {
+            let artifacts =
+                generated_artifacts(config, fixture.path()).expect("artifacts generate");
+            let contents = artifacts
+                .iter()
+                .find(|(name, _)| name == "subscription-sing-box-full.json")
+                .map(|(_, contents)| contents.clone())
+                .expect("full artifact exists");
+            serde_json::from_str::<serde_json::Value>(&contents).expect("full artifact is JSON")
+        };
+
+        config.client_rule_profile = crate::config::ClientRuleProfile::Standard;
+        let standard = full(&config);
+        assert!(
+            standard["route"]["rule_set"]
+                .as_array()
+                .expect("rule_set is an array")
+                .iter()
+                .any(|rule| rule["tag"] == "geosite-cn"),
+            "standard must reference remote rule-sets"
+        );
+        assert!(
+            standard["route"]["rules"]
+                .as_array()
+                .expect("rules is an array")
+                .iter()
+                .any(|rule| rule.get("rule_set").is_some()),
+            "standard must route through rule_set"
+        );
+
+        config.client_rule_profile = crate::config::ClientRuleProfile::Minimal;
+        let minimal = full(&config);
+        assert!(
+            minimal["route"]["rule_set"]
+                .as_array()
+                .expect("rule_set is an array")
+                .is_empty(),
+            "minimal must not reference remote rule-sets"
+        );
+        for rule in minimal["route"]["rules"]
+            .as_array()
+            .expect("rules is an array")
+        {
+            assert!(
+                rule.get("rule_set").is_none(),
+                "minimal rules stay built-in"
+            );
+        }
+        for rule in minimal["dns"]["rules"]
+            .as_array()
+            .expect("dns rules is an array")
+        {
+            assert!(
+                rule.get("rule_set").is_none(),
+                "minimal DNS rules stay built-in"
+            );
+        }
+    }
+
+    #[test]
+    fn version_profiles_only_carry_store_dns_where_the_changelog_allows_it() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let (_store, config, _) = seed_direct_subscription(&fixture);
+        let artifacts = generated_artifacts(&config, fixture.path()).expect("artifacts generate");
+        for profile in SING_BOX_VERSION_PROFILES {
+            let name = SubscriptionFormat::SingBoxVersion(profile.version)
+                .artifact_name()
+                .into_owned();
+            let contents = artifacts
+                .iter()
+                .find(|(artifact, _)| *artifact == name)
+                .map(|(_, contents)| contents)
+                .unwrap_or_else(|| panic!("missing profile artifact {name}"));
+            let value: serde_json::Value = serde_json::from_str(contents).expect("profile is JSON");
+            let has_store_dns = value["experimental"]["cache_file"]
+                .get("store_dns")
+                .is_some();
+            assert_eq!(
+                has_store_dns, profile.supports_store_dns,
+                "store_dns mismatch for {}",
+                profile.version
+            );
+        }
     }
 
     #[test]

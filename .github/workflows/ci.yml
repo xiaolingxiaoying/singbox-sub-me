@@ -43,3 +43,27 @@ jobs:
           components: rustfmt, clippy
       - run: cargo clippy -p sbtui --all-targets -- -D warnings
       - run: cargo test -p sbtui
+
+  sing-box-profiles:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Download pinned sing-box cores
+        run: |
+          set -euo pipefail
+          for version in 1.12.25 1.13.21 1.14.0; do
+            directory="sing-box-$version"
+            mkdir -p "$directory"
+            curl -fsSL --retry 3 -o "$directory/archive.tar.gz" \
+              "https://github.com/SagerNet/sing-box/releases/download/v$version/sing-box-$version-linux-amd64.tar.gz"
+            tar -xzf "$directory/archive.tar.gz" -C "$directory" --strip-components=1
+          done
+      - name: Validate every generated profile with its real core
+        env:
+          SING_BOX_BIN_1_12: ${{ github.workspace }}/sing-box-1.12.25/sing-box
+          SING_BOX_BIN_1_13: ${{ github.workspace }}/sing-box-1.13.21/sing-box
+          SING_BOX_BIN_1_14: ${{ github.workspace }}/sing-box-1.14.0/sing-box
+        run: cargo test --test version_profiles -- --ignored --nocapture
