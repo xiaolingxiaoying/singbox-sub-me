@@ -46,8 +46,68 @@ pub struct SubscriptionSnapshot {
     pub raw: String,
 }
 
+/// The `subscription-userinfo` metadata the server attaches to every format.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SubscriptionUserinfo {
+    pub upload: u64,
+    pub download: u64,
+    pub total: u64,
+    pub expire: Option<u64>,
+}
+
+impl SubscriptionUserinfo {
+    pub fn used(&self) -> u64 {
+        self.upload.saturating_add(self.download)
+    }
+
+    pub fn remaining(&self) -> Option<u64> {
+        (self.total > 0).then(|| self.total.saturating_sub(self.used()))
+    }
+}
+
+/// A fetched subscription body plus its traffic metadata.
+pub struct Fetched {
+    pub body: String,
+    pub userinfo: Option<SubscriptionUserinfo>,
+}
+
+/// Parses a `subscription-userinfo` header
+/// (`upload=…; download=…; total=…; expire=…`). Returns `None` when no known
+/// field is present so an unrelated header never shows bogus zeros.
+pub fn parse_userinfo(header: &str) -> Option<SubscriptionUserinfo> {
+    let mut info = SubscriptionUserinfo::default();
+    let mut any = false;
+    for pair in header.split(';') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        match key.trim() {
+            "upload" => {
+                info.upload = value.parse().unwrap_or(0);
+                any = true;
+            }
+            "download" => {
+                info.download = value.parse().unwrap_or(0);
+                any = true;
+            }
+            "total" => {
+                info.total = value.parse().unwrap_or(0);
+                any = true;
+            }
+            "expire" => {
+                if let Ok(seconds) = value.parse::<u64>() {
+                    info.expire = (seconds > 0).then_some(seconds);
+                }
+            }
+            _ => {}
+        }
+    }
+    any.then_some(info)
+}
+
 /// Downloads the subscription body with the configured mirror prefix.
-pub async fn fetch(url: &str, mirror: &str) -> Result<String> {
+pub async fn fetch(url: &str, mirror: &str) -> Result<Fetched> {
     let url = apply_mirror(url, mirror);
     let response = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -58,7 +118,13 @@ pub async fn fetch(url: &str, mirror: &str) -> Result<String> {
         .with_context(|| format!("requesting {url}"))?
         .error_for_status()
         .with_context(|| format!("subscription endpoint returned an error for {url}"))?;
-    Ok(response.text().await?)
+    let userinfo = response
+        .headers()
+        .get("subscription-userinfo")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_userinfo);
+    let body = response.text().await?;
+    Ok(Fetched { body, userinfo })
 }
 
 pub fn apply_mirror(url: &str, mirror: &str) -> String {
@@ -374,5 +440,30 @@ mod tests {
         assert_eq!(percent_decode("pass%40word"), "pass@word");
         assert_eq!(percent_decode("plain"), "plain");
         assert_eq!(percent_decode("bad%2"), "bad%2");
+    }
+
+    #[test]
+    fn parses_subscription_userinfo_headers() {
+        let info = parse_userinfo("upload=71; download=36; total=10737418240; expire=1790000000")
+            .expect("known fields parse");
+        assert_eq!(info.upload, 71);
+        assert_eq!(info.download, 36);
+        assert_eq!(info.total, 10 * 1024 * 1024 * 1024);
+        assert_eq!(info.used(), 107);
+        assert_eq!(info.remaining(), Some(info.total - 107));
+        assert_eq!(info.expire, Some(1_790_000_000));
+        // An empty expire or an unrelated header yields no bogus values.
+        assert_eq!(
+            parse_userinfo("upload=0; download=0; total=0; expire=").map(|i| i.expire),
+            Some(None)
+        );
+        assert_eq!(parse_userinfo("noop"), None);
+    }
+
+    #[test]
+    fn userinfo_without_a_quota_reports_no_remaining() {
+        let info = parse_userinfo("upload=5; download=5; total=0; expire=0").expect("parses");
+        assert_eq!(info.remaining(), None);
+        assert_eq!(info.expire, None);
     }
 }

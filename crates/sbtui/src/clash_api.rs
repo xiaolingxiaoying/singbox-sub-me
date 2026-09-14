@@ -17,6 +17,8 @@ pub struct ClashApi {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct ProxyGroup {
+    /// The map key supplies the name, so the entry itself has no `name` field.
+    #[serde(default)]
     pub name: String,
     #[serde(rename = "type")]
     pub kind: String,
@@ -30,6 +32,7 @@ pub struct ProxyGroup {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct ProxyNode {
+    #[serde(default)]
     pub name: String,
     #[serde(rename = "type")]
     pub kind: String,
@@ -76,9 +79,9 @@ pub struct ConnectionMetadata {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct ConnectionsSnapshot {
-    #[serde(default)]
+    #[serde(default, rename = "uploadTotal")]
     pub upload_total: u64,
-    #[serde(default)]
+    #[serde(default, rename = "downloadTotal")]
     pub download_total: u64,
     #[serde(default)]
     pub connections: Vec<Connection>,
@@ -281,6 +284,69 @@ impl ClashApi {
             .context("closing the connection")?;
         Ok(())
     }
+
+    /// Reads the first sample from the streaming `/traffic` endpoint. The
+    /// endpoint never closes, so only the first complete `{up,down}` object is
+    /// read (bounded by a short deadline) instead of awaiting the whole body.
+    pub async fn traffic(&self) -> Result<TrafficSample> {
+        let mut response = self
+            .client
+            .get(format!("{}/traffic", self.base))
+            .send()
+            .await?
+            .error_for_status()
+            .context("clash_api traffic request failed")?;
+        let mut buffer: Vec<u8> = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1500);
+        loop {
+            match tokio::time::timeout_at(deadline, response.chunk()).await {
+                Ok(Ok(Some(chunk))) => {
+                    buffer.extend_from_slice(&chunk);
+                    if let Some(sample) = first_traffic_sample(&buffer) {
+                        return Ok(sample);
+                    }
+                }
+                Ok(Ok(None)) => break,
+                Ok(Err(error)) => return Err(error).context("reading the traffic stream"),
+                Err(_) => break,
+            }
+        }
+        first_traffic_sample(&buffer).context("the traffic stream produced no complete sample")
+    }
+}
+
+/// One `{"up":N,"down":M}` sample from the `/traffic` stream.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TrafficSample {
+    pub up: u64,
+    pub down: u64,
+}
+
+/// Extracts the first complete JSON object from a partial stream and reads its
+/// `up`/`down` fields. Tolerates leading whitespace and concatenated samples.
+fn first_traffic_sample(buffer: &[u8]) -> Option<TrafficSample> {
+    let text = std::str::from_utf8(buffer).ok()?;
+    let start = text.find('{')?;
+    let mut depth = 0usize;
+    let mut end = None;
+    for (offset, ch) in text[start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(start + offset + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let value: serde_json::Value = serde_json::from_str(&text[start..end?]).ok()?;
+    Some(TrafficSample {
+        up: value.get("up").and_then(|v| v.as_u64()).unwrap_or(0),
+        down: value.get("down").and_then(|v| v.as_u64()).unwrap_or(0),
+    })
 }
 
 fn urlencoded(value: &str) -> String {
@@ -294,4 +360,145 @@ fn urlencoded(value: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// A minimal one-request-per-connection HTTP server for the clash_api
+    /// client tests. Routes are `(method, path, body)`; a path also matches its
+    /// `?query` form so the delay endpoint works.
+    async fn spawn_server(routes: Vec<(&'static str, &'static str, &'static str)>) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock server binds");
+        let port = listener.local_addr().expect("address").port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let routes = routes.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 8192];
+                    let read = stream.read(&mut buffer).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+                    let request_line = request.lines().next().unwrap_or("");
+                    let mut parts = request_line.split_whitespace();
+                    let method = parts.next().unwrap_or("");
+                    let path = parts.next().unwrap_or("");
+                    let matched = routes.iter().find(|(route_method, route_path, _)| {
+                        *route_method == method
+                            && (path == *route_path || path.starts_with(&format!("{route_path}?")))
+                    });
+                    let (status, body) = match matched {
+                        Some((_, _, body)) => ("200 OK", *body),
+                        None => ("404 Not Found", ""),
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.flush().await;
+                });
+            }
+        });
+        port
+    }
+
+    fn api(port: u16) -> ClashApi {
+        ClashApi::new(&format!("http://127.0.0.1:{port}"))
+    }
+
+    #[tokio::test]
+    async fn proxies_separates_selector_groups_from_nodes() {
+        let body = r#"{"proxies":{
+            "🚀节点选择":{"type":"Selector","now":"node-a","all":["node-a","node-b"],"history":[]},
+            "node-a":{"type":"vless","history":[{"time":"t","delay":120}]},
+            "node-b":{"type":"hysteria2","history":[]}
+        }}"#;
+        let port = spawn_server(vec![("GET", "/proxies", body)]).await;
+        let (groups, nodes) = api(port).proxies().await.expect("proxies");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].name, "🚀节点选择");
+        assert_eq!(groups[0].now, "node-a");
+        assert_eq!(groups[0].all, vec!["node-a", "node-b"]);
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].name, "node-a");
+        assert_eq!(nodes[1].kind, "hysteria2");
+    }
+
+    #[tokio::test]
+    async fn mode_round_trips_and_delay_reads_the_milliseconds() {
+        let port = spawn_server(vec![
+            ("GET", "/configs", r#"{"mode":"global"}"#),
+            ("PATCH", "/configs", "{}"),
+            ("GET", "/proxies/node-a/delay", r#"{"delay":187}"#),
+        ])
+        .await;
+        let api = api(port);
+        assert_eq!(api.mode().await.expect("mode"), OutboundMode::Global);
+        api.set_mode(OutboundMode::Direct).await.expect("set mode");
+        assert_eq!(api.delay("node-a").await.expect("delay"), 187);
+    }
+
+    #[tokio::test]
+    async fn traffic_reads_one_sample_from_the_streamed_endpoint() {
+        let port = spawn_server(vec![(
+            "GET",
+            "/traffic",
+            r#"{"up":10,"down":20}{"up":30,"down":40}"#,
+        )])
+        .await;
+        let sample = api(port).traffic().await.expect("traffic");
+        assert_eq!(sample, TrafficSample { up: 10, down: 20 });
+    }
+
+    #[tokio::test]
+    async fn connections_and_close_use_the_connections_endpoint() {
+        let body = r#"{"uploadTotal":5,"downloadTotal":7,"connections":[
+            {"id":"conn-1","upload":1,"download":2,"start":"t",
+             "metadata":{"network":"tcp","host":"example.com","destinationIP":"1.2.3.4","destinationPort":"443"}}
+        ]}"#;
+        let port = spawn_server(vec![
+            ("GET", "/connections", body),
+            ("DELETE", "/connections/conn-1", "{}"),
+        ])
+        .await;
+        let api = api(port);
+        let snapshot = api.connections().await.expect("connections");
+        assert_eq!(snapshot.upload_total, 5);
+        assert_eq!(snapshot.connections.len(), 1);
+        assert_eq!(
+            snapshot.connections[0].metadata.destination_host,
+            "example.com"
+        );
+        api.close_connection("conn-1").await.expect("close");
+    }
+
+    #[test]
+    fn first_traffic_sample_reads_one_object_from_a_partial_stream() {
+        assert_eq!(
+            first_traffic_sample(br#"{"up":10,"down":20}"#),
+            Some(TrafficSample { up: 10, down: 20 })
+        );
+        // A second, incomplete object must be ignored.
+        assert_eq!(
+            first_traffic_sample(br#"{"up":1,"down":2}{"up":3,"down":"#),
+            Some(TrafficSample { up: 1, down: 2 })
+        );
+        assert_eq!(first_traffic_sample(b""), None);
+        assert_eq!(first_traffic_sample(br#"{"up":"#,), None);
+    }
+
+    #[test]
+    fn outbound_modes_cycle_and_map_to_wire_names() {
+        assert_eq!(OutboundMode::Rule.next(), OutboundMode::Global);
+        assert_eq!(OutboundMode::Direct.next(), OutboundMode::Rule);
+        assert_eq!(OutboundMode::Global.as_str(), "global");
+    }
 }

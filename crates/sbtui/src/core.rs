@@ -69,6 +69,13 @@ pub async fn start(core: &Path, config: &Path, log_path: &Path) -> Result<CoreHa
     Ok(CoreHandle { child })
 }
 
+/// Exponential backoff for automatic core restarts after a crash: 2s, 4s,
+/// 8s, 16s, then capped at 30s so a persistently failing core never spins.
+pub fn restart_backoff(attempt: u32) -> std::time::Duration {
+    let seconds = 2u64.saturating_pow((attempt + 1).min(5)).min(30);
+    std::time::Duration::from_secs(seconds)
+}
+
 /// Downloads the sing-box release for the current platform into the data
 /// directory and verifies the zip digest when the checksum asset resolves.
 pub async fn download_core(target_dir: &Path, version: &str, mirror: &str) -> Result<PathBuf> {
@@ -106,6 +113,7 @@ pub async fn download_core(target_dir: &Path, version: &str, mirror: &str) -> Re
         "sing-box"
     };
     let mut extracted = false;
+    let mut extracted_wintun = false;
     for index in 0..archive.len() {
         let mut file = archive.by_index(index)?;
         let name = file.name().to_owned();
@@ -113,13 +121,18 @@ pub async fn download_core(target_dir: &Path, version: &str, mirror: &str) -> Re
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("");
-        if file_name == binary_name {
-            let destination = target_dir.join(binary_name);
-            // The zip reader is synchronous; buffer the file then write it
-            // through tokio so the async runtime is never blocked mid-copy.
-            let mut buffered = Vec::with_capacity(file.size() as usize);
-            std::io::Read::read_to_end(&mut file, &mut buffered)?;
-            tokio::fs::write(&destination, buffered).await?;
+        let is_binary = file_name == binary_name;
+        let is_wintun = cfg!(windows) && file_name.eq_ignore_ascii_case("wintun.dll");
+        if !is_binary && !is_wintun {
+            continue;
+        }
+        let destination = target_dir.join(file_name);
+        // The zip reader is synchronous; buffer the file then write it
+        // through tokio so the async runtime is never blocked mid-copy.
+        let mut buffered = Vec::with_capacity(file.size() as usize);
+        std::io::Read::read_to_end(&mut file, &mut buffered)?;
+        tokio::fs::write(&destination, buffered).await?;
+        if is_binary {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -127,11 +140,17 @@ pub async fn download_core(target_dir: &Path, version: &str, mirror: &str) -> Re
                     .await?;
             }
             extracted = true;
-            break;
+        } else {
+            extracted_wintun = true;
         }
     }
     if !extracted {
         bail!("the core archive does not contain {binary_name}");
+    }
+    // TUN mode on Windows needs the wintun driver that ships beside the core;
+    // report the missing driver here instead of failing at TUN startup.
+    if cfg!(windows) && !extracted_wintun {
+        bail!("the core archive does not contain wintun.dll");
     }
     Ok(target_dir.join(binary_name))
 }
@@ -251,5 +270,16 @@ mod tests {
         } else {
             assert!(platform.starts_with("linux-"));
         }
+    }
+
+    #[test]
+    fn restart_backoff_grows_then_caps() {
+        use std::time::Duration;
+        assert_eq!(restart_backoff(0), Duration::from_secs(2));
+        assert_eq!(restart_backoff(1), Duration::from_secs(4));
+        assert_eq!(restart_backoff(2), Duration::from_secs(8));
+        assert_eq!(restart_backoff(3), Duration::from_secs(16));
+        assert_eq!(restart_backoff(4), Duration::from_secs(30));
+        assert_eq!(restart_backoff(10), Duration::from_secs(30));
     }
 }

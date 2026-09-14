@@ -123,6 +123,11 @@ pub fn core_path(dir: &Path) -> PathBuf {
     }
 }
 
+/// The wintun driver beside the core on Windows; TUN mode needs it present.
+pub fn wintun_path(dir: &Path) -> PathBuf {
+    dir.join("core/wintun.dll")
+}
+
 pub fn data_dir() -> Result<PathBuf> {
     let base = dirs::config_dir().context("cannot resolve the user config directory")?;
     let dir = base.join("sbtui");

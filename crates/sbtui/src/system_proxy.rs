@@ -6,6 +6,7 @@
 //! commands to apply manually.
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 /// How the core receives traffic: a local mixed inbound paired with the OS
 /// proxy, or the tun inbound that takes over routing globally.
@@ -28,14 +29,226 @@ impl TrafficMode {
 pub const LOCAL_MIXED_PORT: u16 = 2080;
 const PROXY_SERVER: &str = "127.0.0.1";
 
+/// The OS proxy state captured before sbtui first enables its proxy, so
+/// `disable` restores whatever the user had instead of always clearing it.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ProxyBackup {
+    #[serde(default)]
+    windows: Option<WindowsBackup>,
+    #[serde(default)]
+    macos: Option<MacosBackup>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct WindowsBackup {
+    enable: u32,
+    server: String,
+    overrides: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct MacosBackup {
+    service: String,
+    web_enabled: bool,
+    web_server: String,
+    web_port: String,
+    secure_enabled: bool,
+    secure_server: String,
+    secure_port: String,
+}
+
+fn backup_path() -> Option<std::path::PathBuf> {
+    crate::settings::data_dir()
+        .ok()
+        .map(|dir| dir.join("cache/system-proxy-backup.json"))
+}
+
+/// Captures the pre-sbtui proxy state once (a later enable must not overwrite
+/// the user's original settings with sbtui's own).
+fn capture_backup() {
+    let Some(path) = backup_path() else {
+        return;
+    };
+    if path.is_file() {
+        return;
+    }
+    let mut backup = ProxyBackup::default();
+    #[cfg(windows)]
+    {
+        backup.windows = capture_windows();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        backup.macos = capture_macos();
+    }
+    if let Ok(text) = serde_json::to_string_pretty(&backup) {
+        let _ = std::fs::write(&path, text);
+    }
+}
+
+/// Restores the captured state and removes the backup. A missing or unreadable
+/// backup is not an error (best effort).
+fn restore_backup() -> Result<()> {
+    let Some(path) = backup_path() else {
+        return Ok(());
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let Ok(backup) = serde_json::from_str::<ProxyBackup>(&text) else {
+        return Ok(());
+    };
+    // Keep the fields referenced on every platform (the apply arms are
+    // cfg-gated), so the deserialized value is never "unused".
+    let _has_state = backup.windows.is_some() || backup.macos.is_some();
+    #[cfg(windows)]
+    if let Some(window) = backup.windows.as_ref() {
+        apply_windows(window)?;
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(macos) = backup.macos.as_ref() {
+        apply_macos(macos)?;
+    }
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
 /// Applies the OS proxy to point at the local mixed inbound.
 pub fn enable(port: u16) -> Result<()> {
+    capture_backup();
     set_proxy(&format!("{PROXY_SERVER}:{port}"))
 }
 
-/// Clears the OS proxy.
+/// Restores the OS proxy captured by [`enable`]; when no backup exists this is
+/// the old behavior of clearing the proxy.
 pub fn disable() -> Result<()> {
+    if backup_path().is_some_and(|path| path.is_file()) {
+        return restore_backup();
+    }
     set_proxy("")
+}
+
+#[cfg(windows)]
+fn capture_windows() -> Option<WindowsBackup> {
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let settings = hkcu
+        .open_subkey_with_flags(
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            KEY_READ,
+        )
+        .ok()?;
+    Some(WindowsBackup {
+        enable: settings.get_value("ProxyEnable").unwrap_or(0),
+        server: settings.get_value("ProxyServer").unwrap_or_default(),
+        overrides: settings.get_value("ProxyOverride").unwrap_or_default(),
+    })
+}
+
+#[cfg(windows)]
+fn apply_windows(backup: &WindowsBackup) -> Result<()> {
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let settings = hkcu
+        .open_subkey_with_flags(
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            KEY_SET_VALUE,
+        )
+        .context("opening the WinINET registry key")?;
+    settings
+        .set_value("ProxyEnable", &backup.enable)
+        .context("restoring ProxyEnable")?;
+    if !backup.server.is_empty() {
+        settings
+            .set_value("ProxyServer", &backup.server)
+            .context("restoring ProxyServer")?;
+    }
+    if !backup.overrides.is_empty() {
+        settings
+            .set_value("ProxyOverride", &backup.overrides)
+            .context("restoring ProxyOverride")?;
+    }
+    refresh_wininet();
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn capture_macos() -> Option<MacosBackup> {
+    let service = default_network_service().ok()?;
+    let (web_enabled, web_server, web_port) = networksetup_get("web", &service);
+    let (secure_enabled, secure_server, secure_port) = networksetup_get("secureweb", &service);
+    Some(MacosBackup {
+        service,
+        web_enabled,
+        web_server,
+        web_port,
+        secure_enabled,
+        secure_server,
+        secure_port,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn networksetup_get(kind: &str, service: &str) -> (bool, String, String) {
+    let flag = format!("-get{kind}proxy");
+    let Ok(output) = std::process::Command::new("networksetup")
+        .args([flag.as_str(), service])
+        .output()
+    else {
+        return (false, String::new(), String::new());
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let field = |name: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .unwrap_or("")
+            .trim()
+            .to_owned()
+    };
+    (
+        field("Enabled:").eq_ignore_ascii_case("yes"),
+        field("Server:"),
+        field("Port:"),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos(backup: &MacosBackup) -> Result<()> {
+    let set = |flag: &str, host: &str, port: &str| -> Result<()> {
+        let status = std::process::Command::new("networksetup")
+            .args([flag, &backup.service, host, port])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("networksetup {flag} exited with {status}");
+        }
+        Ok(())
+    };
+    let off = |flag: &str| -> Result<()> {
+        let status = std::process::Command::new("networksetup")
+            .args([flag, &backup.service, "off"])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("networksetup {flag} exited with {status}");
+        }
+        Ok(())
+    };
+    if backup.web_enabled {
+        set("-setwebproxy", &backup.web_server, &backup.web_port)?;
+    } else {
+        off("-setwebproxystate")?;
+    }
+    if backup.secure_enabled {
+        set(
+            "-setsecurewebproxy",
+            &backup.secure_server,
+            &backup.secure_port,
+        )?;
+    } else {
+        off("-setsecurewebproxystate")?;
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
