@@ -21,11 +21,11 @@ use clap::Parser;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Color, Style, Stylize};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, Tabs,
+    Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, Tabs,
 };
 use tokio::process::Child;
 
@@ -33,7 +33,7 @@ use crate::clash_api::{ClashApi, OutboundMode};
 use crate::settings::{Profile, Profiles, Settings};
 use crate::system_proxy::TrafficMode;
 
-const TAB_TITLES: [&str; 5] = ["🏠 仪表盘", "🧭 代理", "🔗 连接", "📜 日志", "⚙️ 设置"];
+const TAB_TITLES: [&str; 5] = ["概览", "节点", "连接", "日志", "设置"];
 const TICK_MS: u64 = 500;
 const LOG_LINES: usize = 500;
 const SELECTOR_TAG: &str = "🚀节点选择";
@@ -224,6 +224,8 @@ struct App {
     /// Logs page: pause the live tail and filter by level.
     log_paused: bool,
     log_filter: LogFilter,
+    /// A discoverable keyboard reference overlay for first-run users.
+    show_help: bool,
 }
 
 impl App {
@@ -277,6 +279,7 @@ impl App {
             confirm_quit: false,
             log_paused: false,
             log_filter: LogFilter::All,
+            show_help: false,
         }
     }
 
@@ -476,10 +479,10 @@ async fn run_app(
                 let Some(event) = event else { break };
                 match event {
                     Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                        let quit_requested = (key.code == KeyCode::Char('q')
+                        let quit_requested = !app.show_help && ((key.code == KeyCode::Char('q')
                             && key.modifiers.is_empty())
                             || (key.code == KeyCode::Char('c')
-                                && key.modifiers.contains(KeyModifiers::CONTROL));
+                                && key.modifiers.contains(KeyModifiers::CONTROL)));
                         if quit_requested {
                             if app.system_proxy_on && !app.confirm_quit {
                                 app.confirm_quit = true;
@@ -684,6 +687,12 @@ async fn download_core(app: &mut App) -> Result<()> {
 }
 
 async fn handle_key(app: &mut App, key: KeyCode) -> Result<()> {
+    if app.show_help {
+        if matches!(key, KeyCode::Esc | KeyCode::Char('?')) {
+            app.show_help = false;
+        }
+        return Ok(());
+    }
     if let Some(goal) = app.input.clone() {
         match key {
             KeyCode::Esc => {
@@ -706,6 +715,7 @@ async fn handle_key(app: &mut App, key: KeyCode) -> Result<()> {
         app.confirm_mode = false;
     }
     match key {
+        KeyCode::Char('?') => app.show_help = true,
         KeyCode::Tab => app.tab = app.tab.next(),
         KeyCode::BackTab => app.tab = app.tab.previous(),
         KeyCode::Char(ch @ '1'..='5') => {
@@ -1240,19 +1250,19 @@ fn now_epoch() -> u64 {
 // ---------------------------------------------------------------- UI ------
 
 fn draw(frame: &mut Frame, app: &mut App) {
-    let outer = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .split(frame.area());
-    let titles: Vec<Line> = TAB_TITLES.iter().map(|t| Line::from(*t)).collect();
+    const INK: Color = Color::Rgb(8, 18, 28);
     frame.render_widget(
-        Tabs::new(titles)
-            .select(app.tab.index())
-            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White)),
-        outer[0],
+        Block::default().style(Style::default().bg(INK)),
+        frame.area(),
     );
+    let outer = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(12),
+        Constraint::Length(3),
+    ])
+    .margin(1)
+    .split(frame.area());
+    draw_header(frame, outer[0], app);
     match app.tab {
         Tab::Dashboard => draw_dashboard(frame, outer[1], app),
         Tab::Proxies => draw_proxies(frame, outer[1], app),
@@ -1260,16 +1270,287 @@ fn draw(frame: &mut Frame, app: &mut App) {
         Tab::Logs => draw_logs(frame, outer[1], app),
         Tab::Settings => draw_settings(frame, outer[1], app),
     }
-    let status = if let Some(goal) = &app.input {
+    draw_footer(frame, outer[2], app);
+    if app.input.is_some() {
+        draw_input_overlay(frame, app);
+    } else if app.show_help {
+        draw_help_overlay(frame, app);
+    } else if app.confirm_mode || app.confirm_quit {
+        draw_confirmation_overlay(frame, app);
+    }
+}
+
+const PANEL: Color = Color::Rgb(11, 28, 42);
+const EDGE: Color = Color::Rgb(37, 92, 116);
+const TEXT: Color = Color::Rgb(217, 235, 242);
+const MUTED: Color = Color::Rgb(123, 157, 172);
+const CYAN: Color = Color::Rgb(42, 213, 235);
+const MINT: Color = Color::Rgb(101, 235, 157);
+const AMBER: Color = Color::Rgb(255, 190, 81);
+const DANGER: Color = Color::Rgb(255, 104, 97);
+
+fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(2)]).split(area);
+    let state = if app.running {
+        "● 运行中"
+    } else {
+        "○ 已停止"
+    };
+    let state_color = if app.running { MINT } else { MUTED };
+    let current = selected_node(app);
+    let header = Line::from(vec![
+        Span::styled(
+            " sbtui ",
+            Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("网络控制台", Style::default().fg(MUTED)),
+        Span::styled("  /  ", Style::default().fg(EDGE)),
+        Span::styled(
+            state,
+            Style::default()
+                .fg(state_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  ·  ", Style::default().fg(EDGE)),
+        Span::styled(short_label(&current, 24), Style::default().fg(TEXT)),
+        Span::styled("  ·  ", Style::default().fg(EDGE)),
+        Span::styled(
+            format!("↓ {}/s", human_bytes(app.down)),
+            Style::default().fg(CYAN),
+        ),
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            format!("↑ {}/s", human_bytes(app.up)),
+            Style::default().fg(MINT),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(header), rows[0]);
+    let titles: Vec<Line> = TAB_TITLES
+        .iter()
+        .enumerate()
+        .map(|(i, title)| Line::from(format!(" {} {} ", i + 1, title)))
+        .collect();
+    frame.render_widget(
+        Tabs::new(titles)
+            .select(app.tab.index())
+            .divider(Span::styled("│", Style::default().fg(EDGE)))
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Rgb(8, 18, 28))
+                    .bg(CYAN)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .style(Style::default().fg(MUTED)),
+        rows[1],
+    );
+}
+
+fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
+    let hint = match app.tab {
+        Tab::Dashboard => "s 启动/停止  ·  u 更新订阅  ·  p 系统代理  ·  m 切换模式",
+        Tab::Proxies => "↑↓ 选择  ·  Enter 切换  ·  t 测当前  ·  T 测全组",
+        Tab::Connections => "↑↓ 选择  ·  x 关闭连接  ·  X 关闭全部  ·  S 排序",
+        Tab::Logs => "Space 暂停  ·  l 级别  ·  c 复制  ·  r 分流规则",
+        Tab::Settings => "n 新增  ·  e 编辑  ·  Delete 删除  ·  d 下载内核",
+    };
+    let line = Line::from(vec![
+        Span::styled(" ", Style::default()),
+        Span::styled(&app.status, Style::default().fg(status_color(&app.status))),
+        Span::styled("  │  ", Style::default().fg(EDGE)),
+        Span::styled(hint, Style::default().fg(MUTED)),
+        Span::styled(
+            "  │  Tab 切换  ·  ? 帮助  ·  q 退出",
+            Style::default().fg(MUTED),
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(line).block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(EDGE)),
+        ),
+        area,
+    );
+}
+
+fn panel<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(EDGE))
+        .style(Style::default().bg(PANEL))
+        .title(
+            title
+                .into()
+                .style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+        )
+}
+
+fn selected_node(app: &App) -> String {
+    app.groups
+        .iter()
+        .find(|group| group.name == SELECTOR_TAG)
+        .map(|group| group.now.clone())
+        .unwrap_or_else(|| "等待选择节点".to_owned())
+}
+
+fn short_label(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        value.to_owned()
+    } else {
         format!(
-            "输入 {}: {}（Enter 确认 / Esc 取消）",
-            input_label(goal),
-            app.input_text
+            "{}…",
+            value
+                .chars()
+                .take(max.saturating_sub(1))
+                .collect::<String>()
+        )
+    }
+}
+
+fn meter(value: u64, width: usize) -> String {
+    let filled = if value == 0 {
+        0
+    } else {
+        ((value.ilog10() as usize + 1) * width / 10).clamp(1, width)
+    };
+    format!(
+        "{}{}",
+        "█".repeat(filled),
+        "░".repeat(width.saturating_sub(filled))
+    )
+}
+
+fn status_color(status: &str) -> Color {
+    if status.contains("失败") || status.contains("错误") || status.contains("崩溃") {
+        DANGER
+    } else if status.contains("需要") || status.contains("未") {
+        AMBER
+    } else if status.contains("成功") || status.contains("启动") || status.contains("已") {
+        MINT
+    } else {
+        TEXT
+    }
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let vertical = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(height.min(area.height)),
+        Constraint::Fill(1),
+    ])
+    .split(area);
+    Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(width.min(vertical[1].width)),
+        Constraint::Fill(1),
+    ])
+    .split(vertical[1])[1]
+}
+
+fn draw_input_overlay(frame: &mut Frame, app: &App) {
+    let area = centered_rect(70, 7, frame.area());
+    let goal = app
+        .input
+        .as_ref()
+        .expect("input overlay requires an input goal");
+    let body = vec![
+        Line::from(input_label(goal)).style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+        Line::from(""),
+        Line::from(app.input_text.clone()).style(Style::default().fg(TEXT)),
+        Line::from(""),
+        Line::from("Enter 保存  ·  Esc 取消").style(Style::default().fg(MUTED)),
+    ];
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(body)
+            .alignment(Alignment::Left)
+            .block(panel("输入")),
+        area,
+    );
+}
+
+fn draw_help_overlay(frame: &mut Frame, app: &App) {
+    let page_keys = match app.tab {
+        Tab::Dashboard => "s 启动/停止 · u 更新订阅 · p 开/关系统代理 · m 切换模式",
+        Tab::Proxies => "↑↓ 选择 · Enter 切换 · t 测当前 · T 测全组",
+        Tab::Connections => "↑↓ 选择 · x 关闭连接 · X 关闭全部 · S 切换排序",
+        Tab::Logs => "Space 暂停 · l 切换级别 · c 复制 · r 查看规则",
+        Tab::Settings => "n 新增 · e 编辑 · Delete 删除 · d 下载内核",
+    };
+    let body = vec![
+        Line::from(Span::styled(
+            "键盘操作",
+            Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("全局  ", Style::default().fg(MUTED)),
+            Span::styled("Tab / 1–5", Style::default().fg(TEXT)),
+            Span::styled(" 切换页面  ·  ", Style::default().fg(MUTED)),
+            Span::styled("o", Style::default().fg(TEXT)),
+            Span::styled(" 切换出站  ·  ", Style::default().fg(MUTED)),
+            Span::styled("q", Style::default().fg(TEXT)),
+            Span::styled(" 退出", Style::default().fg(MUTED)),
+        ]),
+        Line::from(vec![
+            Span::styled("当前页  ", Style::default().fg(MUTED)),
+            Span::styled(page_keys, Style::default().fg(TEXT)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("提示  ", Style::default().fg(AMBER)),
+            Span::styled(
+                "模式切换与保留系统代理退出，均需再次按对应按键确认。",
+                Style::default().fg(TEXT),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("Esc 或 ? 返回", Style::default().fg(MUTED))),
+    ];
+    let area = centered_rect(82, 11, frame.area());
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(body).block(panel("帮助")), area);
+}
+
+fn draw_confirmation_overlay(frame: &mut Frame, app: &App) {
+    let (title, lines) = if app.confirm_quit {
+        (
+            "退出确认",
+            vec![
+                Line::from(Span::styled(
+                    "系统代理仍处于开启状态。",
+                    Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+                )),
+                Line::from("再按 q 退出并保留代理；按 p 先关闭代理。"),
+                Line::from(Span::styled(
+                    "Esc 或其它按键取消",
+                    Style::default().fg(MUTED),
+                )),
+            ],
         )
     } else {
-        format!("{} ｜ Tab 切换页 ｜ q 退出", app.status)
+        let target = match app.mode {
+            TrafficMode::SystemProxy => TrafficMode::Tun,
+            TrafficMode::Tun => TrafficMode::SystemProxy,
+        };
+        (
+            "模式切换确认",
+            vec![
+                Line::from(Span::styled(
+                    format!("准备切换至 {} 模式", target.label()),
+                    Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+                )),
+                Line::from("再按 m 确认；下次启动内核时生效。"),
+                Line::from(Span::styled(
+                    "Esc 或其它按键取消",
+                    Style::default().fg(MUTED),
+                )),
+            ],
+        )
     };
-    frame.render_widget(Paragraph::new(status), outer[2]);
+    let area = centered_rect(64, 7, frame.area());
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(lines).block(panel(title)), area);
 }
 
 fn input_label(goal: &InputGoal) -> &'static str {
@@ -1285,63 +1566,285 @@ fn input_label(goal: &InputGoal) -> &'static str {
 
 fn delay_color(delay: Option<u64>) -> Color {
     match delay {
-        Some(d) if d < 200 => Color::Green,
-        Some(d) if d < 500 => Color::Yellow,
-        Some(_) => Color::Red,
-        None => Color::Gray,
+        Some(d) if d < 200 => MINT,
+        Some(d) if d < 500 => AMBER,
+        Some(_) => DANGER,
+        None => MUTED,
     }
 }
 
 fn draw_dashboard(frame: &mut Frame, area: ratatui::prelude::Rect, app: &App) {
-    let current = app
-        .groups
-        .iter()
-        .find(|g| g.name == SELECTOR_TAG)
-        .map(|g| g.now.clone())
-        .unwrap_or_else(|| "（未选择）".to_owned());
-    let lines = vec![
-        Line::from(format!(
-            "内核: {}",
+    if area.width < 100 || area.height < 28 {
+        draw_dashboard_compact(frame, area, app);
+        return;
+    }
+    let columns =
+        Layout::horizontal([Constraint::Percentage(31), Constraint::Percentage(69)]).split(area);
+    let rail = Layout::vertical([Constraint::Percentage(48), Constraint::Percentage(52)])
+        .split(columns[0]);
+    let content = Layout::vertical([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .split(columns[1]);
+    let current = selected_node(app);
+    let state_color = if app.running { MINT } else { MUTED };
+    let health = vec![
+        Line::from(Span::styled(
             if app.running {
-                "运行中"
+                "● 在线"
             } else {
-                "已停止"
-            }
-        )),
-        Line::from(format!(
-            "出站方式: {} ｜ 出站模式: {}",
-            app.mode.label(),
-            app.mode_outbound.label()
-        )),
-        Line::from(format!("当前节点: {current}")),
-        Line::from(format!(
-            "系统代理: {}",
-            if app.system_proxy_on { "开" } else { "关" }
-        )),
-        Line::from(format!(
-            "速率: ↑ {}/s  ↓ {}/s",
-            human_bytes(app.up),
-            human_bytes(app.down)
-        )),
-        Line::from(format!(
-            "累计: ↑ {}  ↓ {}",
-            human_bytes(app.total_up),
-            human_bytes(app.total_down)
-        )),
-        Line::from(format!("订阅流量: {}", usage_label(app.subscription_usage))),
-        Line::from(format!(
-            "内核版本: {}",
-            app.core_version.clone().unwrap_or_else(|| "未检测".into())
+                "○ 离线"
+            },
+            Style::default()
+                .fg(state_color)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from(
-            "快捷键: s 启动/停止 ｜ p 系统代理 ｜ m 切换 系统代理/TUN ｜ o 出站模式 ｜ u 更新订阅",
-        ),
+        Line::from(vec![
+            Span::styled("内核  ", Style::default().fg(MUTED)),
+            Span::styled(
+                if app.running {
+                    "已启动"
+                } else {
+                    "未启动"
+                },
+                Style::default().fg(state_color),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("代理  ", Style::default().fg(MUTED)),
+            Span::styled(
+                if app.system_proxy_on {
+                    "已接管 127.0.0.1:2080"
+                } else {
+                    "未接管系统网络"
+                },
+                Style::default().fg(if app.system_proxy_on { MINT } else { MUTED }),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("模式  ", Style::default().fg(MUTED)),
+            Span::styled(
+                format!("{} · {}", app.mode.label(), app.mode_outbound.label()),
+                Style::default().fg(TEXT),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("当前节点", Style::default().fg(MUTED))),
+        Line::from(Span::styled(
+            short_label(&current, 22),
+            Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!(
+                "延迟 {}",
+                app.delays
+                    .get(&current)
+                    .map(|d| format!("{d} ms"))
+                    .unwrap_or_else(|| "待测".into())
+            ),
+            Style::default().fg(delay_color(app.delays.get(&current).copied())),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(health).block(panel("运行状态")), rail[0]);
+    let network = vec![
+        Line::from(Span::styled(
+            "本机",
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled("  │", Style::default().fg(EDGE))),
+        Line::from(Span::styled(
+            format!(
+                "  ├── 系统代理  {}",
+                if app.system_proxy_on {
+                    "已启用"
+                } else {
+                    "待启用"
+                }
+            ),
+            Style::default().fg(if app.system_proxy_on { MINT } else { MUTED }),
+        )),
+        Line::from(Span::styled("  │", Style::default().fg(EDGE))),
+        Line::from(Span::styled("  ▼", Style::default().fg(CYAN))),
+        Line::from(Span::styled(
+            format!("  [ {} ]", short_label(&current, 32)),
+            Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "  │  ├────────── 规则流量",
+            Style::default().fg(EDGE),
+        )),
+        Line::from(Span::styled(
+            "  │  └────────── 直连流量",
+            Style::default().fg(EDGE),
+        )),
+        Line::from(Span::styled("  ▼", Style::default().fg(MINT))),
+        Line::from(Span::styled(
+            format!(
+                "  公网出口  ·  {} 个活动连接",
+                app.connections.connections.len()
+            ),
+            Style::default().fg(TEXT),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "路径说明：当前节点承载代理链路；规则可将流量直连。",
+            Style::default().fg(MUTED),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(network).block(panel("网络路径")), content[0]);
+    let metrics = Layout::horizontal([Constraint::Percentage(52), Constraint::Percentage(48)])
+        .split(content[1]);
+    let traffic = vec![
+        Line::from(vec![
+            Span::styled("↓ ", Style::default().fg(CYAN)),
+            Span::styled(
+                format!("{}/s", human_bytes(app.down)),
+                Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(Span::styled(meter(app.down, 24), Style::default().fg(CYAN))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("↑ ", Style::default().fg(MINT)),
+            Span::styled(
+                format!("{}/s", human_bytes(app.up)),
+                Style::default().fg(MINT).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(Span::styled(meter(app.up, 24), Style::default().fg(MINT))),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(
+                "累计 ↓ {}  ↑ {}",
+                human_bytes(app.total_down),
+                human_bytes(app.total_up)
+            ),
+            Style::default().fg(MUTED),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(traffic).block(panel("实时流量")), metrics[0]);
+    let activity: Vec<Line> = app
+        .logs
+        .iter()
+        .rev()
+        .take(5)
+        .rev()
+        .map(|line| {
+            Line::from(short_label(line, 38)).style(Style::default().fg(status_color(line)))
+        })
+        .collect();
+    let activity = if activity.is_empty() {
+        vec![Line::from("等待新的运行事件").style(Style::default().fg(MUTED))]
+    } else {
+        activity
+    };
+    frame.render_widget(
+        Paragraph::new(activity).block(panel("最近事件")),
+        metrics[1],
+    );
+    let subscription = vec![
+        Line::from(Span::styled("节点摘要", Style::default().fg(MUTED))),
+        Line::from(Span::styled(
+            short_label(&current, 24),
+            Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!(
+                "{} · {} 个活动连接",
+                app.mode_outbound.label(),
+                app.connections.connections.len()
+            ),
+            Style::default().fg(TEXT),
+        )),
+        Line::from(""),
+        Line::from(Span::styled("订阅状态", Style::default().fg(MUTED))),
+        Line::from(Span::styled(
+            usage_label(app.subscription_usage),
+            Style::default().fg(TEXT),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(
+                "内核 {}",
+                app.core_version.clone().unwrap_or_else(|| "未安装".into())
+            ),
+            Style::default().fg(MUTED),
+        )),
     ];
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("仪表盘")),
-        area,
+        Paragraph::new(subscription).block(panel("订阅与核心")),
+        rail[1],
     );
+}
+
+fn draw_dashboard_compact(frame: &mut Frame, area: Rect, app: &App) {
+    let current = selected_node(app);
+    let state = if app.running {
+        "运行中"
+    } else {
+        "已停止"
+    };
+    let proxy = if app.system_proxy_on {
+        "系统代理：已启用"
+    } else {
+        "系统代理：未启用"
+    };
+    let delay = app
+        .delays
+        .get(&current)
+        .map(|value| format!("{value} ms"))
+        .unwrap_or_else(|| "待测".to_owned());
+    let body = vec![
+        Line::from(vec![
+            Span::styled("状态  ", Style::default().fg(MUTED)),
+            Span::styled(
+                state,
+                Style::default().fg(if app.running { MINT } else { MUTED }),
+            ),
+            Span::styled("  ·  ", Style::default().fg(EDGE)),
+            Span::styled(
+                proxy,
+                Style::default().fg(if app.system_proxy_on { MINT } else { MUTED }),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("代理路径", Style::default().fg(MUTED))),
+        Line::from(Span::styled(
+            format!("本机  →  {}  →  公网出口", short_label(&current, 36)),
+            Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!(
+                "{} · {} · {} 个活动连接",
+                app.mode_outbound.label(),
+                delay,
+                app.connections.connections.len()
+            ),
+            Style::default().fg(TEXT),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("↓ ", Style::default().fg(CYAN)),
+            Span::styled(
+                format!("{}/s", human_bytes(app.down)),
+                Style::default().fg(CYAN),
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled(meter(app.down, 12), Style::default().fg(CYAN)),
+            Span::styled("     ↑ ", Style::default().fg(MINT)),
+            Span::styled(
+                format!("{}/s", human_bytes(app.up)),
+                Style::default().fg(MINT),
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled(meter(app.up, 12), Style::default().fg(MINT)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "紧凑视图：放大终端可查看完整网络拓扑与事件。",
+            Style::default().fg(MUTED),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(body).block(panel("概览 · 紧凑视图")), area);
 }
 
 fn draw_proxies(frame: &mut Frame, area: ratatui::prelude::Rect, app: &mut App) {
@@ -1354,8 +1857,13 @@ fn draw_proxies(frame: &mut Frame, area: ratatui::prelude::Rect, app: &mut App) 
         .collect();
     frame.render_stateful_widget(
         List::new(group_items)
-            .block(Block::default().borders(Borders::ALL).title("代理组"))
-            .highlight_style(Style::default().bg(Color::Blue)),
+            .block(panel("代理组"))
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Rgb(8, 18, 28))
+                    .bg(CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
         columns[0],
         &mut app.group_list,
     );
@@ -1365,7 +1873,7 @@ fn draw_proxies(frame: &mut Frame, area: ratatui::prelude::Rect, app: &mut App) 
             .iter()
             .map(|member| {
                 let delay = app.delays.get(member).copied();
-                let marker = if member == &group.now { "✓ " } else { "  " };
+                let marker = if member == &group.now { "● " } else { "○ " };
                 let delay_text = delay
                     .map(|d| format!("{d}ms"))
                     .unwrap_or_else(|| "-".to_owned());
@@ -1378,16 +1886,23 @@ fn draw_proxies(frame: &mut Frame, area: ratatui::prelude::Rect, app: &mut App) 
         let mut member_state = ListState::default().with_selected(Some(app.selected_member));
         frame.render_stateful_widget(
             List::new(member_items)
-                .block(Block::default().borders(Borders::ALL).title(format!(
-                    "{} 节点（Enter 切换，t 测当前，T 测全组）",
-                    group.name
-                )))
-                .highlight_style(Style::default().bg(Color::Blue)),
+                .block(panel(format!("{} 节点 · Enter 切换", group.name)))
+                .highlight_style(
+                    Style::default()
+                        .fg(Color::Rgb(8, 18, 28))
+                        .bg(CYAN)
+                        .add_modifier(Modifier::BOLD),
+                ),
             columns[1],
             &mut member_state,
         );
     } else {
-        frame.render_widget(Paragraph::new("（无代理组；启动内核后显示）"), columns[1]);
+        frame.render_widget(
+            Paragraph::new("启动内核后，节点组与延迟将在这里出现。\n\n按 s 启动内核")
+                .style(Style::default().fg(MUTED))
+                .block(panel("节点")),
+            columns[1],
+        );
     }
 }
 
@@ -1400,7 +1915,7 @@ fn draw_connections(frame: &mut Frame, area: ratatui::prelude::Rect, app: &App) 
         .map(|(index, connection)| {
             Row::new(vec![
                 Cell::from(if index == app.selected_member {
-                    "▸"
+                    "●"
                 } else {
                     ""
                 }),
@@ -1426,11 +1941,13 @@ fn draw_connections(frame: &mut Frame, area: ratatui::prelude::Rect, app: &App) 
         ],
     )
     .header(
-        Row::new(vec!["", "目标", "主机", "网络", "上传", "下载"]).style(Style::default().bold()),
+        Row::new(vec!["", "目标", "主机", "网络", "上传", "下载"])
+            .style(Style::default().fg(CYAN).bold()),
     )
-    .block(Block::default().borders(Borders::ALL).title(format!(
-        "连接（x 关闭选中，X 关闭全部，S 排序: {}）",
-        app.conn_sort.label()
+    .block(panel(format!(
+        "活动连接 · {} · {} 条",
+        app.conn_sort.label(),
+        app.connections.connections.len()
     )));
     frame.render_widget(table, area);
 }
@@ -1443,11 +1960,7 @@ fn draw_logs(frame: &mut Frame, area: ratatui::prelude::Rect, app: &App) {
             .map(|line| Line::from(line.clone()))
             .collect();
         frame.render_widget(
-            Paragraph::new(lines).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("分流规则（r 返回日志）"),
-            ),
+            Paragraph::new(lines).block(panel("分流规则 · r 返回日志")),
             area,
         );
         return;
@@ -1471,10 +1984,7 @@ fn draw_logs(frame: &mut Frame, area: ratatui::prelude::Rect, app: &App) {
         app.log_filter.label(),
         if app.log_paused { " · 已暂停" } else { "" }
     );
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)),
-        area,
-    );
+    frame.render_widget(Paragraph::new(lines).block(panel(title)), area);
 }
 
 fn draw_settings(frame: &mut Frame, area: ratatui::prelude::Rect, app: &mut App) {
@@ -1496,12 +2006,13 @@ fn draw_settings(frame: &mut Frame, area: ratatui::prelude::Rect, app: &mut App)
         .collect();
     frame.render_stateful_widget(
         List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("订阅档案（Enter 激活）"),
-            )
-            .highlight_style(Style::default().bg(Color::Blue)),
+            .block(panel("订阅档案 · Enter 激活"))
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Rgb(8, 18, 28))
+                    .bg(CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
         columns[0],
         &mut app.profiles_list,
     );
@@ -1535,10 +2046,7 @@ fn draw_settings(frame: &mut Frame, area: ratatui::prelude::Rect, app: &mut App)
             "快捷键: n 新增档案 ｜ f 本地文件 ｜ e 改链接 ｜ Delete 删除档案 ｜ u 更新订阅 ｜ v 改内核版本 ｜ r 改镜像 ｜ d 下载内核",
         ),
     ];
-    frame.render_widget(
-        Paragraph::new(info).block(Block::default().borders(Borders::ALL).title("设置")),
-        columns[1],
-    );
+    frame.render_widget(Paragraph::new(info).block(panel("运行环境")), columns[1]);
 }
 
 /// Copies text to the terminal clipboard via the OSC 52 escape sequence, which
@@ -1621,5 +2129,11 @@ mod tests {
         assert_eq!(age_label(0), "从未");
         let now = now_epoch();
         assert_eq!(age_label(now - 90), "1 分钟前");
+    }
+
+    #[test]
+    fn meter_keeps_the_requested_visual_width() {
+        assert_eq!(meter(0, 12).chars().count(), 12);
+        assert_eq!(meter(1024 * 1024, 12).chars().count(), 12);
     }
 }
