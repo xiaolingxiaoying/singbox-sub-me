@@ -12,3 +12,11 @@
 *.swp
 Thumbs.db
 .DS_Store
+
+# Local agent tooling (never part of the project)
+.kilo/
+.zcode/
+
+# Local artifacts never committed
+sbctl-linux-amd64
+.scratch/vps-connectivity-hardening/ssh_run.py
