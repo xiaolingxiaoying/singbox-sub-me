@@ -15,6 +15,26 @@ sbtui --print-dir
 数据目录：Windows `%APPDATA%\sbtui`，Linux/macOS `~/.config/sbtui`。
 `settings.toml`（应用设置）与 `profiles.toml`（订阅档案）缺失时会自动创建。
 
+## 安装与 `ly` 快捷方式
+
+客户端提供 `ly` 启动命令（与服务端 sbctl 的 `ly` 相对应；客户端机器上 `ly` 打开 sbtui）：
+
+- **Linux / macOS**：把 `sbtui` 与 `packaging/install.sh` 放在一起，然后
+
+  ```bash
+  sudo sh install.sh          # 安装到 /usr/local/bin，并建立 /usr/local/bin/ly → sbtui
+  ly                          # 等同 sbtui
+  ```
+
+- **Windows**：右键 `packaging\install.ps1` → 用 PowerShell 运行（无需管理员）：
+
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File install.ps1
+  ly                          # 任意终端可用（写入 %LOCALAPPDATA%\Microsoft\WindowsApps\ly.cmd）
+  ```
+
+  也可直接把 `packaging\ly.cmd` 与 `sbtui.exe` 放同一目录，运行 `ly.cmd`。
+
 ## 首次使用（5 步）
 
 1. 启动 `sbtui`，按 `5` 进入「设置」页；
