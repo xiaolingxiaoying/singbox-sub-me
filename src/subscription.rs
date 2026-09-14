@@ -7,6 +7,8 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use rcgen::{CertificateParams, DnType, KeyPair};
 use serde_json::{Value, json};
+use std::borrow::Cow;
+use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::net::SocketAddr;
@@ -28,48 +30,250 @@ use crate::config::{
 };
 
 const SING_BOX_ARTIFACT: &str = "subscription-sing-box.json";
+const SING_BOX_FULL_ARTIFACT: &str = "subscription-sing-box-full.json";
 const CLASH_ARTIFACT: &str = "subscription-clash.yaml";
 const URI_ARTIFACT: &str = "subscription-uri.txt";
 const BASE64_URI_ARTIFACT: &str = "subscription-base64-uri.txt";
+const SHADOWROCKET_ARTIFACT: &str = "subscription-shadowrocket.txt";
 const SING_BOX_SERVER_ARTIFACT: &str = "sing-box-server.json";
 const ARTIFACTS_RELATIVE_DIR: &str = "var/lib/sbctl/artifacts";
 const ACTIVE_CONFIG_RELATIVE_PATH: &str = "etc/sing-box/config.json";
 
+/// A client application version that a versioned subscription profile targets,
+/// rendered as `1.12` in route paths (`sing-box-1.12.json`) and artifact names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ClientVersion {
+    pub major: u8,
+    pub minor: u8,
+}
+
+impl ClientVersion {
+    pub const fn new(major: u8, minor: u8) -> Self {
+        Self { major, minor }
+    }
+}
+
+impl fmt::Display for ClientVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}.{}", self.major, self.minor)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubscriptionFormat {
+    /// The historical bare-`outbounds` sing-box artifact; kept byte-compatible
+    /// for existing clients.
     SingBox,
+    /// The full client configuration for the latest stable sing-box.
+    SingBoxFull,
+    /// The full client configuration tuned for one specific sing-box minor.
+    SingBoxVersion(ClientVersion),
     Clash,
+    /// The mihomo variant for the previous major line (1.18.x).
+    ClashLegacy(ClientVersion),
     Uri,
     Base64Uri,
+    /// Base64 URI list with Shadowrocket-friendly parameters and remarks.
+    Shadowrocket,
 }
 
 impl SubscriptionFormat {
-    pub fn path_name(self) -> &'static str {
+    pub fn path_name(self) -> String {
         match self {
-            Self::SingBox => "sing-box.json",
-            Self::Clash => "clash.yaml",
-            Self::Uri => "uri",
-            Self::Base64Uri => "uri.txt",
+            Self::SingBox => "sing-box.json".to_owned(),
+            Self::SingBoxFull => "sing-box-full.json".to_owned(),
+            Self::SingBoxVersion(version) => format!("sing-box-{version}.json"),
+            Self::Clash => "clash.yaml".to_owned(),
+            Self::ClashLegacy(version) => format!("clash-{version}.yaml"),
+            Self::Uri => "uri".to_owned(),
+            Self::Base64Uri => "uri.txt".to_owned(),
+            Self::Shadowrocket => "shadowrocket.txt".to_owned(),
         }
     }
 
-    pub fn artifact_name(self) -> &'static str {
+    pub fn artifact_name(self) -> Cow<'static, str> {
         match self {
-            Self::SingBox => SING_BOX_ARTIFACT,
-            Self::Clash => CLASH_ARTIFACT,
-            Self::Uri => URI_ARTIFACT,
-            Self::Base64Uri => BASE64_URI_ARTIFACT,
+            Self::SingBox => Cow::Borrowed(SING_BOX_ARTIFACT),
+            Self::SingBoxFull => Cow::Borrowed(SING_BOX_FULL_ARTIFACT),
+            Self::SingBoxVersion(version) => {
+                Cow::Owned(format!("subscription-sing-box-{version}.json"))
+            }
+            Self::Clash => Cow::Borrowed(CLASH_ARTIFACT),
+            Self::ClashLegacy(version) => Cow::Owned(format!("subscription-clash-{version}.yaml")),
+            Self::Uri => Cow::Borrowed(URI_ARTIFACT),
+            Self::Base64Uri => Cow::Borrowed(BASE64_URI_ARTIFACT),
+            Self::Shadowrocket => Cow::Borrowed(SHADOWROCKET_ARTIFACT),
         }
     }
 
     pub fn content_type(self) -> &'static str {
         match self {
-            Self::SingBox => "application/json; charset=utf-8",
-            Self::Clash => "application/yaml; charset=utf-8",
-            Self::Uri => "text/plain; charset=utf-8",
-            Self::Base64Uri => "text/plain; charset=utf-8",
+            Self::SingBox | Self::SingBoxFull | Self::SingBoxVersion(_) => {
+                "application/json; charset=utf-8"
+            }
+            Self::Clash | Self::ClashLegacy(_) => "application/yaml; charset=utf-8",
+            Self::Uri | Self::Base64Uri | Self::Shadowrocket => "text/plain; charset=utf-8",
         }
     }
+
+    /// The Chinese label + audience from the subscription matrix, used by the
+    /// CLI and the index page; falls back to the raw path name.
+    pub fn display_label(self) -> String {
+        subscription_matrix()
+            .iter()
+            .find(|info| info.format == self)
+            .map(|info| format!("{}（{}）", info.label, info.audience))
+            .unwrap_or_else(|| self.path_name())
+    }
+}
+
+/// A parsed subscription URL target behind `/sub/<credential>/...`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubscriptionRoute {
+    /// An artifact-backed subscription format.
+    Format(SubscriptionFormat),
+    /// A scannable QR code (SVG) of the given format's subscription URL.
+    Qr(SubscriptionFormat),
+    /// The human-readable Chinese overview page listing every link.
+    Index,
+}
+
+/// One sing-box minor version that gets its own tuned full-client profile.
+/// Field differences between profiles follow the upstream changelog research
+/// recorded in `docs/research/sing-box-client-version-differences.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SingBoxVersionProfile {
+    pub version: ClientVersion,
+    pub supported: &'static str,
+    pub notes: &'static str,
+    /// `cache_file.store_dns` (optimistic DNS caching) arrived in 1.14.0;
+    /// older cores must not receive the field.
+    pub supports_store_dns: bool,
+}
+
+pub const CLASH_LEGACY_VERSION: ClientVersion = ClientVersion::new(1, 18);
+
+/// Every sing-box minor from 1.12 up to the latest stable release, each with a
+/// dedicated `sing-box-<major>.<minor>.json` subscription artifact. Ordered
+/// ascending; the last entry is also what `sing-box-full.json` targets.
+pub const SING_BOX_VERSION_PROFILES: &[SingBoxVersionProfile] = &[
+    SingBoxVersionProfile {
+        version: ClientVersion::new(1, 12),
+        supported: ">= 1.12.0, < 1.13.0",
+        notes: "DNS 服务器对象格式（legacy 格式弃用）；geoip/geosite 字段已移除，改用 rule_set；tun 用 address 合并写法",
+        supports_store_dns: false,
+    },
+    SingBoxVersionProfile {
+        version: ClientVersion::new(1, 13),
+        supported: ">= 1.13.0, < 1.14.0",
+        notes: "block/dns 特殊出站与 inbound sniff 字段已移除，统一使用路由规则动作",
+        supports_store_dns: false,
+    },
+    SingBoxVersionProfile {
+        version: ClientVersion::new(1, 14),
+        supported: ">= 1.14.0",
+        notes: "legacy DNS 格式与 DNS 规则 outbound 项已移除；可用 cache_file.store_dns 乐观缓存",
+        supports_store_dns: true,
+    },
+];
+
+/// The newest sing-box version profile; `sing-box-full.json` targets it.
+pub fn latest_version_profile() -> &'static SingBoxVersionProfile {
+    SING_BOX_VERSION_PROFILES
+        .last()
+        .expect("sing-box version registry is not empty")
+}
+
+/// One row of the subscription link matrix shown by `sbctl sub` and the index
+/// page. Version rows are appended dynamically from `SING_BOX_VERSION_PROFILES`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubscriptionLinkInfo {
+    pub format: SubscriptionFormat,
+    /// Short Chinese name shown in tables.
+    pub label: String,
+    /// Which client the link is for.
+    pub audience: String,
+    /// Extra note, e.g. what the artifact contains.
+    pub note: String,
+}
+
+/// The static (non-version) rows of the subscription link matrix.
+fn static_matrix_rows() -> Vec<SubscriptionLinkInfo> {
+    vec![
+        SubscriptionLinkInfo {
+            format: SubscriptionFormat::SingBox,
+            label: "sing-box 精简配置".to_owned(),
+            audience: "sing-box（全版本兼容）".to_owned(),
+            note: "仅 outbounds 节点列表，与历史版本逐字节一致".to_owned(),
+        },
+        SubscriptionLinkInfo {
+            format: SubscriptionFormat::SingBoxFull,
+            label: "sing-box 完整配置（最新稳定版）".to_owned(),
+            audience: "sing-box 最新稳定版".to_owned(),
+            note: "完整客户端配置：DNS / tun / 分流规则 / 代理组 / clash_api".to_owned(),
+        },
+        SubscriptionLinkInfo {
+            format: SubscriptionFormat::Clash,
+            label: "Clash / mihomo 配置".to_owned(),
+            audience: "mihomo 现行稳定版".to_owned(),
+            note: "fake-ip DNS、rule-set 分流、代理组与 AI 分流".to_owned(),
+        },
+        SubscriptionLinkInfo {
+            format: SubscriptionFormat::ClashLegacy(CLASH_LEGACY_VERSION),
+            label: "Clash / mihomo 旧版兼容".to_owned(),
+            audience: "mihomo 1.18.x".to_owned(),
+            note: "面向上一大版本的兼容写法（内置 GEOIP 规则）".to_owned(),
+        },
+        SubscriptionLinkInfo {
+            format: SubscriptionFormat::Uri,
+            label: "分享链接（明文）".to_owned(),
+            audience: "通用".to_owned(),
+            note: "每行一个 vless:// 等分享 URI".to_owned(),
+        },
+        SubscriptionLinkInfo {
+            format: SubscriptionFormat::Base64Uri,
+            label: "分享链接（Base64）".to_owned(),
+            audience: "V2rayN 等".to_owned(),
+            note: "明文 URI 列表整体 Base64 编码".to_owned(),
+        },
+        SubscriptionLinkInfo {
+            format: SubscriptionFormat::Shadowrocket,
+            label: "Shadowrocket 适配".to_owned(),
+            audience: "Shadowrocket (iOS)".to_owned(),
+            note: "URI 参数按 Shadowrocket 解析习惯适配并规范备注名".to_owned(),
+        },
+    ]
+}
+
+/// The ordered link matrix: static rows plus one dynamically labeled row per
+/// sing-box version profile (inserted right before `sing-box-full`).
+pub fn subscription_matrix() -> Vec<SubscriptionLinkInfo> {
+    let latest = latest_version_profile().version;
+    let mut rows: Vec<SubscriptionLinkInfo> =
+        Vec::with_capacity(static_matrix_rows().len() + SING_BOX_VERSION_PROFILES.len());
+    for info in static_matrix_rows() {
+        if info.format == SubscriptionFormat::SingBoxFull {
+            for profile in SING_BOX_VERSION_PROFILES {
+                let is_latest = profile.version == latest;
+                rows.push(SubscriptionLinkInfo {
+                    format: SubscriptionFormat::SingBoxVersion(profile.version),
+                    label: if is_latest {
+                        format!("sing-box {} 适配（最新）", profile.version)
+                    } else {
+                        format!("sing-box {} 适配", profile.version)
+                    },
+                    audience: if is_latest {
+                        "sing-box 最新稳定版".to_owned()
+                    } else {
+                        format!("sing-box {}", profile.supported)
+                    },
+                    note: profile.notes.to_owned(),
+                });
+            }
+        }
+        rows.push(info);
+    }
+    rows
 }
 
 #[derive(Debug, Error)]
@@ -100,6 +304,8 @@ pub enum SubscriptionError {
     Tls(String),
     #[error("sing-box configuration check failed: {0}")]
     Check(String),
+    #[error("override template rejected: {0}")]
+    Override(String),
     #[error(transparent)]
     Storage(#[from] ConfigError),
 }
@@ -126,7 +332,7 @@ pub fn regenerate(
     let _lock = store.acquire_operation_lock()?;
     let prior_artifacts = artifacts
         .iter()
-        .map(|(name, _)| (*name, read_artifact(store, name)))
+        .map(|(name, _)| (name.clone(), read_artifact(store, name)))
         .collect::<Vec<_>>();
     let prior_active = if update_active_config {
         fs::read(store.root().join(ACTIVE_CONFIG_RELATIVE_PATH)).ok()
@@ -151,12 +357,10 @@ pub fn regenerate(
     Ok(())
 }
 
-fn server_artifact<'a>(
-    artifacts: &'a [(&'static str, String)],
-) -> Result<&'a str, SubscriptionError> {
+fn server_artifact(artifacts: &[(String, String)]) -> Result<&str, SubscriptionError> {
     artifacts
         .iter()
-        .find(|(name, _)| *name == SING_BOX_SERVER_ARTIFACT)
+        .find(|(name, _)| name == SING_BOX_SERVER_ARTIFACT)
         .map(|(_, contents)| contents.as_str())
         .ok_or_else(|| {
             SubscriptionError::Check("no generated sing-box server configuration".to_owned())
@@ -172,7 +376,7 @@ fn read_artifact(store: &DeploymentStore, name: &str) -> Option<Vec<u8>> {
 /// so a failed write leaves its own target on the previous complete version.
 fn restore_replaced(
     store: &DeploymentStore,
-    prior_artifacts: &[(&'static str, Option<Vec<u8>>)],
+    prior_artifacts: &[(String, Option<Vec<u8>>)],
     prior_active: Option<&[u8]>,
 ) {
     for (name, prior) in prior_artifacts.iter().rev() {
@@ -190,7 +394,7 @@ fn restore_replaced(
 /// service health check.
 pub struct DeploymentSnapshot {
     pub config: Vec<u8>,
-    pub artifacts: Vec<(&'static str, Option<Vec<u8>>)>,
+    pub artifacts: Vec<(String, Option<Vec<u8>>)>,
     pub active_config: Option<Vec<u8>>,
 }
 
@@ -213,7 +417,7 @@ pub fn apply_config_transaction(
     let _lock = store.acquire_operation_lock()?;
     let prior_artifacts = artifacts
         .iter()
-        .map(|(name, _)| (*name, read_artifact(store, name)))
+        .map(|(name, _)| (name.clone(), read_artifact(store, name)))
         .collect::<Vec<_>>();
     let prior_active = fs::read(store.root().join(ACTIVE_CONFIG_RELATIVE_PATH)).ok();
     let prior_config = fs::read(store.root().join(crate::config::CONFIG_RELATIVE_PATH)).ok();
@@ -289,20 +493,83 @@ pub fn restore_config_transaction(
 pub fn generated_artifacts(
     config: &DeploymentConfig,
     root: &Path,
-) -> Result<Vec<(&'static str, String)>, SubscriptionError> {
+) -> Result<Vec<(String, String)>, SubscriptionError> {
     ensure_subscription_nodes(config)?;
     let nodes = crate::canonical::nodes(config);
     let uri = uri(config, &nodes)?;
-    Ok(vec![
+    let mut artifacts: Vec<(String, String)> = vec![
         (
-            SING_BOX_SERVER_ARTIFACT,
+            SING_BOX_SERVER_ARTIFACT.to_owned(),
             sing_box_server(config, &nodes, root)?,
         ),
-        (SING_BOX_ARTIFACT, sing_box(config, &nodes)?),
-        (CLASH_ARTIFACT, clash(config, &nodes)?),
-        (URI_ARTIFACT, uri.clone()),
-        (BASE64_URI_ARTIFACT, base64_uri(&uri)),
-    ])
+        (SING_BOX_ARTIFACT.to_owned(), sing_box(config, &nodes)?),
+        (CLASH_ARTIFACT.to_owned(), clash(config, &nodes)?),
+        (URI_ARTIFACT.to_owned(), uri.clone()),
+        (BASE64_URI_ARTIFACT.to_owned(), base64_uri(&uri)),
+        (
+            SHADOWROCKET_ARTIFACT.to_owned(),
+            shadowrocket(config, &nodes)?,
+        ),
+        (
+            SING_BOX_FULL_ARTIFACT.to_owned(),
+            sing_box_full(config, &nodes, latest_version_profile())?,
+        ),
+    ];
+    for profile in SING_BOX_VERSION_PROFILES {
+        artifacts.push((
+            SubscriptionFormat::SingBoxVersion(profile.version)
+                .artifact_name()
+                .into_owned(),
+            sing_box_full(config, &nodes, profile)?,
+        ));
+    }
+    artifacts.push((
+        SubscriptionFormat::ClashLegacy(CLASH_LEGACY_VERSION)
+            .artifact_name()
+            .into_owned(),
+        clash_legacy(config, &nodes)?,
+    ));
+    apply_client_overrides(root, &mut artifacts)?;
+    Ok(artifacts)
+}
+
+/// Deep-merges the administrator's override templates into the generated
+/// client artifacts. The historical bare `sing-box.json` and the URI formats
+/// are deliberately untouched so their byte compatibility never changes.
+fn apply_client_overrides(
+    root: &Path,
+    artifacts: &mut [(String, String)],
+) -> Result<(), SubscriptionError> {
+    let overrides = crate::override_template::Overrides::load(root)
+        .map_err(|error| SubscriptionError::Override(error.to_string()))?;
+    if let Some(sing_box_override) = &overrides.sing_box {
+        for (name, contents) in artifacts.iter_mut() {
+            if !name.starts_with("subscription-sing-box") || name == SING_BOX_ARTIFACT {
+                continue;
+            }
+            let mut value: serde_json::Value = serde_json::from_str(contents)
+                .map_err(|error| SubscriptionError::Override(error.to_string()))?;
+            crate::override_template::deep_merge(&mut value, sing_box_override);
+            *contents = serde_json::to_string_pretty(&value)
+                .map_err(|error| SubscriptionError::Override(error.to_string()))?;
+        }
+    }
+    if let Some(clash_override) = &overrides.clash {
+        let legacy_name = SubscriptionFormat::ClashLegacy(CLASH_LEGACY_VERSION)
+            .artifact_name()
+            .into_owned();
+        for (name, contents) in artifacts.iter_mut() {
+            if name != CLASH_ARTIFACT && *name != legacy_name {
+                continue;
+            }
+            let mut value: serde_yaml::Value = serde_yaml::from_str(contents)
+                .map_err(|error| SubscriptionError::Override(error.to_string()))?;
+            crate::override_template::deep_merge_yaml(&mut value, clash_override);
+            *contents = serde_yaml::to_string(&value)
+                .map_err(|error| SubscriptionError::Override(error.to_string()))?;
+        }
+    }
+    Ok(())
 }
 
 pub fn check_sing_box_config(
@@ -344,7 +611,7 @@ pub fn read_authorized(
         store
             .root()
             .join("var/lib/sbctl/artifacts")
-            .join(format.artifact_name()),
+            .join(format.artifact_name().as_ref()),
     )?)
     .into_owned())
 }
@@ -352,6 +619,14 @@ pub fn read_authorized(
 pub fn subscription_url(
     config: &DeploymentConfig,
     format: SubscriptionFormat,
+) -> Result<String, SubscriptionError> {
+    route_url(config, SubscriptionRoute::Format(format))
+}
+
+/// The full URL for any subscription route, including the QR and index pages.
+pub fn route_url(
+    config: &DeploymentConfig,
+    route: SubscriptionRoute,
 ) -> Result<String, SubscriptionError> {
     ensure_subscription_nodes(config)?;
     let prefix = match config.subscription_mode {
@@ -364,10 +639,14 @@ pub fn subscription_url(
             format!("https://{}", config.subscription_host)
         }
     };
+    let suffix = match route {
+        SubscriptionRoute::Format(format) => format.path_name(),
+        SubscriptionRoute::Qr(format) => format!("qr/{}", format.path_name()),
+        SubscriptionRoute::Index => "index".to_owned(),
+    };
     Ok(format!(
         "{prefix}/sub/{}/{}",
-        config.subscription_credential,
-        format.path_name()
+        config.subscription_credential, suffix
     ))
 }
 
@@ -683,7 +962,7 @@ fn subscription_http_response(
     if request.method() != Method::GET || request.uri().query().is_some() {
         return not_found_http_response();
     }
-    let Some((credential, format)) = parse_route(request.uri().path()) else {
+    let Some((credential, route)) = parse_route(request.uri().path()) else {
         return not_found_http_response();
     };
     if !constant_time_eq(
@@ -692,41 +971,94 @@ fn subscription_http_response(
     ) {
         return not_found_http_response();
     }
-    let body = match read_authorized(store, config, credential, format) {
+    match route {
+        SubscriptionRoute::Qr(format) => qr_http_response(config, credential, format),
+        SubscriptionRoute::Index => index_http_response(store, config, credential),
+        SubscriptionRoute::Format(format) => {
+            let body = match read_authorized(store, config, credential, format) {
+                Ok(body) => body,
+                Err(error) => return unavailable_http_response(credential, &error.to_string()),
+            };
+            let traffic = match crate::traffic::report(store, config) {
+                Ok(traffic) => traffic,
+                Err(error) => return unavailable_http_response(credential, &error.to_string()),
+            };
+            // subscription-userinfo follows the common client convention: upload and
+            // download are the bytes used in the current period, while `total` is the
+            // configured monthly allowance. Keep the historical used-total value when
+            // no allowance is configured so unlimited deployments remain informative.
+            let quota = if traffic.monthly_traffic_limit > 0 {
+                traffic.monthly_traffic_limit
+            } else {
+                traffic.total()
+            };
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", format.content_type())
+                .header("Cache-Control", "no-store")
+                .header("X-Content-Type-Options", "nosniff")
+                .header(
+                    "subscription-userinfo",
+                    format!(
+                        "upload={}; download={}; total={}; expire={}",
+                        traffic.transmitted,
+                        traffic.received,
+                        quota,
+                        traffic.next_reset.timestamp()
+                    ),
+                )
+                .header("Connection", "close")
+                .body(Full::new(Bytes::from(body)))
+                .expect("valid subscription response")
+        }
+    }
+}
+
+/// A scannable SVG QR code of the given format's subscription URL. The QR
+/// content is derived from the configuration only, so no artifact file is
+/// needed and the code always encodes the current URL.
+fn qr_http_response(
+    config: &DeploymentConfig,
+    credential: &str,
+    format: SubscriptionFormat,
+) -> Response<Full<Bytes>> {
+    let body = match subscription_url(config, format)
+        .map_err(|error| error.to_string())
+        .and_then(|url| crate::qr::render_svg(&url))
+    {
         Ok(body) => body,
-        Err(error) => return unavailable_http_response(credential, &error.to_string()),
-    };
-    let traffic = match crate::traffic::report(store, config) {
-        Ok(traffic) => traffic,
-        Err(error) => return unavailable_http_response(credential, &error.to_string()),
-    };
-    // subscription-userinfo follows the common client convention: upload and
-    // download are the bytes used in the current period, while `total` is the
-    // configured monthly allowance. Keep the historical used-total value when
-    // no allowance is configured so unlimited deployments remain informative.
-    let quota = if traffic.monthly_traffic_limit > 0 {
-        traffic.monthly_traffic_limit
-    } else {
-        traffic.total()
+        Err(error) => return unavailable_http_response(credential, &error),
     };
     Response::builder()
         .status(StatusCode::OK)
-        .header("Content-Type", format.content_type())
+        .header("Content-Type", "image/svg+xml")
         .header("Cache-Control", "no-store")
         .header("X-Content-Type-Options", "nosniff")
-        .header(
-            "subscription-userinfo",
-            format!(
-                "upload={}; download={}; total={}; expire={}",
-                traffic.transmitted,
-                traffic.received,
-                quota,
-                traffic.next_reset.timestamp()
-            ),
-        )
         .header("Connection", "close")
         .body(Full::new(Bytes::from(body)))
-        .expect("valid subscription response")
+        .expect("valid QR response")
+}
+
+/// The Chinese overview page: every subscription link with its label, the
+/// matching QR code, and per-client import instructions. Self-contained HTML
+/// with no external resources, so it renders offline and leaks nothing extra.
+fn index_http_response(
+    store: &DeploymentStore,
+    config: &DeploymentConfig,
+    credential: &str,
+) -> Response<Full<Bytes>> {
+    let body = match crate::index_page::render(store, config) {
+        Ok(body) => body,
+        Err(error) => return unavailable_http_response(credential, &error.to_string()),
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "text/html; charset=utf-8")
+        .header("Cache-Control", "no-store")
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Connection", "close")
+        .body(Full::new(Bytes::from(body)))
+        .expect("valid index response")
 }
 
 /// Loads and validates the pinned certificate for Direct HTTPS. Every loading
@@ -782,20 +1114,58 @@ fn not_found_http_response() -> Response<Full<Bytes>> {
         .expect("valid not-found response")
 }
 
-fn parse_route(target: &str) -> Option<(&str, SubscriptionFormat)> {
+fn parse_route(target: &str) -> Option<(&str, SubscriptionRoute)> {
     if target.contains('?') {
         return None;
     }
     let mut parts = target.strip_prefix("/sub/")?.split('/');
     let credential = parts.next()?;
-    let format = match parts.next()? {
-        "sing-box.json" => SubscriptionFormat::SingBox,
-        "clash.yaml" => SubscriptionFormat::Clash,
-        "uri" => SubscriptionFormat::Uri,
-        "uri.txt" => SubscriptionFormat::Base64Uri,
-        _ => return None,
+    let route = match parts.next()? {
+        "index" => SubscriptionRoute::Index,
+        // The trailing check below rejects anything after the format segment.
+        "qr" => SubscriptionRoute::Qr(parse_format_path(parts.next()?)?),
+        segment => SubscriptionRoute::Format(parse_format_path(segment)?),
     };
-    parts.next().is_none().then_some((credential, format))
+    parts.next().is_none().then_some((credential, route))
+}
+
+/// Parses one subscription format path segment. Versioned segments are only
+/// accepted when the version exists in the profile registry, so unknown
+/// versions 404 instead of surfacing as a missing artifact.
+fn parse_format_path(segment: &str) -> Option<SubscriptionFormat> {
+    match segment {
+        "sing-box.json" => return Some(SubscriptionFormat::SingBox),
+        "sing-box-full.json" => return Some(SubscriptionFormat::SingBoxFull),
+        "clash.yaml" => return Some(SubscriptionFormat::Clash),
+        "uri" => return Some(SubscriptionFormat::Uri),
+        "uri.txt" => return Some(SubscriptionFormat::Base64Uri),
+        "shadowrocket.txt" => return Some(SubscriptionFormat::Shadowrocket),
+        _ => {}
+    }
+    if let Some(version) = segment
+        .strip_prefix("sing-box-")
+        .and_then(|rest| rest.strip_suffix(".json"))
+    {
+        let version = parse_client_version(version)?;
+        return SING_BOX_VERSION_PROFILES
+            .iter()
+            .any(|profile| profile.version == version)
+            .then_some(SubscriptionFormat::SingBoxVersion(version));
+    }
+    if let Some(version) = segment
+        .strip_prefix("clash-")
+        .and_then(|rest| rest.strip_suffix(".yaml"))
+    {
+        let version = parse_client_version(version)?;
+        return (version == CLASH_LEGACY_VERSION)
+            .then_some(SubscriptionFormat::ClashLegacy(version));
+    }
+    None
+}
+
+fn parse_client_version(text: &str) -> Option<ClientVersion> {
+    let (major, minor) = text.split_once('.')?;
+    Some(ClientVersion::new(major.parse().ok()?, minor.parse().ok()?))
 }
 
 fn ensure_subscription_nodes(config: &DeploymentConfig) -> Result<(), SubscriptionError> {
@@ -819,10 +1189,19 @@ fn sing_box(
     config: &DeploymentConfig,
     nodes: &[CanonicalNode],
 ) -> Result<String, SubscriptionError> {
+    Ok(
+        serde_json::to_string_pretty(&json!({"outbounds": client_outbounds(config, nodes)}))
+            .expect("JSON values serialize"),
+    )
+}
+
+/// The five-protocol outbound list shared by the bare and full sing-box client
+/// artifacts, so the two can never drift apart on protocol fields.
+fn client_outbounds(config: &DeploymentConfig, nodes: &[CanonicalNode]) -> Vec<Value> {
     let skip_verify = client_skip_cert_verify(config);
-    let mut outbounds = Vec::new();
-    for node in nodes {
-        outbounds.push(match &node {
+    nodes
+        .iter()
+        .map(|node| match &node {
             CanonicalNode::VlessReality {
                 host,
                 port,
@@ -875,12 +1254,191 @@ fn sing_box(
                 "idle_session_check_interval": "30s", "idle_session_timeout": "30s",
                 "min_idle_session": 5,
                 "tls": {"enabled": true, "server_name": tls_server_name, "insecure": skip_verify}}),
-        });
+        })
+        .collect()
+}
+
+/// Group tags shared by the full sing-box client profile and the clash
+/// artifact so panel screenshots and docs read the same everywhere.
+pub const SELECTOR_TAG: &str = "🚀节点选择";
+pub const AUTO_TAG: &str = "♻️自动选择";
+const DIRECT_TAG: &str = "direct";
+
+/// Domains that must never be routed through the selector, kept in one place
+/// for the sing-box full profile, the clash artifact, and their overrides.
+pub const AI_DOMAIN_SUFFIXES: &[&str] = &[
+    "chatgpt.com",
+    "openai.com",
+    "oaistatic.com",
+    "oaiusercontent.com",
+    "x.com",
+    "twitter.com",
+    "twimg.com",
+];
+
+/// Domains that must not receive a fake IP: LAN names, OS connectivity
+/// checks, and NTP servers, matching the sing-box-yg client defaults.
+const FAKE_IP_FILTER_SUFFIXES: &[&str] = &[
+    "lan",
+    "local",
+    "msftconnecttest.com",
+    "msftncsi.com",
+    "captive.apple.com",
+    "time.windows.com",
+    "time.apple.com",
+    "time.android.com",
+    "ntp.org",
+];
+
+/// The full sing-box client configuration for one version profile: log, DNS
+/// (fake-ip with a direct resolver and a proxied DoH fallback), the tun
+/// inbound, grouped outbounds, rule-set routing, and the clash API used by
+/// dashboards and sbtui. Field differences between sing-box versions are
+/// concentrated here, guided by the changelog research in
+/// `docs/research/sing-box-client-version-differences.md`.
+fn sing_box_full(
+    config: &DeploymentConfig,
+    nodes: &[CanonicalNode],
+    profile: &SingBoxVersionProfile,
+) -> Result<String, SubscriptionError> {
+    let node_tags: Vec<&str> = nodes.iter().map(CanonicalNode::tag).collect();
+    let mut outbounds = client_outbounds(config, nodes);
+    let mut selector_members: Vec<&str> = vec![AUTO_TAG, DIRECT_TAG];
+    selector_members.extend(node_tags.iter().copied());
+    outbounds.push(json!({
+        "type": "selector",
+        "tag": SELECTOR_TAG,
+        "outbounds": selector_members,
+        "interrupt_exist_connections": false
+    }));
+    outbounds.push(json!({
+        "type": "urltest",
+        "tag": AUTO_TAG,
+        "outbounds": node_tags,
+        "url": config.client_latency_probe_url,
+        "interval": "5m",
+        "tolerance": 50,
+        "idle_timeout": "30m"
+    }));
+    outbounds.push(json!({"type": "direct", "tag": DIRECT_TAG}));
+
+    let fake_ip = config.client_dns_mode == crate::config::ClientDnsMode::FakeIp;
+    let mut dns_servers = vec![
+        json!({"type": "udp", "tag": "dns-direct", "server": "223.5.5.5"}),
+        json!({"type": "https", "tag": "dns-proxy", "server": "1.1.1.1", "detour": SELECTOR_TAG}),
+    ];
+    if fake_ip {
+        dns_servers.push(json!({
+            "type": "fakeip",
+            "tag": "dns-fakeip",
+            "inet4_range": "198.18.0.0/15",
+            "inet6_range": "fc00::/18"
+        }));
     }
-    Ok(
-        serde_json::to_string_pretty(&json!({"outbounds": outbounds}))
-            .expect("JSON values serialize"),
+
+    let mut dns_rules = vec![
+        json!({"clash_mode": "Direct", "server": "dns-direct"}),
+        json!({"clash_mode": "Global", "server": "dns-proxy"}),
+    ];
+    if config.client_rule_profile == crate::config::ClientRuleProfile::Standard {
+        dns_rules.push(json!({"rule_set": ["geosite-cn"], "server": "dns-direct"}));
+    }
+    dns_rules.push(json!({
+        "domain_suffix": FAKE_IP_FILTER_SUFFIXES,
+        "server": "dns-direct"
+    }));
+    if fake_ip {
+        dns_rules.push(json!({"query_type": ["A", "AAAA"], "server": "dns-fakeip"}));
+    }
+    // `independent_cache` is deprecated in 1.14 and removed in 1.16, and
+    // brings no benefit here, so the DNS object stays lean across versions.
+    let dns = json!({
+        "servers": dns_servers,
+        "rules": dns_rules,
+        "final": "dns-proxy"
+    });
+
+    let tun = json!({
+        "type": "tun",
+        "tag": "tun-in",
+        "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+        "mtu": 9000,
+        "auto_route": true,
+        "strict_route": true,
+        "stack": "mixed"
+    });
+
+    let mut route_rules = vec![
+        json!({"action": "sniff"}),
+        json!({"protocol": "dns", "action": "hijack-dns"}),
+        json!({"ip_is_private": true, "outbound": DIRECT_TAG}),
+        json!({
+            "domain_suffix": AI_DOMAIN_SUFFIXES,
+            "outbound": SELECTOR_TAG
+        }),
+    ];
+    let mut rule_sets: Vec<Value> = Vec::new();
+    if config.client_rule_profile == crate::config::ClientRuleProfile::Standard {
+        route_rules.push(json!({"rule_set": ["geosite-cn", "geoip-cn"], "outbound": DIRECT_TAG}));
+        rule_sets.push(remote_rule_set(
+            "geosite-cn",
+            &format!("{}/geosite/cn.srs", sing_box_rule_set_base(config)),
+        ));
+        rule_sets.push(remote_rule_set(
+            "geoip-cn",
+            &format!("{}/geoip/cn.srs", sing_box_rule_set_base(config)),
+        ));
+    }
+    let route = json!({
+        "rules": route_rules,
+        "rule_set": rule_sets,
+        "final": SELECTOR_TAG,
+        "auto_detect_interface": true,
+        "default_domain_resolver": {"server": "dns-direct"}
+    });
+
+    let mut cache_file = json!({"enabled": true, "store_fakeip": fake_ip});
+    if profile.supports_store_dns {
+        cache_file["store_dns"] = json!(true);
+    }
+
+    Ok(serde_json::to_string_pretty(&json!({
+        "log": {"level": "info", "timestamp": true},
+        "dns": dns,
+        "inbounds": [tun],
+        "outbounds": outbounds,
+        "route": route,
+        "experimental": {
+            "clash_api": {
+                "external_controller": "127.0.0.1:9090",
+                "default_mode": "rule"
+            },
+            "cache_file": cache_file
+        }
+    }))
+    .expect("JSON values serialize"))
+}
+
+/// The rule-set base for sing-box artifacts: the configured source root plus
+/// the `@sing` branch that carries the `.srs` binary rule-sets.
+fn sing_box_rule_set_base(config: &DeploymentConfig) -> String {
+    format!(
+        "{}@sing/geo",
+        config.client_rule_set_base_url.trim_end_matches('/')
     )
+}
+
+fn remote_rule_set(tag: &str, url: &str) -> Value {
+    json!({
+        "type": "remote",
+        "tag": tag,
+        "format": "binary",
+        "url": url,
+        // Deprecated in 1.14 (moved to route.http_clients) but only removed
+        // in 1.16, so every profile in the registry still accepts it.
+        "download_detour": SELECTOR_TAG,
+        "update_interval": "1d"
+    })
 }
 
 /// Hosts without an IPv6 route cannot dial the AAAA addresses the default
@@ -976,7 +1534,12 @@ fn sing_box_server(
     .expect("JSON values serialize"))
 }
 
-fn clash(config: &DeploymentConfig, nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
+/// The `proxies:` block plus the two historical groups shared by the current
+/// and the legacy clash artifacts, so protocol fields cannot drift apart.
+fn clash_proxies(
+    config: &DeploymentConfig,
+    nodes: &[CanonicalNode],
+) -> Result<String, SubscriptionError> {
     let skip = client_skip_cert_verify(config);
     let mut proxies = String::from("proxies:\n");
     for node in nodes {
@@ -1062,27 +1625,222 @@ fn clash(config: &DeploymentConfig, nodes: &[CanonicalNode]) -> Result<String, S
     for node in nodes {
         proxies.push_str(&format!("      - {}\n", node.tag()));
     }
-    proxies.push_str(concat!(
-        "dns:\n  enable: true\n  ipv6: false\n",
-        "  enhanced-mode: fake-ip\n  fake-ip-range: 198.18.0.1/16\n",
-        "  fake-ip-filter:\n    - '+.lan'\n    - '+.local'\n",
+    proxies.push_str("  - name: 🎯全球直连\n    type: select\n    proxies:\n      - DIRECT\n");
+    for node in nodes {
+        proxies.push_str(&format!("      - {}\n", node.tag()));
+    }
+    Ok(proxies)
+}
+
+/// The `dns:` block shared by the current and legacy clash artifacts; the
+/// fake-ip filter keeps LAN names, OS connectivity checks, and NTP on real
+/// DNS answers so captive-portal detection keeps working.
+fn clash_dns(config: &DeploymentConfig) -> String {
+    let mode = match config.client_dns_mode {
+        crate::config::ClientDnsMode::FakeIp => "fake-ip",
+        crate::config::ClientDnsMode::RedirHost => "redir-host",
+    };
+    let mut dns = format!(
+        "dns:\n  enable: true\n  ipv6: false\n  enhanced-mode: {mode}\n  fake-ip-range: 198.18.0.1/16\n  fake-ip-filter:\n"
+    );
+    for suffix in FAKE_IP_FILTER_SUFFIXES {
+        dns.push_str(&format!("    - '+.{suffix}'\n"));
+    }
+    dns.push_str(concat!(
         "  use-hosts: false\n  use-system-hosts: false\n",
         "  nameserver:\n    - 'https://1.1.1.1/dns-query#🌍选择代理节点'\n",
         "    - 'https://8.8.8.8/dns-query#🌍选择代理节点'\n",
         "  proxy-server-nameserver:\n    - https://223.5.5.5/dns-query\n",
-        "rules:\n",
-        "  - DOMAIN-SUFFIX,chatgpt.com,🌍选择代理节点\n",
-        "  - DOMAIN-SUFFIX,openai.com,🌍选择代理节点\n",
-        "  - DOMAIN-SUFFIX,oaistatic.com,🌍选择代理节点\n",
-        "  - DOMAIN-SUFFIX,oaiusercontent.com,🌍选择代理节点\n",
-        "  - DOMAIN-SUFFIX,x.com,🌍选择代理节点\n",
-        "  - DOMAIN-SUFFIX,twitter.com,🌍选择代理节点\n",
-        "  - DOMAIN-SUFFIX,twimg.com,🌍选择代理节点\n",
+    ));
+    dns
+}
+
+fn clash(config: &DeploymentConfig, nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
+    let mut output = clash_proxies(config, nodes)?;
+    // The AI suffix rules must precede the CN rule-set so OpenAI/X domains
+    // never fall into geosite-cn's direct verdict.
+    output.push_str("rules:\n");
+    for suffix in AI_DOMAIN_SUFFIXES {
+        output.push_str(&format!("  - DOMAIN-SUFFIX,{suffix},🌍选择代理节点\n"));
+    }
+    if config.client_rule_profile == crate::config::ClientRuleProfile::Standard {
+        let base = format!(
+            "{}@meta/geo",
+            config.client_rule_set_base_url.trim_end_matches('/')
+        );
+        output.push_str(&format!(
+            concat!(
+                "  - RULE-SET,geosite-private,🎯全球直连\n",
+                "  - RULE-SET,geoip-private,🎯全球直连\n",
+                "  - RULE-SET,geosite-cn,🎯全球直连\n",
+                "  - RULE-SET,geoip-cn,🎯全球直连\n",
+                "  - MATCH,🌍选择代理节点\n",
+                "rule-providers:\n",
+                "  geosite-private:\n",
+                "    type: http\n",
+                "    behavior: domain\n",
+                "    format: mrs\n",
+                "    url: {base}/geosite/private.mrs\n",
+                "    path: ./ruleset/geosite-private.mrs\n",
+                "    interval: 86400\n",
+                "  geoip-private:\n",
+                "    type: http\n",
+                "    behavior: ipcidr\n",
+                "    format: mrs\n",
+                "    url: {base}/geoip/private.mrs\n",
+                "    path: ./ruleset/geoip-private.mrs\n",
+                "    interval: 86400\n",
+                "  geosite-cn:\n",
+                "    type: http\n",
+                "    behavior: domain\n",
+                "    format: mrs\n",
+                "    url: {base}/geosite/cn.mrs\n",
+                "    path: ./ruleset/geosite-cn.mrs\n",
+                "    interval: 86400\n",
+                "  geoip-cn:\n",
+                "    type: http\n",
+                "    behavior: ipcidr\n",
+                "    format: mrs\n",
+                "    url: {base}/geoip/cn.mrs\n",
+                "    path: ./ruleset/geoip-cn.mrs\n",
+                "    interval: 86400\n",
+            ),
+            base = base
+        ));
+    } else {
+        output.push_str(concat!(
+            "  - GEOIP,LAN,DIRECT\n",
+            "  - GEOIP,CN,DIRECT\n",
+            "  - MATCH,🌍选择代理节点\n",
+        ));
+    }
+    output.push_str(&clash_dns(config));
+    Ok(output)
+}
+
+/// The mihomo 1.18.x compatibility artifact: same node and group layout as the
+/// current artifact, but with the pre-rule-set built-in GEOIP rules that the
+/// previous major line shipped everywhere.
+fn clash_legacy(
+    config: &DeploymentConfig,
+    nodes: &[CanonicalNode],
+) -> Result<String, SubscriptionError> {
+    let mut output = clash_proxies(config, nodes)?;
+    output.push_str("rules:\n");
+    for suffix in AI_DOMAIN_SUFFIXES {
+        output.push_str(&format!("  - DOMAIN-SUFFIX,{suffix},🌍选择代理节点\n"));
+    }
+    output.push_str(concat!(
         "  - GEOIP,LAN,DIRECT\n",
         "  - GEOIP,CN,DIRECT\n",
         "  - MATCH,🌍选择代理节点\n",
     ));
-    Ok(proxies)
+    output.push_str(&clash_dns(config));
+    Ok(output)
+}
+
+/// The Shadowrocket-adapted Base64 URI list (research:
+/// `docs/research/sing-box-client-version-differences.md` §6). Differences
+/// from the plain `uri` rendering: passwords and SNI values are always
+/// percent-encoded (Shadowrocket 2.2.44 fixed URI password decoding, which
+/// implies special characters must arrive encoded), TUIC carries
+/// `udp_relay_mode`, and AnyTLS follows the official anytls-go scheme with
+/// the path slash and without the non-standard `security` parameter.
+fn shadowrocket(
+    config: &DeploymentConfig,
+    nodes: &[CanonicalNode],
+) -> Result<String, SubscriptionError> {
+    let insecure = if client_skip_cert_verify(config) {
+        1
+    } else {
+        0
+    };
+    let mut uris = String::new();
+    for node in nodes {
+        match &node {
+            CanonicalNode::VlessReality {
+                host,
+                port,
+                uuid,
+                public_key,
+                short_id,
+                decoy_sni,
+                ..
+            } => uris.push_str(&format!("vless://{uuid}@{host}:{port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={}&fp=chrome&pbk={public_key}&sid={short_id}&type=tcp#{}\n", percent_encode(decoy_sni), node.tag())),
+            CanonicalNode::VmessWebsocket {
+                host,
+                port,
+                tls_server_name,
+                uuid,
+                path,
+            } => {
+                let payload = json!({"v": "2", "ps": node.tag(), "add": host, "port": port.to_string(), "id": uuid, "aid": "0", "scy": "auto", "net": "ws", "type": "none", "host": tls_server_name, "path": path, "tls": "tls", "sni": tls_server_name});
+                let encoded = base64::engine::general_purpose::STANDARD
+                    .encode(serde_json::to_vec(&payload).expect("JSON values serialize"));
+                uris.push_str(&format!("vmess://{encoded}\n"));
+            }
+            CanonicalNode::Hysteria2 {
+                host,
+                port,
+                tls_server_name,
+                password,
+            } => uris.push_str(&format!(
+                "hysteria2://{}@{}:{}?insecure={}&sni={}#{}\n",
+                percent_encode(password),
+                host,
+                port,
+                insecure,
+                percent_encode(tls_server_name),
+                node.tag()
+            )),
+            CanonicalNode::Tuic {
+                host,
+                port,
+                tls_server_name,
+                uuid,
+                password,
+            } => uris.push_str(&format!(
+                "tuic://{}:{}@{}:{}?congestion_control=bbr&udp_relay_mode=native&alpn=h3&insecure={}&sni={}#{}\n",
+                percent_encode(uuid),
+                percent_encode(password),
+                host,
+                port,
+                insecure,
+                percent_encode(tls_server_name),
+                node.tag()
+            )),
+            CanonicalNode::Anytls {
+                host,
+                port,
+                tls_server_name,
+                password,
+            } => uris.push_str(&format!(
+                "anytls://{}@{}:{}/?insecure={}&sni={}#{}\n",
+                percent_encode(password),
+                host,
+                port,
+                insecure,
+                percent_encode(tls_server_name),
+                node.tag()
+            )),
+        }
+    }
+    Ok(base64_uri(&uris))
+}
+
+/// Percent-encodes everything outside the RFC 3986 unreserved set so secrets
+/// with special characters survive URI parsing in every client.
+fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 fn uri(config: &DeploymentConfig, nodes: &[CanonicalNode]) -> Result<String, SubscriptionError> {
@@ -1319,7 +2077,10 @@ mod tests {
     use tempfile::TempDir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use super::{clash, generated_artifacts, regenerate, sing_box, uri};
+    use super::{
+        clash, clash_legacy, generated_artifacts, latest_version_profile, regenerate, shadowrocket,
+        sing_box, sing_box_full, uri,
+    };
     use crate::config::{
         DeploymentConfig, DeploymentStore, ManagedProtocol, ProtocolPorts, SubscriptionMode,
     };
@@ -1365,7 +2126,7 @@ mod tests {
         let artifacts = generated_artifacts(&config, fixture.path()).expect("artifacts generate");
         let references = artifacts
             .iter()
-            .map(|(name, contents)| (*name, contents.as_bytes()))
+            .map(|(name, contents)| (name.clone(), contents.as_bytes()))
             .collect::<Vec<_>>();
         store
             .initialize_with_artifacts(&config, &references)
@@ -1398,6 +2159,10 @@ mod tests {
 
         let sing_box = sing_box(&config, &nodes).expect("sing-box artifacts generate");
         let clash = clash(&config, &nodes).expect("clash artifacts generate");
+        let clash_legacy = clash_legacy(&config, &nodes).expect("legacy clash generates");
+        let shadowrocket = shadowrocket(&config, &nodes).expect("shadowrocket generates");
+        let sing_box_full = sing_box_full(&config, &nodes, latest_version_profile())
+            .expect("full config generates");
         let uri = uri(&config, &nodes).expect("uri artifacts generate");
 
         assert!(
@@ -1408,15 +2173,50 @@ mod tests {
             clash.contains("  - name: ♻️自动选择\n    type: url-test\n    url: http://www.gstatic.com/generate_204\n    interval: 300\n    tolerance: 50\n"),
             "clash subscription exposes the automatic selection group"
         );
+        assert!(
+            clash
+                .contains("  - name: 🎯全球直连\n    type: select\n    proxies:\n      - DIRECT\n"),
+            "clash subscription exposes the direct selection group"
+        );
         for rule in [
             "  - DOMAIN-SUFFIX,chatgpt.com,🌍选择代理节点\n",
-            "  - GEOIP,LAN,DIRECT\n",
-            "  - GEOIP,CN,DIRECT\n",
+            "  - DOMAIN-SUFFIX,x.com,🌍选择代理节点\n",
+            "  - RULE-SET,geosite-cn,🎯全球直连\n",
+            "  - RULE-SET,geoip-cn,🎯全球直连\n",
             "  - MATCH,🌍选择代理节点\n",
         ] {
             assert!(
                 clash.contains(rule),
                 "clash subscription carries rule: {rule}"
+            );
+        }
+        assert!(
+            clash.contains(
+                "url: https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/cn.mrs"
+            ),
+            "clash rule-providers reference the meta-branch rule-set base URL"
+        );
+        assert!(
+            clash.contains("enhanced-mode: fake-ip\n"),
+            "clash subscription defaults to fake-ip DNS"
+        );
+        // The legacy mihomo variant keeps the built-in GEOIP rules the 1.18
+        // line shipped, so old cores never need the remote rule-providers.
+        for rule in [
+            "  - RULE-SET,geosite-cn,🎯全球直连\n",
+            "  - GEOIP,LAN,DIRECT\n",
+            "  - GEOIP,CN,DIRECT\n",
+            "  - MATCH,🌍选择代理节点\n",
+        ] {
+            assert_eq!(
+                clash_legacy.contains(rule),
+                matches!(
+                    rule,
+                    "  - GEOIP,LAN,DIRECT\n"
+                        | "  - GEOIP,CN,DIRECT\n"
+                        | "  - MATCH,🌍选择代理节点\n"
+                ),
+                "legacy clash keeps GEOIP rules and skips rule-sets: {rule}"
             );
         }
 
@@ -1446,6 +2246,50 @@ mod tests {
             uri.contains("insecure=1"),
             "URI clients skip certificate verification"
         );
+        // The Shadowrocket artifact decodes to URIs with the SR-specific
+        // adaptations: encoded passwords and the official anytls scheme.
+        {
+            use base64::Engine as _;
+            let decoded = String::from_utf8(
+                base64::engine::general_purpose::STANDARD
+                    .decode(&shadowrocket)
+                    .expect("shadowrocket artifact is valid base64"),
+            )
+            .expect("shadowrocket URIs are UTF-8");
+            assert!(
+                decoded.contains("anytls://") && decoded.contains("/?insecure="),
+                "shadowrocket anytls URI follows the official scheme: {decoded}"
+            );
+            assert!(
+                decoded.contains("tuic://") && decoded.contains("udp_relay_mode=native"),
+                "shadowrocket tuic URI carries udp_relay_mode"
+            );
+            assert!(
+                !decoded.contains("security=tls"),
+                "shadowrocket URIs drop the non-standard security parameter"
+            );
+        }
+        // The full sing-box client profile carries DNS, tun, groups, routing,
+        // rule-sets, and the clash API for dashboards.
+        for fragment in [
+            "\"tun\"",
+            "🚀节点选择",
+            "♻️自动选择",
+            "\"selector\"",
+            "\"urltest\"",
+            "geosite-cn",
+            "geoip-cn",
+            "clash_api",
+            "cache_file",
+            "\"fakeip\"",
+            "223.5.5.5",
+            "chatgpt.com",
+        ] {
+            assert!(
+                sing_box_full.contains(fragment),
+                "full sing-box client profile carries {fragment}"
+            );
+        }
     }
 
     #[test]
@@ -2034,7 +2878,7 @@ mod tests {
         let artifacts = generated_artifacts(config, store.root()).expect("artifacts generate");
         let references = artifacts
             .iter()
-            .map(|(name, contents)| (*name, contents.as_bytes()))
+            .map(|(name, contents)| (name.clone(), contents.as_bytes()))
             .collect::<Vec<_>>();
         store
             .initialize_with_artifacts(config, &references)

@@ -20,11 +20,12 @@
 - 每个启用协议使用独立的 Proxy credential 和 Protocol listener port。
 - 端口支持手动指定，也支持自动分配。
 - 自动端口范围为 `10000–65535`，并统一检查 TCP/UDP 冲突和系统占用。
-- 生成四种订阅格式：
-  - sing-box JSON
-  - Clash/Mihomo YAML
-  - URI 文本
-  - Base64 URI 文本（Shadowrocket、V2rayN 等）
+- 生成多种订阅格式（完整矩阵见 `sbctl sub` 或 [docs/subscription-guide.md](docs/subscription-guide.md)）：
+  - sing-box JSON（精简/完整配置，1.12 → 最新版逐版本适配）
+  - Clash/Mihomo YAML（现行稳定版 + 1.18 兼容版）
+  - URI 文本 / Base64 URI 文本（V2rayN 等）
+  - Shadowrocket 适配 Base64 URI
+  - 每条链接对应的二维码（SVG）与中文总览页
 - 订阅凭据与协议凭据分离，只接受路径凭据，不接受 query 参数认证。
 - 支持 Direct、External proxy、IP fallback 三种订阅模式。
 - 支持 VPS 流量统计、自然月/锚定月账期和 `subscription-userinfo`。
@@ -208,12 +209,20 @@ sbctl node
 sbctl config show
 sbctl config validate
 
+# 服务端覆写模板（统一追加分流规则，见 docs/subscription-guide.md）
+sbctl config override show
+sbctl config override edit clash
+sbctl config override validate
+
 # 输出订阅地址
-sbctl sub
-sbctl sub --format sing-box
-sbctl sub --format clash
-sbctl sub --format uri
-sbctl sub --format base64-uri
+sbctl sub          # 全部链接矩阵（链接 + 二维码 + 标注 + 总览页）
+sbctl sub --format sing-box-full        # 单条链接（脚本友好）
+sbctl sub --format sing-box-1.12        # 指定 sing-box 版本适配
+sbctl sub --format clash / clash-1.18 / uri / base64-uri / shadowrocket
+
+# 二维码（终端渲染；默认 sing-box-full）
+sbctl qr
+sbctl qr --format shadowrocket
 
 # 轮换订阅凭据（旧订阅 URL 立即失效）
 sbctl credential rotate
@@ -222,6 +231,7 @@ sbctl credential rotate
 sbctl certificate obtain --email admin@example.com
 sbctl certificate renew
 sbctl certificate verify
+sbctl certificate status   # 有效期、SAN、剩余天数、deploy hook
 
 # 校验配置并重启服务
 sbctl restart --sing-box-bin /usr/local/bin/sing-box
@@ -241,14 +251,22 @@ sbctl uninstall
 sbctl uninstall --purge
 ```
 
-订阅地址格式为：
+订阅地址格式为（完整矩阵、版本差异与导入说明见 [docs/subscription-guide.md](docs/subscription-guide.md)）：
 
 ```text
-/sub/<subscription-credential>/sing-box.json
-/sub/<subscription-credential>/clash.yaml
-/sub/<subscription-credential>/uri
-/sub/<subscription-credential>/uri.txt
+/sub/<subscription-credential>/sing-box.json        # 精简配置（历史格式，逐字节稳定）
+/sub/<subscription-credential>/sing-box-full.json   # 最新稳定版完整客户端配置
+/sub/<subscription-credential>/sing-box-1.12.json   # sing-box 1.12.x 适配（1.13/1.14 同理）
+/sub/<subscription-credential>/clash.yaml           # mihomo 现行稳定版（rule-set 分流）
+/sub/<subscription-credential>/clash-1.18.yaml      # mihomo 1.18.x 兼容（内置 GEOIP 规则）
+/sub/<subscription-credential>/uri                  # 明文分享 URI
+/sub/<subscription-credential>/uri.txt              # Base64 URI（V2rayN 等）
+/sub/<subscription-credential>/shadowrocket.txt     # Shadowrocket 适配
+/sub/<subscription-credential>/qr/<格式>            # 对应链接的二维码（SVG，扫码即导入）
+/sub/<subscription-credential>/index                # 中文总览页（全链接 + 标注 + 二维码 + 导入步骤）
 ```
+
+sing-box 完整配置包含 DNS（fake-ip、分流解析）、tun 入站、🚀节点选择/♻️自动选择代理组、geosite-cn/geoip-cn 分流、AI 域名（ChatGPT/OpenAI/X.com）分流与 clash_api；每个 sing-box 版本的字段差异见 `docs/research/sing-box-client-version-differences.md`。覆写模板（`sbctl config override`）可在服务端统一追加规则，见 ADR-0021。
 
 `subscription-credential` 与任何协议的 UUID、password 都不同。订阅响应会包含动态生成的 `subscription-userinfo`，其中的流量统计是整张配置网卡的 VPS traffic，不代表单个协议或用户的流量。
 
@@ -269,6 +287,18 @@ sudo sbctl system bbr
 ```
 
 > 说明：TUIC 的 QUIC 拥塞控制（`congestion_control=bbr`）属于协议层，客户端与服务端均支持时即生效，与上述内核级 BBR 无关。BBR 需内核支持；若内核过低，`sysctl -w` 会报错并中止，不会改动其他设置。
+
+## 桌面客户端：sbtui（终端 TUI）
+
+仓库同时提供一个终端 TUI 代理客户端 [sbtui](crates/sbtui/README.md)，消费 sbctl 的订阅：
+
+```bash
+cargo build --release -p sbtui   # Windows / macOS / Linux
+```
+
+功能：订阅导入与自动归一化、代理组节点切换与延迟测试、系统代理开关、
+TUN 模式、实时速率与连接表、日志与分流规则查看、内核下载与版本管理。
+控制通道使用订阅端完整配置自带的 clash_api（127.0.0.1:9090）。
 
 ## 安全边界
 

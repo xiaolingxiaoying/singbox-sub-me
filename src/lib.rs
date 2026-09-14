@@ -1,7 +1,9 @@
 pub mod canonical;
 pub mod certificate;
 pub mod config;
+pub mod index_page;
 pub mod lifecycle;
+pub mod override_template;
 pub mod preflight;
 pub mod qr;
 pub mod release;

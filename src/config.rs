@@ -70,6 +70,21 @@ pub struct DeploymentConfig {
     pub client_display_timezone: String,
     #[serde(default)]
     pub anchored_reset_at: Option<String>,
+    /// Client artifact DNS mode: fake-ip (default) or redir-host.
+    #[serde(default = "default_client_dns_mode")]
+    pub client_dns_mode: ClientDnsMode,
+    /// Client artifact routing profile: standard pulls remote rule-sets,
+    /// minimal uses only built-in rules (ADR-0018 vendor neutrality).
+    #[serde(default = "default_client_rule_profile")]
+    pub client_rule_profile: ClientRuleProfile,
+    /// Base URL for remote rule-set downloads (jsDelivr + MetaCubeX by
+    /// default); change it to a mirror without touching generated templates.
+    #[serde(default = "default_client_rule_set_base_url")]
+    pub client_rule_set_base_url: String,
+    /// Latency probe URL for selector groups. Defaults to a China-reachable
+    /// URL because the groups hold DIRECT (see the aliyun probe history).
+    #[serde(default = "default_client_latency_probe_url")]
+    pub client_latency_probe_url: String,
     #[serde(default)]
     pub vless_reality: Option<VlessRealityCredentials>,
     #[serde(default)]
@@ -178,6 +193,66 @@ fn default_accounting_timezone() -> String {
 
 fn default_client_display_timezone() -> String {
     "Asia/Shanghai".to_owned()
+}
+
+/// Client artifact DNS mode: fake-ip answers with fake IPs so connections are
+/// routed before real resolution; redir-host resolves normally.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClientDnsMode {
+    #[default]
+    FakeIp,
+    RedirHost,
+}
+
+impl fmt::Display for ClientDnsMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::FakeIp => "fake-ip",
+            Self::RedirHost => "redir-host",
+        })
+    }
+}
+
+/// Client artifact routing profile. `standard` references remote rule-sets
+/// (geosite-cn / geoip-cn); `minimal` keeps every rule built-in so the client
+/// never contacts a rule CDN (ADR-0018 vendor neutrality).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClientRuleProfile {
+    #[default]
+    Standard,
+    Minimal,
+}
+
+impl fmt::Display for ClientRuleProfile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Standard => "standard",
+            Self::Minimal => "minimal",
+        })
+    }
+}
+
+fn default_client_dns_mode() -> ClientDnsMode {
+    ClientDnsMode::FakeIp
+}
+
+fn default_client_rule_profile() -> ClientRuleProfile {
+    ClientRuleProfile::Standard
+}
+
+/// jsDelivr serving the MetaCubeX/meta-rules-dat repository root. Branches
+/// are appended by the generators: `@sing/geo` for sing-box `.srs` rule-sets
+/// and `@meta/geo` for mihomo `.mrs` rule-providers.
+fn default_client_rule_set_base_url() -> String {
+    "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat".to_owned()
+}
+
+/// The selector group holds DIRECT, so the probe must succeed without a
+/// proxy; aliyun.com answers with a redirect, which mihomo counts as success.
+fn default_client_latency_probe_url() -> String {
+    "http://aliyun.com/generate_204".to_owned()
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -330,6 +405,10 @@ impl DeploymentConfig {
             client_display_timezone: default_client_display_timezone(),
             anchored_reset_at: None,
             certbot_email: None,
+            client_dns_mode: default_client_dns_mode(),
+            client_rule_profile: default_client_rule_profile(),
+            client_rule_set_base_url: default_client_rule_set_base_url(),
+            client_latency_probe_url: default_client_latency_probe_url(),
             vless_reality,
             vmess_websocket,
             hysteria2,
@@ -439,6 +518,20 @@ impl DeploymentConfig {
             client_display_timezone: client_display_timezone.clone(),
             anchored_reset_at: anchored_reset_at.clone(),
             certbot_email: certbot_email.clone(),
+            // Client template preferences survive a wizard rebuild; a fresh
+            // deployment takes the defaults.
+            client_dns_mode: existing
+                .map(|config| config.client_dns_mode.clone())
+                .unwrap_or_default(),
+            client_rule_profile: existing
+                .map(|config| config.client_rule_profile.clone())
+                .unwrap_or_default(),
+            client_rule_set_base_url: existing
+                .map(|config| config.client_rule_set_base_url.clone())
+                .unwrap_or_else(default_client_rule_set_base_url),
+            client_latency_probe_url: existing
+                .map(|config| config.client_latency_probe_url.clone())
+                .unwrap_or_else(default_client_latency_probe_url),
             vless_reality,
             vmess_websocket,
             hysteria2,
@@ -492,6 +585,25 @@ impl DeploymentConfig {
             return Err(ConfigError::InvalidValue(
                 "interface must be a Linux interface name",
             ));
+        }
+        for (field, url) in [
+            ("client_rule_set_base_url", &self.client_rule_set_base_url),
+            ("client_latency_probe_url", &self.client_latency_probe_url),
+        ] {
+            if url.is_empty()
+                || url.contains(char::is_whitespace)
+                || (!url.starts_with("http://") && !url.starts_with("https://"))
+            {
+                let message = match field {
+                    "client_rule_set_base_url" => {
+                        "client_rule_set_base_url must be an absolute http(s) URL without whitespace"
+                    }
+                    _ => {
+                        "client_latency_probe_url must be an absolute http(s) URL without whitespace"
+                    }
+                };
+                return Err(ConfigError::InvalidValue(message));
+            }
         }
         if self.enabled_protocols.is_empty() {
             return Err(ConfigError::InvalidValue(
@@ -1097,7 +1209,7 @@ impl DeploymentStore {
     pub fn initialize_with_artifacts(
         &self,
         config: &DeploymentConfig,
-        artifacts: &[(&str, &[u8])],
+        artifacts: &[(String, &[u8])],
     ) -> Result<(), ConfigError> {
         config.validate()?;
         let path = self.root.join(CONFIG_RELATIVE_PATH);

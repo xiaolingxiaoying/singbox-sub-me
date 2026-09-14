@@ -155,3 +155,19 @@ _Avoid_: Best-effort test, unit-test-only release
 **Subscription request failure**:
 An externally observable response for an invalid route or credential that reveals no authorization detail, while internal storage, traffic, or certificate failures are separately diagnosed through redacted service logs.
 _Avoid_: Credential error leak, silent 404 for every failure
+
+**Subscription matrix**:
+The complete set of subscription links sbctl generates from one canonical node model, each with a Chinese label, audience, and a matching QR link. Includes the byte-stable bare sing-box artifact and the versioned client profiles.
+_Avoid_: Subscription formats only, link list
+
+**Version profile**:
+A per-minor-version variant of the full sing-box client configuration (1.12 onward), generated from one template with only the field differences the upstream changelog research confirms, labeled with its supported range.
+_Avoid_: Per-client custom config, guesswork fields
+
+**Subscription route**:
+A parsed `/sub/<credential>/...` target: an artifact-backed format, a QR code for one format, or the overview index page. All routes share the path-credential security model and reject query parameters.
+_Avoid_: Query-parameter override, per-request rewrite
+
+**Override template**:
+An administrator-maintained server-side file under `etc/sbctl/overrides/` deep-merged into the generated client artifacts at regeneration time; `rules` arrays are prepended, everything else merges or replaces, and the bare sing-box artifact plus URI formats are never overridden.
+_Avoid_: Client-side override, per-request rewrite

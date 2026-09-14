@@ -39,7 +39,7 @@ install_output=$(
     --reality-decoy-sni www.cloudflare.com \
     --sing-box-bin "$fake_sing_box"
 )
-contains "$install_output" 'enabled protocols: vless-reality, vmess-websocket, hysteria2, tuic, anytls'
+contains "$install_output" '启用协议: vless-reality, vmess-websocket, hysteria2, tuic, anytls'
 
 systemctl is-active --quiet sbctl.service || fail 'sbctl.service is not active'
 systemctl is-active --quiet sing-box.service || fail 'sing-box.service is not active'
@@ -95,7 +95,7 @@ ip_install_output=$(
     --disable-protocol anytls \
     --sing-box-bin "$fake_sing_box"
 )
-contains "$ip_install_output" 'enabled protocols: vless-reality'
+contains "$ip_install_output" '启用协议: vless-reality'
 systemctl is-active --quiet sbctl.service || fail 'IP fallback sbctl.service is not active'
 systemctl is-active --quiet sing-box.service || fail 'IP fallback sing-box.service is not active'
 
@@ -128,7 +128,7 @@ direct_install_output=$(
     --reality-decoy-sni www.cloudflare.com \
     --sing-box-bin "$fake_sing_box"
 )
-contains "$direct_install_output" 'enabled protocols: vless-reality, vmess-websocket, hysteria2, tuic, anytls'
+contains "$direct_install_output" '启用协议: vless-reality, vmess-websocket, hysteria2, tuic, anytls'
 systemctl is-active --quiet sbctl-http.socket || fail 'sbctl-http.socket is not active'
 systemctl is-active --quiet sbctl.service || fail 'Direct sbctl.service is not active'
 systemctl is-active --quiet sing-box.service || fail 'Direct sing-box.service is not active'

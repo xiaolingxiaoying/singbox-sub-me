@@ -1,6 +1,7 @@
-//! Terminal QR rendering using the `qrcode` crate and UTF-8 half-blocks.
+//! QR rendering helpers built on the `qrcode` crate: terminal ANSI half-blocks
+//! for `sbctl qr` and standalone SVG documents for the subscription QR links.
 
-use qrcode::{Color, QrCode};
+use qrcode::{Color, QrCode, render::svg};
 
 /// Render a terminal ANSI QR code for `data` using black-on-white UTF-8
 /// half-blocks, which keeps the square roughly half as tall as a naive two-row
@@ -36,6 +37,18 @@ pub fn render_ansi(data: &str) -> Result<String, String> {
     }
     out.push_str("\x1b[0m");
     Ok(out)
+}
+
+/// Render a self-contained SVG document (black modules on white, quiet zone
+/// included) so a subscription QR link can be scanned from any browser screen.
+pub fn render_svg(data: &str) -> Result<String, String> {
+    let code = QrCode::new(data.as_bytes()).map_err(|error| error.to_string())?;
+    Ok(code
+        .render::<svg::Color>()
+        .dark_color(svg::Color("#000000"))
+        .light_color(svg::Color("#ffffff"))
+        .quiet_zone(true)
+        .build())
 }
 
 #[cfg(test)]

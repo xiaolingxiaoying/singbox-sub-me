@@ -17,6 +17,9 @@ const SBCTL_HTTP_SOCKET_MARKER: &str = "Description=sbctl Direct HTTPS public li
 const ACCOUNTING_RESET_MARKER: &str = "Description=sbctl accounting period reset";
 const CERTBOT_DEPLOY_HOOK: &str =
     "etc/letsencrypt/renewal-hooks/deploy/sbctl-certificate-deploy-hook";
+/// The same deploy-hook path relative to the deployment root, for status
+/// reporting and diagnostics outside the install/uninstall transactions.
+pub const CERTBOT_DEPLOY_HOOK_RELATIVE_PATH: &str = CERTBOT_DEPLOY_HOOK;
 const CERTBOT_DEPLOY_HOOK_MARKER: &str = "sbctl-managed Direct HTTPS certificate deploy hook";
 const CERTIFICATE_GROUP: &str = crate::certificate::CERTIFICATE_GROUP;
 

@@ -516,7 +516,7 @@ fn install_with_a_signed_manifest_downloads_and_verifies_sing_box() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("installation completed"));
+        .stdout(predicate::str::contains("后续必做清单"));
 
     server.join().expect("byte server exits");
     assert_eq!(
@@ -3222,11 +3222,12 @@ fn install_defaults_to_all_managed_protocols_writes_services_and_only_lists_fire
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "enabled protocols: vless-reality, vmess-websocket, hysteria2, tuic, anytls",
+            "启用协议: vless-reality, vmess-websocket, hysteria2, tuic, anytls",
         ))
-        .stdout(predicate::str::contains(
-            "required firewall ports (not changed):",
-        ));
+        .stdout(predicate::str::contains("后续必做清单"))
+        .stdout(predicate::str::contains("sudo ufw allow 80/tcp"))
+        .stdout(predicate::str::contains("sudo ufw allow 443/tcp"))
+        .stdout(predicate::str::contains("sbctl certificate obtain --email"));
 
     let config = fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
         .expect("installation persists configuration");

@@ -10,6 +10,12 @@ platform=$ID
 acceptance_lib=${SBCTL_ACCEPTANCE_LIB:-/usr/local/lib/sbctl-acceptance/fixture.sh}
 . "$acceptance_lib"
 
+# The acceptance image installs nginx for the reverse-proxy chain, and the
+# distro service auto-starts on TCP 80, which would starve the Direct mode
+# socket activation below. Stop it; the reverse-proxy section runs its own
+# private instance on 127.0.0.1:8080 instead.
+systemctl stop nginx >/dev/null 2>&1 || service nginx stop >/dev/null 2>&1 || true
+
 fail() { echo "acceptance failure: $*" >&2; exit 1; }
 contains() {
   printf '%s' "$1" | grep -F -- "$2" >/dev/null && return 0
@@ -24,7 +30,7 @@ chmod 0755 "$fake_sing_box"
 # Fresh direct-mode installation exercises the default five-protocol release artifact.
 fixture_root_for direct "$platform"
 install_output=$("$sbctl" --root "$root" install --subscription-host sub.example.test --interface ens3 --reality-decoy-sni www.cloudflare.com --sing-box-bin "$fake_sing_box" --no-start)
-contains "$install_output" 'enabled protocols: vless-reality, vmess-websocket, hysteria2, tuic, anytls'
+contains "$install_output" '启用协议: vless-reality, vmess-websocket, hysteria2, tuic, anytls'
 credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' "$root/etc/sbctl/config.toml")
 test -n "$credential" || fail 'direct subscription credential was not persisted'
 for protocol in vless-reality vmess-websocket hysteria2 tuic anytls; do
@@ -87,21 +93,39 @@ printf '10\n' > "$root/sys/class/net/ens3/statistics/rx_bytes"
 printf '20\n' > "$root/sys/class/net/ens3/statistics/tx_bytes"
 contains "$("$sbctl" --root "$root" traffic)" 'total: 107 bytes'
 state_before=$(stat -c '%Y %s' "$root/var/lib/sbctl/state.json")
-"$sbctl" --root "$root" serve --max-requests 7 &
+"$sbctl" --root "$root" serve --max-requests 24 &
+serve_pid=$!
 sleep 1
-for path in sing-box.json clash.yaml uri; do
+# Every artifact-backed format in the subscription matrix shares the traffic
+# metadata; the QR and index routes serve scannable/HTML bodies instead.
+for path in sing-box.json sing-box-full.json sing-box-1.12.json sing-box-1.13.json sing-box-1.14.json clash.yaml clash-1.18.yaml uri uri.txt shadowrocket.txt; do
   response=$(curl --silent --show-error --include "http://127.0.0.1:2080/sub/$credential/$path")
   contains "$response" 'HTTP/1.1 200 OK'
   contains "$response" 'subscription-userinfo: upload=71; download=36; total=999; expire='
 done
+for path in "qr/uri" index; do
+  response=$(curl --silent --show-error --include "http://127.0.0.1:2080/sub/$credential/$path")
+  contains "$response" 'HTTP/1.1 200 OK'
+done
+curl --silent "http://127.0.0.1:2080/sub/$credential/qr/clash.yaml" | grep -F '<svg' >/dev/null || fail 'QR route did not serve an SVG document'
+curl --silent "http://127.0.0.1:2080/sub/$credential/index" | grep -F 'sbctl 订阅中心' >/dev/null || fail 'index page did not render the overview title'
+curl --silent "http://127.0.0.1:2080/sub/$credential/sing-box-full.json" | python3 -c 'import json,sys; c=json.load(sys.stdin); assert "tun" in str(c["inbounds"][0]["type"]), c["inbounds"]; assert c["experimental"]["clash_api"]["external_controller"], c' || fail 'full sing-box profile lacks tun/clash_api'
+shadowrocket_body=$(curl --silent "http://127.0.0.1:2080/sub/$credential/shadowrocket.txt")
+printf '%s' "$shadowrocket_body" | python3 -c 'import base64,sys; base64.b64decode(sys.stdin.read().strip())' || fail 'shadowrocket artifact is not valid base64'
 query_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2080/sub/$credential/uri?credential=$credential")
 test "$query_status" = 404 || fail 'query-string credential was accepted'
 wrong_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2080/sub/wrong-credential/uri")
 test "$wrong_status" = 404 || fail 'invalid credential was not a uniform 404'
 bogus_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2080/sub/$credential/bogus")
 test "$bogus_status" = 404 || fail 'unknown subscription format path was not a uniform 404'
+unknown_version_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2080/sub/$credential/sing-box-1.09.json")
+test "$unknown_version_status" = 404 || fail 'unknown sing-box version was not a uniform 404'
 trailing_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2080/sub/$credential/uri/extra")
 test "$trailing_status" = 404 || fail 'trailing path segment was not a uniform 404'
+# The server only exits at its request cap, which exceeds the requests above;
+# stop it explicitly before continuing.
+kill "$serve_pid" 2>/dev/null || true
+wait "$serve_pid" 2>/dev/null || true
 test "$(stat -c '%Y %s' "$root/var/lib/sbctl/state.json")" = "$state_before" || fail 'subscription reads changed accounting state'
 
 # Missing accounting state returns a redacted 503 (not a 200 placeholder) and
@@ -209,12 +233,17 @@ fixture_root_for reverse "$platform"
 "$sbctl" --root "$root" config init --mode external-proxy --subscription-host sub.example.test --listen-port 2081 --interface ens3 --protocol vless-reality --protocol vmess-websocket --protocol hysteria2 --protocol tuic --protocol anytls --reality-decoy-sni www.cloudflare.com --sing-box-bin "$fake_sing_box"
 reverse_credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' "$root/etc/sbctl/config.toml")
 "$sbctl" --root "$root" accounting-reset >/dev/null
-"$sbctl" --root "$root" serve --max-requests 5 &
+"$sbctl" --root "$root" serve --max-requests 16 &
+reverse_serve_pid=$!
 sleep 1
-for format in sing-box.json clash.yaml uri uri.txt; do
+for format in sing-box.json sing-box-full.json sing-box-1.14.json clash.yaml clash-1.18.yaml uri uri.txt shadowrocket.txt; do
   curl --silent --show-error --dump-header "$work/$format.headers" --output "$work/$format.body" "http://127.0.0.1:2081/sub/$reverse_credential/$format"
   grep -F 'HTTP/1.1 200 OK' "$work/$format.headers" >/dev/null || fail "reverse-proxy $format did not respond"
   grep -Fi 'subscription-userinfo:' "$work/$format.headers" >/dev/null || fail "reverse-proxy $format lacks traffic metadata"
+done
+for path in "qr/uri" index; do
+  status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2081/sub/$reverse_credential/$path")
+  test "$status" = 200 || fail "reverse-proxy $path did not respond"
 done
 python3 - "$work/sing-box.json.body" "$work/clash.yaml.body" "$work/uri.body" <<'PY'
 import json
@@ -231,10 +260,54 @@ assert {node["type"] for node in clash["proxies"]} == expected
 for scheme in expected:
     assert f"{scheme}://" in uris, scheme
 PY
+# The full client profile must carry the tun inbound and the clash API that
+# dashboards (and sbtui) rely on.
+python3 - "$work/sing-box-full.json.body" <<'PY'
+import json, pathlib, sys
+full = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert full["inbounds"] and full["inbounds"][0]["type"] == "tun"
+assert full["experimental"]["clash_api"]["external_controller"]
+PY
+# The reverse-proxy chain must also work through a real reverse proxy: nginx
+# fronts the loopback endpoint the way an administrator's public entry would.
+if command -v nginx >/dev/null 2>&1; then
+  mkdir -p "$work/nginx/logs" "$work/nginx/temp" "$work/nginx/conf.d"
+  cat > "$work/nginx/proxy.conf" <<NGINX
+error_log logs/error.log;
+pid logs/nginx.pid;
+events { }
+http {
+  access_log logs/access.log;
+  client_body_temp_path temp/client_body;
+  proxy_temp_path temp/proxy;
+  server {
+    listen 127.0.0.1:8080;
+    location /sub/ {
+      proxy_pass http://127.0.0.1:2081;
+      proxy_set_header Host \$host;
+    }
+  }
+}
+NGINX
+  nginx -c "$work/nginx/proxy.conf" -p "$work/nginx" -g 'daemon off;' &
+  nginx_pid=$!
+  sleep 1
+  for format in sing-box-full.json clash.yaml shadowrocket.txt; do
+    status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:8080/sub/$reverse_credential/$format")
+    test "$status" = 200 || fail "nginx reverse proxy did not serve $format"
+  done
+  index_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:8080/sub/$reverse_credential/index")
+  test "$index_status" = 200 || fail 'nginx reverse proxy did not serve the index page'
+  kill "$nginx_pid" 2>/dev/null || true
+fi
 proxy_credential=$(sed -n 's|^vless://\([^@]*\)@.*|\1|p' "$work/uri.body")
 test -n "$proxy_credential" || fail 'VLESS proxy credential was not emitted'
 proxy_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2081/sub/$proxy_credential/uri")
 test "$proxy_status" = 404 || fail 'proxy credential authorized a subscription'
+# Stop the reverse-proxy fixture listener so verify-real's installs can bind
+# their own subscription ports afterwards.
+kill "$reverse_serve_pid" 2>/dev/null || true
+wait "$reverse_serve_pid" 2>/dev/null || true
 
 # Update check is read-only; a failed health check restores the known-good binaries and keeps a rollback point.
 fixture_root_for update "$platform"

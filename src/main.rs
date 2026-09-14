@@ -116,15 +116,16 @@ enum Command {
         #[command(subcommand)]
         command: ReleaseCommand,
     },
-    /// Retrieve a generated subscription representation using its path credential.
+    /// Print every subscription link with its label and QR link, or one raw
+    /// link when `--format` is given.
     Sub {
-        #[arg(long, value_enum)]
-        format: Option<CliSubscriptionFormat>,
+        #[arg(long, value_name = "FORMAT", value_parser = parse_cli_format)]
+        format: Option<sbctl::subscription::SubscriptionFormat>,
     },
     /// Print a terminal QR code for a generated subscription representation.
     Qr {
-        #[arg(long, value_enum)]
-        format: Option<CliSubscriptionFormat>,
+        #[arg(long, value_name = "FORMAT", value_parser = parse_cli_format)]
+        format: Option<sbctl::subscription::SubscriptionFormat>,
     },
     /// Rotate the Subscription credential so previous subscription URLs stop working.
     Credential {
@@ -258,6 +259,39 @@ enum ConfigCommand {
         #[arg(long, value_name = "PATH")]
         sing_box_bin: Option<PathBuf>,
     },
+    /// Manage the server-side client override templates merged into
+    /// subscription artifacts (etc/sbctl/overrides/).
+    Override {
+        #[command(subcommand)]
+        command: OverrideCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum OverrideCommand {
+    /// Show the override files and which artifacts they affect.
+    Show,
+    /// Open $EDITOR on one override template; saving regenerates artifacts.
+    Edit {
+        /// Which template to edit: sing-box or clash.
+        #[arg(value_enum)]
+        target: CliOverrideTarget,
+        /// sing-box binary used to validate the merged client profile.
+        #[arg(long, value_name = "PATH")]
+        sing_box_bin: Option<PathBuf>,
+    },
+    /// Validate the override templates without applying them.
+    Validate,
+    /// Delete both override templates and regenerate the artifacts.
+    Clear,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum CliOverrideTarget {
+    #[value(name = "sing-box")]
+    SingBox,
+    #[value(name = "clash")]
+    Clash,
 }
 
 #[derive(Debug, Subcommand)]
@@ -302,6 +336,8 @@ enum CertificateCommand {
     /// Validate the certificate and re-pin it for the service accounts. This is
     /// the Certbot deploy hook and the recommended post-renewal check.
     Verify,
+    /// Show the pinned certificate's validity, SANs, and deploy-hook state.
+    Status,
 }
 
 /// Host system tuning helpers. These require root and never touch the sing-box
@@ -364,12 +400,41 @@ enum CliAccountingPolicy {
     AnchoredMonth,
 }
 
-#[derive(Clone, Debug, ValueEnum)]
-enum CliSubscriptionFormat {
-    SingBox,
-    Clash,
-    Uri,
-    Base64Uri,
+/// Parses a subscription format id for `sbctl sub`/`sbctl qr`. Versioned ids
+/// (`sing-box-1.12`, `clash-1.18`) are accepted for any registered version so
+/// a new upstream minor only needs a registry entry.
+fn parse_cli_format(text: &str) -> Result<sbctl::subscription::SubscriptionFormat, String> {
+    use sbctl::subscription::{ClientVersion, SubscriptionFormat};
+    match text {
+        "sing-box" => Ok(SubscriptionFormat::SingBox),
+        "sing-box-full" => Ok(SubscriptionFormat::SingBoxFull),
+        "clash" => Ok(SubscriptionFormat::Clash),
+        "uri" => Ok(SubscriptionFormat::Uri),
+        "base64-uri" => Ok(SubscriptionFormat::Base64Uri),
+        "shadowrocket" => Ok(SubscriptionFormat::Shadowrocket),
+        other => {
+            let parse_version = |value: &str| -> Option<ClientVersion> {
+                let (major, minor) = value.split_once('.')?;
+                Some(ClientVersion::new(major.parse().ok()?, minor.parse().ok()?))
+            };
+            if let Some(version) = other.strip_prefix("sing-box-") {
+                let version = parse_version(version).ok_or_else(|| {
+                    format!("invalid sing-box version in '{other}'; expected e.g. sing-box-1.12")
+                })?;
+                return Ok(SubscriptionFormat::SingBoxVersion(version));
+            }
+            if let Some(version) = other.strip_prefix("clash-") {
+                let version = parse_version(version).ok_or_else(|| {
+                    format!("invalid clash version in '{other}'; expected e.g. clash-1.18")
+                })?;
+                return Ok(SubscriptionFormat::ClashLegacy(version));
+            }
+            Err(format!(
+                "unknown subscription format '{other}'; expected sing-box, sing-box-full, \
+sing-box-<version>, clash, clash-<version>, uri, base64-uri, or shadowrocket"
+            ))
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -398,17 +463,6 @@ enum SingBoxCommand {
     },
     /// Remove only the sbctl-owned sing-box binary and service.
     Remove,
-}
-
-impl From<CliSubscriptionFormat> for sbctl::subscription::SubscriptionFormat {
-    fn from(format: CliSubscriptionFormat) -> Self {
-        match format {
-            CliSubscriptionFormat::SingBox => Self::SingBox,
-            CliSubscriptionFormat::Clash => Self::Clash,
-            CliSubscriptionFormat::Uri => Self::Uri,
-            CliSubscriptionFormat::Base64Uri => Self::Base64Uri,
-        }
-    }
 }
 
 impl From<CliSubscriptionMode> for sbctl::config::SubscriptionMode {
@@ -530,8 +584,8 @@ fn main() -> ExitCode {
         ),
         Command::SingBox { command } => sing_box(root, command),
         Command::Release { command } => release(command),
-        Command::Sub { format } => print_subscription_urls(root, format.map(Into::into)),
-        Command::Qr { format } => print_subscription_qr(root, format.map(Into::into)),
+        Command::Sub { format } => print_subscription_urls(root, format),
+        Command::Qr { format } => print_subscription_qr(root, format),
         Command::Credential { command } => run_credential(root, command),
         Command::Serve { bind, max_requests } => serve_subscription(root, bind, max_requests),
         Command::Certificate { command } => run_certificate(root, command),
@@ -831,7 +885,7 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
         sbctl::lifecycle::install_checked_sing_box(root, &sing_box_bin)?;
         let references = artifacts
             .iter()
-            .map(|(name, contents)| (*name, contents.as_bytes()))
+            .map(|(name, contents)| (name.clone(), contents.as_bytes()))
             .collect::<Vec<_>>();
         let store = sbctl::config::DeploymentStore::new(root);
         store.initialize_with_artifacts(&config, &references)?;
@@ -861,16 +915,7 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
     })();
     match result {
         Ok(config) => {
-            println!(
-                "installation completed\nenabled protocols: {}\nrequired firewall ports (not changed):\n{}\n\n查看订阅地址: sbctl sub   订阅二维码: sbctl qr\n再次进入管理菜单: sbctl menu",
-                config
-                    .enabled_protocols
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                sbctl::lifecycle::required_firewall_ports(&config).join("\n")
-            );
+            print_post_install_checklist(&config);
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -881,6 +926,95 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// The step-by-step checklist printed after a successful install. sbctl never
+/// touches the firewall or DNS, so these are the steps the administrator must
+/// not skip; every line is a command that can be copied verbatim.
+fn print_post_install_checklist(config: &sbctl::config::DeploymentConfig) {
+    use sbctl::config::SubscriptionMode;
+    println!("安装完成");
+    println!(
+        "启用协议: {}",
+        config
+            .enabled_protocols
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!();
+    println!("后续必做清单（按顺序执行）:");
+    match config.subscription_mode {
+        SubscriptionMode::Direct => {
+            println!(
+                "  1. 确认域名解析: dig +short {} 应返回本机公网 IP",
+                config.subscription_host
+            );
+            println!("  2. 放行防火墙端口:");
+            println!("     sudo ufw allow 80/tcp && sudo ufw allow 443/tcp");
+            for port in firewall_port_commands(config) {
+                println!("     {port}");
+            }
+            println!("  3. 签发证书（替换为你的邮箱，仅用于 ACME 到期通知）:");
+            println!("     sbctl certificate obtain --email admin@example.com");
+            println!("  4. 检查证书与服务: sbctl certificate status && sbctl status");
+        }
+        SubscriptionMode::ExternalProxy => {
+            println!(
+                "  1. 在 Nginx/Caddy 中把 /sub/ 反代到 127.0.0.1:{}（HTTPS 与证书由反代负责）",
+                config.subscription_listen_port.unwrap_or(2080)
+            );
+            println!("  2. 放行协议防火墙端口:");
+            for port in firewall_port_commands(config) {
+                println!("     {port}");
+            }
+            println!("  3. 自检订阅（替换为你的域名与订阅凭据）:");
+            println!("     curl -fsS https://<域名>/sub/<凭据>/uri >/dev/null && echo OK");
+        }
+        SubscriptionMode::IpFallback => {
+            println!(
+                "  注意: IP fallback 订阅走明文 HTTP（端口 {}），安全性较低",
+                config.http_port.unwrap_or(2080)
+            );
+            println!("  1. 放行订阅端口:");
+            println!(
+                "     sudo ufw allow {}/tcp",
+                config.http_port.unwrap_or(2080)
+            );
+            println!("  2. 放行协议防火墙端口:");
+            for port in firewall_port_commands(config) {
+                println!("     {port}");
+            }
+            println!("  3. 自检订阅（替换为订阅凭据）:");
+            println!(
+                "     curl -fsS http://{}:{}/sub/<凭据>/uri >/dev/null && echo OK",
+                config.subscription_host,
+                config.http_port.unwrap_or(2080)
+            );
+        }
+    }
+    println!("  5. 查看订阅链接与二维码: sbctl sub   单条二维码: sbctl qr");
+    println!("  6. 订阅总览页（手机扫码导入）: sbctl sub 输出中的 index 链接");
+    println!("再次进入管理菜单: sbctl menu");
+}
+
+/// Copy-paste-ready `ufw allow` commands for every enabled protocol port.
+fn firewall_port_commands(config: &sbctl::config::DeploymentConfig) -> Vec<String> {
+    use sbctl::config::ManagedProtocol;
+    let mut commands = Vec::new();
+    for protocol in &config.enabled_protocols {
+        let transport = match protocol {
+            ManagedProtocol::VlessReality
+            | ManagedProtocol::VmessWebsocket
+            | ManagedProtocol::Anytls => "tcp",
+            ManagedProtocol::Hysteria2 | ManagedProtocol::Tuic => "udp",
+        };
+        if let Some(port) = config.protocol_listener_port(protocol) {
+            commands.push(format!("sudo ufw allow {port}/{transport}  # {protocol}"));
+        }
+    }
+    commands
 }
 
 fn menu(root: &Path) -> ExitCode {
@@ -1101,14 +1235,18 @@ fn menu_subscriptions(root: &Path) {
         clear_menu_screen();
         print_menu_header(root);
         print_menu_section("订阅中心");
-        println!("1. 查看四种订阅地址");
-        println!("2. 显示 sing-box 二维码");
-        println!("3. 显示 Clash/Mihomo 二维码");
-        println!("4. 显示 URI 二维码");
-        println!("5. 显示 Base64 URI 二维码（Shadowrocket / V2rayN）");
-        println!("6. 配置订阅入口");
-        println!("7. 轮换订阅凭据（旧链接立即失效）");
-        println!("8. 重新生成订阅工件");
+        println!("1. 查看全部订阅链接与二维码");
+        println!("2. 显示 sing-box 完整配置二维码");
+        println!("3. 显示 sing-box 精简配置二维码");
+        println!("4. 显示 Clash/Mihomo 二维码");
+        println!("5. 显示 Clash 1.18 兼容二维码");
+        println!("6. 显示 URI 二维码");
+        println!("7. 显示 Base64 URI 二维码（V2rayN）");
+        println!("8. 显示 Shadowrocket 二维码");
+        println!("9. 配置订阅入口");
+        println!("10. 轮换订阅凭据（旧链接立即失效）");
+        println!("11. 重新生成订阅工件");
+        println!("12. 客户端模板配置（DNS / 分流规则档位 / 延迟探测）");
         println!("0. 返回");
         match read_menu_choice("请选择 [0]: ").as_deref() {
             Some("0") | None => return,
@@ -1117,42 +1255,69 @@ fn menu_subscriptions(root: &Path) {
                 pause_menu();
             }
             Some("2") => {
-                print_subscription_qr(root, Some(sbctl::subscription::SubscriptionFormat::SingBox));
+                print_subscription_qr(
+                    root,
+                    Some(sbctl::subscription::SubscriptionFormat::SingBoxFull),
+                );
                 pause_menu();
             }
             Some("3") => {
-                print_subscription_qr(root, Some(sbctl::subscription::SubscriptionFormat::Clash));
+                print_subscription_qr(root, Some(sbctl::subscription::SubscriptionFormat::SingBox));
                 pause_menu();
             }
             Some("4") => {
-                print_subscription_qr(root, Some(sbctl::subscription::SubscriptionFormat::Uri));
+                print_subscription_qr(root, Some(sbctl::subscription::SubscriptionFormat::Clash));
                 pause_menu();
             }
             Some("5") => {
+                print_subscription_qr(
+                    root,
+                    Some(sbctl::subscription::SubscriptionFormat::ClashLegacy(
+                        sbctl::subscription::CLASH_LEGACY_VERSION,
+                    )),
+                );
+                pause_menu();
+            }
+            Some("6") => {
+                print_subscription_qr(root, Some(sbctl::subscription::SubscriptionFormat::Uri));
+                pause_menu();
+            }
+            Some("7") => {
                 print_subscription_qr(
                     root,
                     Some(sbctl::subscription::SubscriptionFormat::Base64Uri),
                 );
                 pause_menu();
             }
-            Some("6") => {
+            Some("8") => {
+                print_subscription_qr(
+                    root,
+                    Some(sbctl::subscription::SubscriptionFormat::Shadowrocket),
+                );
+                pause_menu();
+            }
+            Some("9") => {
                 run_topic_wizard(root, sbctl::wizard::ConfigurationTopic::Subscription);
                 pause_menu();
             }
-            Some("7") => {
+            Some("10") => {
                 if confirm_menu_action("确认轮换订阅凭据？旧订阅 URL 将立即失效") {
                     rotate_subscription_credential(root);
                 }
                 pause_menu();
             }
-            Some("8") => {
+            Some("11") => {
                 if confirm_menu_action("确认重新生成并校验订阅工件？") {
                     regenerate(root, None);
                 }
                 pause_menu();
             }
+            Some("12") => {
+                run_topic_wizard(root, sbctl::wizard::ConfigurationTopic::ClientTemplate);
+                pause_menu();
+            }
             Some(_) => {
-                eprintln!("无效选择，请输入 0 到 8。");
+                eprintln!("无效选择，请输入 0 到 12。");
                 pause_menu();
             }
         }
@@ -1567,6 +1732,18 @@ fn restart(root: &Path, sing_box_bin: Option<PathBuf>) -> ExitCode {
 
 fn run_certificate(root: &Path, command: CertificateCommand) -> ExitCode {
     let store = sbctl::config::DeploymentStore::new(root);
+    if let CertificateCommand::Status = command {
+        return match store.load() {
+            Ok(config) => {
+                print_certificate_status(root, &store, &config);
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("certificate operation failed: {error}");
+                ExitCode::from(2)
+            }
+        };
+    }
     let result = store.load().and_then(|config| {
         match command {
             CertificateCommand::Obtain { email } => {
@@ -1574,6 +1751,9 @@ fn run_certificate(root: &Path, command: CertificateCommand) -> ExitCode {
             }
             CertificateCommand::Renew => sbctl::certificate::renew(&store, &config),
             CertificateCommand::Verify => sbctl::certificate::deploy_hook(&store, &config),
+            // Handled above with its own report; the compiler cannot see that
+            // this closure is only reached for the remaining commands.
+            CertificateCommand::Status => unreachable!("handled before the operation match"),
         }
         .map(|validated| {
             println!(
@@ -1672,27 +1852,42 @@ fn print_subscription_urls(
     root: &Path,
     format: Option<sbctl::subscription::SubscriptionFormat>,
 ) -> ExitCode {
+    use sbctl::subscription::SubscriptionRoute;
     let store = sbctl::config::DeploymentStore::new(root);
     let result = store.load().and_then(|config| {
         let is_ip_fallback =
             config.subscription_mode == sbctl::config::SubscriptionMode::IpFallback;
-        let formats = match format {
-            Some(format) => vec![format],
-            None => [
-                sbctl::subscription::SubscriptionFormat::SingBox,
-                sbctl::subscription::SubscriptionFormat::Clash,
-                sbctl::subscription::SubscriptionFormat::Uri,
-                sbctl::subscription::SubscriptionFormat::Base64Uri,
-            ]
-            .into_iter()
-            .collect(),
+        let contents = match format {
+            Some(format) => sbctl::subscription::subscription_url(&config, format)
+                .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?,
+            None => {
+                let mut table = String::new();
+                for info in sbctl::subscription::subscription_matrix() {
+                    let url = sbctl::subscription::subscription_url(&config, info.format).map_err(
+                        |error| sbctl::config::ConfigError::StateContent(error.to_string()),
+                    )?;
+                    let qr =
+                        sbctl::subscription::route_url(&config, SubscriptionRoute::Qr(info.format))
+                            .map_err(|error| {
+                                sbctl::config::ConfigError::StateContent(error.to_string())
+                            })?;
+                    table.push_str(&format!(
+                        "{label}\n  订阅链接：{url}\n  二维码：{qr}\n  说明：{note}\n\n",
+                        label = info.label,
+                        url = url,
+                        qr = qr,
+                        note = info.note
+                    ));
+                }
+                let index = sbctl::subscription::route_url(&config, SubscriptionRoute::Index)
+                    .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+                table.push_str(&format!(
+                    "订阅总览页（含全部二维码与导入步骤）：\n  {index}\n"
+                ));
+                table
+            }
         };
-        formats
-            .into_iter()
-            .map(|format| sbctl::subscription::subscription_url(&config, format))
-            .collect::<Result<Vec<_>, _>>()
-            .map(|urls| (urls.join("\n"), is_ip_fallback))
-            .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))
+        Ok((contents, is_ip_fallback))
     });
     match result {
         Ok((contents, is_ip_fallback)) => {
@@ -1717,22 +1912,14 @@ fn print_subscription_qr(
 ) -> ExitCode {
     let store = sbctl::config::DeploymentStore::new(root);
     let result = store.load().and_then(|config| {
-        let format = format.unwrap_or(sbctl::subscription::SubscriptionFormat::SingBox);
+        let format = format.unwrap_or(sbctl::subscription::SubscriptionFormat::SingBoxFull);
         sbctl::subscription::subscription_url(&config, format)
             .map(|url| (url, format))
             .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))
     });
     match result {
         Ok((url, format)) => {
-            let label = match format {
-                sbctl::subscription::SubscriptionFormat::SingBox => "sing-box",
-                sbctl::subscription::SubscriptionFormat::Clash => "clash/mihomo",
-                sbctl::subscription::SubscriptionFormat::Uri => "uri",
-                sbctl::subscription::SubscriptionFormat::Base64Uri => {
-                    "Base64 URI（Shadowrocket / V2rayN）"
-                }
-            };
-            println!("{label} 订阅二维码：");
+            println!("{} 订阅二维码：", format.display_label());
             println!("{url}");
             match sbctl::qr::render_ansi(&url) {
                 Ok(qr) => println!("{qr}"),
@@ -1750,11 +1937,103 @@ fn print_subscription_qr(
     }
 }
 
+/// Prints the human-readable certificate report for `sbctl certificate status`:
+/// validity window with days remaining, SAN coverage, deploy-hook presence,
+/// and the fix commands when something is off.
+fn print_certificate_status(
+    root: &Path,
+    store: &sbctl::config::DeploymentStore,
+    config: &sbctl::config::DeploymentConfig,
+) {
+    use sbctl::config::SubscriptionMode;
+    if config.subscription_mode != SubscriptionMode::Direct {
+        println!(
+            "当前订阅模式为 {}，证书由反向代理或自签机制负责，sbctl 不管理证书。",
+            config.subscription_mode
+        );
+        return;
+    }
+    let status = sbctl::certificate::status(store, config);
+    println!("Direct 订阅证书状态（{host}）:", host = status.host);
+    match status.state {
+        "ok" => {
+            let not_before = status
+                .not_before
+                .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+                .map(|when| when.to_rfc3339())
+                .unwrap_or_else(|| "unknown".to_owned());
+            let not_after = status
+                .not_after
+                .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+                .map(|when| when.to_rfc3339())
+                .unwrap_or_else(|| "unknown".to_owned());
+            let days = status.not_after.and_then(days_until);
+            println!("  状态: 有效");
+            println!("  生效自: {not_before}");
+            println!("  有效期至: {not_after}");
+            if let Some(days) = days {
+                println!("  剩余天数: {days} 天");
+                if days < 14 {
+                    println!(
+                        "  提醒: 证书即将到期；确认 certbot.timer 在运行（systemctl status certbot.timer）"
+                    );
+                }
+            }
+            if !status.san.is_empty() {
+                println!("  SAN: {}", status.san.join(", "));
+            }
+            if let Some(fingerprint) = &status.fingerprint {
+                println!("  SHA-256 指纹: {fingerprint}");
+            }
+        }
+        _ => {
+            println!("  状态: 异常");
+            if let Some(error) = &status.error {
+                println!("  原因: {error}");
+            }
+            println!(
+                "  修复: sbctl certificate renew（续期）或 sbctl certificate obtain --email <邮箱>（首次签发）"
+            );
+        }
+    }
+    let hook = root.join(sbctl::lifecycle::CERTBOT_DEPLOY_HOOK_RELATIVE_PATH);
+    if hook.is_file() {
+        println!("  Certbot deploy hook: 已安装（续期后自动校验并固定证书）");
+    } else {
+        println!(
+            "  Certbot deploy hook: 未找到（{}）；续期后需要手动执行 sbctl certificate verify",
+            hook.display()
+        );
+    }
+}
+
+fn days_until(timestamp: i64) -> Option<i64> {
+    let now = chrono::Utc::now().timestamp();
+    Some((timestamp - now).div_euclid(86_400))
+}
+
 fn print_status(root: &Path) -> ExitCode {
     match sbctl::config::DeploymentStore::new(root).load() {
         Ok(config) => {
             println!("{}", config.summary());
             println!("\n{}", sbctl::lifecycle::service_status(root));
+            if config.subscription_mode == sbctl::config::SubscriptionMode::Direct {
+                let status =
+                    sbctl::certificate::status(&sbctl::config::DeploymentStore::new(root), &config);
+                if status.state == "ok"
+                    && let Some(not_after) = status.not_after
+                    && let Some(days) = days_until(not_after)
+                {
+                    let hint = if days < 14 {
+                        "（即将到期，请检查 certbot.timer）"
+                    } else {
+                        ""
+                    };
+                    println!("\n证书剩余有效期: {days} 天{hint}");
+                } else if let Some(error) = &status.error {
+                    println!("\n证书状态: 异常（{error}）；运行 sbctl certificate status 查看详情");
+                }
+            }
             match sbctl::traffic::report(&sbctl::config::DeploymentStore::new(root), &config) {
                 Ok(report) => println!(
                     "\n{}\n下一次刷新（VPS: {}）: {}\n下一次刷新（客户端: {}）: {}",
@@ -1925,6 +2204,126 @@ fn run_accounting_reset(root: &Path) -> ExitCode {
     }
 }
 
+/// Manages the server-side override templates (`sbctl config override ...`).
+/// Overrides merge into the generated client artifacts at regeneration time,
+/// so every edit finishes with a regenerate to keep the served files current.
+fn run_config_override(root: &Path, command: OverrideCommand) -> ExitCode {
+    use sbctl::override_template::{CLASH_OVERRIDE_RELATIVE_PATH, SING_BOX_OVERRIDE_RELATIVE_PATH};
+    let overrides_dir = root.join("etc/sbctl/overrides");
+    match command {
+        OverrideCommand::Show => {
+            for (target, relative) in [
+                ("sing-box", SING_BOX_OVERRIDE_RELATIVE_PATH),
+                ("clash", CLASH_OVERRIDE_RELATIVE_PATH),
+            ] {
+                let path = root.join(relative);
+                let status = if path.is_file() {
+                    "已启用"
+                } else {
+                    "未创建（不影响生成）"
+                };
+                println!("{target:9} {}  [{status}]", path.display());
+            }
+            println!(
+                "\n合并语义：对象递归合并；数组整体替换；键名为 rules 的数组会前插到生成规则之前。"
+            );
+            println!(
+                "影响工件：sing-box-full.json、sing-box-<版本>.json、clash.yaml、clash-1.18.yaml。"
+            );
+            ExitCode::SUCCESS
+        }
+        OverrideCommand::Validate => match sbctl::override_template::Overrides::load(root) {
+            Ok(overrides) => {
+                println!(
+                    "override 模板有效（sing-box: {}，clash: {}）",
+                    if overrides.sing_box.is_some() {
+                        "已配置"
+                    } else {
+                        "无"
+                    },
+                    if overrides.clash.is_some() {
+                        "已配置"
+                    } else {
+                        "无"
+                    }
+                );
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("override 校验失败：{error}");
+                ExitCode::from(2)
+            }
+        },
+        OverrideCommand::Edit {
+            target,
+            sing_box_bin,
+        } => {
+            let (relative, sample) = match target {
+                CliOverrideTarget::SingBox => (
+                    SING_BOX_OVERRIDE_RELATIVE_PATH,
+                    "{\n  \"log\": {\"level\": \"warn\"},\n  \"route\": {\n    \"rules\": [\n      {\"domain_suffix\": [\"example.com\"], \"outbound\": \"🚀节点选择\"}\n    ]\n  }\n}\n",
+                ),
+                CliOverrideTarget::Clash => (
+                    CLASH_OVERRIDE_RELATIVE_PATH,
+                    "# 键名为 rules 的数组会前插到生成规则之前。\nrules:\n  - DOMAIN-SUFFIX,example.com,🌍选择代理节点\n",
+                ),
+            };
+            let path = root.join(relative);
+            if !path.is_file() {
+                if let Err(error) = fs::create_dir_all(&overrides_dir) {
+                    eprintln!("override 编辑失败：{error}");
+                    return ExitCode::from(2);
+                }
+                if let Err(error) = fs::write(&path, sample) {
+                    eprintln!("override 编辑失败：{error}");
+                    return ExitCode::from(2);
+                }
+            }
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
+                if cfg!(windows) {
+                    "notepad".to_owned()
+                } else {
+                    "vi".to_owned()
+                }
+            });
+            let status = std::process::Command::new(&editor).arg(&path).status();
+            match status {
+                Ok(status) if status.success() => {}
+                Ok(status) => {
+                    eprintln!("编辑器 {editor} 退出码 {status}；模板未验证。");
+                    return ExitCode::from(2);
+                }
+                Err(error) => {
+                    eprintln!("无法启动编辑器 {editor}：{error}（可设置 EDITOR 环境变量）");
+                    return ExitCode::from(2);
+                }
+            }
+            if let Err(error) = sbctl::override_template::Overrides::load(root) {
+                eprintln!("override 校验失败：{error}");
+                return ExitCode::from(2);
+            }
+            println!("override 模板有效，正在重新生成订阅工件……");
+            regenerate(root, sing_box_bin)
+        }
+        OverrideCommand::Clear => {
+            for relative in [
+                SING_BOX_OVERRIDE_RELATIVE_PATH,
+                CLASH_OVERRIDE_RELATIVE_PATH,
+            ] {
+                let path = root.join(relative);
+                if path.is_file()
+                    && let Err(error) = fs::remove_file(&path)
+                {
+                    eprintln!("override 清理失败：{error}");
+                    return ExitCode::from(2);
+                }
+            }
+            println!("override 模板已删除，正在重新生成订阅工件……");
+            regenerate(root, None)
+        }
+    }
+}
+
 fn regenerate(root: &Path, sing_box_bin: Option<PathBuf>) -> ExitCode {
     let store = sbctl::config::DeploymentStore::new(root);
     // Regenerate always re-syncs the active sing-box configuration on a live
@@ -1967,6 +2366,7 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
     let store = sbctl::config::DeploymentStore::new(root);
     let result = match command {
         ConfigCommand::Wizard { sing_box_bin } => return run_config_wizard(root, sing_box_bin),
+        ConfigCommand::Override { command } => return run_config_override(root, command),
         ConfigCommand::Init {
             mode,
             subscription_host,
@@ -2041,7 +2441,7 @@ fn run_config(root: &Path, command: ConfigCommand) -> ExitCode {
                 };
                 let artifact_references = generated_artifacts
                     .iter()
-                    .map(|(name, contents)| (*name, contents.as_bytes()))
+                    .map(|(name, contents)| (name.clone(), contents.as_bytes()))
                     .collect::<Vec<_>>();
                 let requires_sing_box_check = config.enabled_protocols.iter().any(|protocol| {
                     matches!(
@@ -2236,7 +2636,7 @@ fn commit_config_change(
                     .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
                 let references = artifacts
                     .iter()
-                    .map(|(name, contents)| (*name, contents.as_bytes()))
+                    .map(|(name, contents)| (name.clone(), contents.as_bytes()))
                     .collect::<Vec<_>>();
                 store.initialize_with_artifacts(new, &references)?;
                 Ok(())

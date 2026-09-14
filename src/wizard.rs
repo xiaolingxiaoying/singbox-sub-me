@@ -41,6 +41,7 @@ pub enum ConfigurationTopic {
     Subscription,
     Protocols,
     Traffic,
+    ClientTemplate,
 }
 
 /// The interactive prompt boundary. Production uses the console; tests drive a
@@ -93,9 +94,9 @@ pub fn run<C: Prompts>(
     let certbot_email = if mode == SubscriptionMode::Direct {
         ask_value(
             prompts,
-            "Certbot 证书邮箱（仅 Direct 模式使用）",
+            "Certbot 证书邮箱（仅用于 ACME 到期通知，可留空跳过）",
             existing.and_then(|config| config.certbot_email.clone()),
-            |value| Ok(value.to_owned()),
+            parse_certbot_email,
         )?
     } else {
         None
@@ -367,9 +368,9 @@ pub fn run_topic<C: Prompts>(
             certbot_email = if mode == SubscriptionMode::Direct {
                 ask_value(
                     prompts,
-                    "Certbot 证书邮箱（可选）",
+                    "Certbot 证书邮箱（仅用于 ACME 到期通知，可留空跳过）",
                     certbot_email.clone(),
-                    |value| Ok(value.trim().to_owned()),
+                    parse_certbot_email,
                 )?
             } else {
                 None
@@ -474,6 +475,47 @@ pub fn run_topic<C: Prompts>(
             } else {
                 None
             };
+        }
+        ConfigurationTopic::ClientTemplate => {
+            // The client template fields never flow through DeploymentOptions;
+            // this topic mutates them directly and returns before the shared
+            // apply_options path so an unchanged deployment still detects.
+            let mut new = existing.clone();
+            new.client_dns_mode = ask_required(
+                prompts,
+                "客户端 DNS 模式（1 fake-ip / 2 redir-host）",
+                Some(new.client_dns_mode.to_string()),
+                parse_dns_mode,
+            )?;
+            new.client_rule_profile = ask_required(
+                prompts,
+                "分流规则档位（1 standard 远程规则集 / 2 minimal 内置规则）",
+                Some(new.client_rule_profile.to_string()),
+                parse_rule_profile,
+            )?;
+            new.client_rule_set_base_url = ask_required(
+                prompts,
+                "规则集下载源根目录（不含分支；@sing/@meta 由 sbctl 附加）",
+                Some(new.client_rule_set_base_url.clone()),
+                parse_http_url,
+            )?;
+            new.client_latency_probe_url = ask_required(
+                prompts,
+                "选择组延迟探测 URL",
+                Some(new.client_latency_probe_url.clone()),
+                parse_http_url,
+            )?;
+            new.validate()?;
+            if new == *existing {
+                return Ok(WizardOutcome::Unchanged);
+            }
+            prompts.report("");
+            prompts.report("配置变更预览：");
+            prompts.report(&new.summary());
+            if !prompts.confirm("确认应用以上配置？", false)? {
+                return Ok(WizardOutcome::Cancelled);
+            }
+            return Ok(WizardOutcome::Changed(new));
         }
         ConfigurationTopic::Traffic => {
             monthly_traffic_limit = ask_value(
@@ -739,6 +781,51 @@ fn parse_policy(value: &str) -> Result<AccountingPolicy, String> {
         "natural-month" | "natural" | "1" => Ok(AccountingPolicy::NaturalMonth),
         "anchored-month" | "anchored" | "2" => Ok(AccountingPolicy::AnchoredMonth),
         _ => Err("账期策略必须是 natural-month 或 anchored-month".to_owned()),
+    }
+}
+
+/// Validates the Certbot registration email: it is optional (an empty answer
+/// skips ACME email registration) and only ever used for expiry notices.
+fn parse_certbot_email(value: &str) -> Result<String, String> {
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        return Ok(value);
+    }
+    let domain_valid = value.split_once('@').is_some_and(|(local, domain)| {
+        !local.is_empty() && !domain.is_empty() && crate::config::host_is_valid(domain)
+    });
+    if !value.contains(char::is_whitespace) && value.matches('@').count() == 1 && domain_valid {
+        Ok(value)
+    } else {
+        Err(
+            "邮箱格式无效（示例 admin@example.com）；该邮箱仅用于证书到期通知，可留空跳过"
+                .to_owned(),
+        )
+    }
+}
+
+fn parse_dns_mode(value: &str) -> Result<crate::config::ClientDnsMode, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "fake-ip" | "1" => Ok(crate::config::ClientDnsMode::FakeIp),
+        "redir-host" | "2" => Ok(crate::config::ClientDnsMode::RedirHost),
+        _ => Err("DNS 模式必须是 fake-ip 或 redir-host".to_owned()),
+    }
+}
+
+fn parse_rule_profile(value: &str) -> Result<crate::config::ClientRuleProfile, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "standard" | "1" => Ok(crate::config::ClientRuleProfile::Standard),
+        "minimal" | "2" => Ok(crate::config::ClientRuleProfile::Minimal),
+        _ => Err("规则档位必须是 standard 或 minimal".to_owned()),
+    }
+}
+
+fn parse_http_url(value: &str) -> Result<String, String> {
+    let value = value.trim().to_owned();
+    if value.starts_with("http://") || value.starts_with("https://") {
+        Ok(value.trim_end_matches('/').to_owned())
+    } else {
+        Err("必须是 http:// 或 https:// 开头的 URL".to_owned())
     }
 }
 
