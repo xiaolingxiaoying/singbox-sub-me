@@ -32,3 +32,4 @@ Type: task
 ## Comments
 
 - 2026-09-14：路由矩阵、parse_route 重构、CLI sub/qr、sbctl sub 全矩阵均已实现并在 debian:12/ubuntu:22.04 验收通过。
+- 2026-09-14（收口）：新增 `sbctl qr --all` 与位置参数 `sbctl qr <format>`；补齐 `parse_route`/`route_url`/响应头单测与 4 格式字节稳定性回归（`src/subscription.rs`、`src/qr.rs`、`tests/cli.rs`）。Docker 验收 debian:12 / ubuntu:22.04 / ubuntu:24.04 三发行版全绿。

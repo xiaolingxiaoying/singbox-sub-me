@@ -39,3 +39,4 @@ Blocked by: 01
 ## Comments
 
 - 2026-09-14：已实现 1.12/1.13/1.14 三个 profile + full；真核验证：1.12.4/1.13.9/1.14.0 分别 check 对应 profile 通过（含 full）。研究结论在 docs/research/sing-box-client-version-differences.md。
+- 2026-09-14（收口）：新增 minimal/standard rule_profile 单测与版本差异（`store_dns`）单测；新增 `tests/version_profiles.rs` 与 CI `sing-box-profiles` job，用 1.12.25/1.13.21/1.14.0 真核 `sing-box check` 验证对应 profile（本地实跑通过）。

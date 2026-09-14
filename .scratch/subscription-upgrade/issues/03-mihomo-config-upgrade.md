@@ -35,3 +35,4 @@ Blocked by: 01
 ## Comments
 
 - 2026-09-14：clash.yaml 升级为 rule-set（@meta/geo .mrs）+ 三组代理组；clash-1.18.yaml 保留内置 GEOIP；真核（sing-box）验证的是 sing-box 侧，mihomo -t 待有 mihomo 内核的环境补验。
+- 2026-09-14（收口）：新增 `tests/clash_mihomo.rs` 与 CI `mihomo-profiles` job，用 mihomo v1.19.30 对 clash.yaml / clash-1.18.yaml 跑 `-t`（本地实跑通过）。

@@ -34,3 +34,4 @@ Blocked by: 02, 03
 ## Comments
 
 - 2026-09-14：config 四字段 + validate + wizard ClientTemplate 主题 + override 深度合并（rules 前插）+ config override CLI 已实现；ADR-0021 已写。
+- 2026-09-14（收口）：`config override validate` 现在生成合并后工件并用真核 `sing-box check` 校验（`resolve_sing_box_bin` 支持显式/托管/PATH）；新增 override 合并端到端单测（rules 前插、bare 与 URI 工件不受影响）以及非法 override 中止且不修改盘上工件的单测。

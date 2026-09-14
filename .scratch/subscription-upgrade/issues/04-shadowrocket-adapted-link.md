@@ -32,3 +32,4 @@ Blocked by: 01
 ## Comments
 
 - 2026-09-14：shadowrocket.txt 实现百分号编码、anytls 官方 URI 规范、tuic udp_relay_mode；真机导入待用户验证。
+- 2026-09-14（收口）：研究确认 Shadowrocket 五协议均受支持，无需跳过节点；index 页补充各协议最低版本（VLESS Reality 2.2.16 / TUIC 2.2.12 / Hysteria2 2.2.35 / AnyTLS 2.2.64）。

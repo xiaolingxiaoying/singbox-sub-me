@@ -29,3 +29,4 @@ Type: task
 ## Comments
 
 - 2026-09-14：certificate status 命令、status 证书剩余天数、安装后必做清单（ufw 逐端口）、wizard 邮箱校验已实现。
+- 2026-09-14（收口）：新增 `certificate obtain --no-email`（交互二次确认后映射 `--register-unsafely-without-email`）与 `acme_email_is_valid`；wizard 留空邮箱需显式确认；`docs/installation.md` 增补证书状态与后续必做清单；CLI 测试覆盖非法邮箱 / 缺参 / 未确认 / 互斥。真机签发仍待人工验证。

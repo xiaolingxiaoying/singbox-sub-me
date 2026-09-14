@@ -32,3 +32,4 @@ Blocked by: 01
 ## Comments
 
 - 2026-09-14：qr/<format> SVG 端点与 index 中文总览页已实现并在验收中断言。
+- 2026-09-14（收口）：`src/qr.rs` 新增 SVG 可解析性与确定性单测；`sbctl qr --all` 渲染矩阵全部格式（CLI 测试按 ANSI 块数量断言）。
