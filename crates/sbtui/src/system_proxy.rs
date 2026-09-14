@@ -5,7 +5,7 @@
 //! set via gsettings when available, otherwise the TUI prints the env-var
 //! commands to apply manually.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 /// How the core receives traffic: a local mixed inbound paired with the OS
@@ -72,15 +72,18 @@ fn capture_backup() {
     if path.is_file() {
         return;
     }
-    let mut backup = ProxyBackup::default();
     #[cfg(windows)]
-    {
-        backup.windows = capture_windows();
-    }
+    let backup = ProxyBackup {
+        windows: capture_windows(),
+        macos: None,
+    };
     #[cfg(target_os = "macos")]
-    {
-        backup.macos = capture_macos();
-    }
+    let backup = ProxyBackup {
+        windows: None,
+        macos: capture_macos(),
+    };
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let backup = ProxyBackup::default();
     if let Ok(text) = serde_json::to_string_pretty(&backup) {
         let _ = std::fs::write(&path, text);
     }
@@ -148,6 +151,7 @@ fn capture_windows() -> Option<WindowsBackup> {
 
 #[cfg(windows)]
 fn apply_windows(backup: &WindowsBackup) -> Result<()> {
+    use anyhow::Context;
     use winreg::RegKey;
     use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
@@ -253,6 +257,7 @@ fn apply_macos(backup: &MacosBackup) -> Result<()> {
 
 #[cfg(windows)]
 fn set_proxy(server: &str) -> Result<()> {
+    use anyhow::Context;
     use winreg::RegKey;
     use winreg::enums::*;
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
