@@ -31,6 +31,20 @@ pub fn normalize_url(input: &str) -> String {
     format!("{base}{credential}/{TARGET_FORMAT}")
 }
 
+/// Returns the original bare sing-box JSON endpoint when it can act as a
+/// compatibility fallback for an older sbctl server. Such servers predate the
+/// full client profile route but still serve a valid node list at this URL.
+/// All other inputs deliberately return `None`: changing a Clash, URI, QR, or
+/// local-file source into a fallback would silently alter its meaning.
+pub fn bare_sing_box_fallback_url(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    let (_, tail) = trimmed.split_once("/sub/")?;
+    let mut parts = tail.split('/').filter(|part| !part.is_empty());
+    let credential = parts.next()?;
+    let suffix = parts.collect::<Vec<_>>().join("/");
+    (!credential.is_empty() && suffix == "sing-box.json").then(|| trimmed.to_owned())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeSummary {
     pub tag: String,
@@ -186,7 +200,7 @@ pub fn parse(body: &str) -> Result<SubscriptionSnapshot> {
             .cloned()
             .context("sing-box subscription lacks an outbounds array")?;
         let mut snapshot = summarize(&outbounds)?;
-        snapshot.raw = trimmed.to_owned();
+        snapshot.raw = wrap_bare_node_config(value, &snapshot.nodes)?;
         return Ok(snapshot);
     }
     if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(body.trim()) {
@@ -199,6 +213,61 @@ pub fn parse(body: &str) -> Result<SubscriptionSnapshot> {
         return parse_uri_list(body);
     }
     bail!("subscription body is not a sing-box JSON or URI list")
+}
+
+/// Turns an older sbctl bare-node response into a locally runnable sing-box
+/// client configuration. Full profiles pass through untouched; only the
+/// historical `{ "outbounds": [...] }` shape is augmented.
+fn wrap_bare_node_config(value: serde_json::Value, nodes: &[NodeSummary]) -> Result<String> {
+    let has_inbounds = value.get("inbounds").is_some();
+    let has_clash_api = value.pointer("/experimental/clash_api").is_some();
+    let has_selector = value
+        .get("outbounds")
+        .and_then(|outbounds| outbounds.as_array())
+        .is_some_and(|outbounds| {
+            outbounds.iter().any(|outbound| {
+                outbound.get("type").and_then(|kind| kind.as_str()) == Some("selector")
+            })
+        });
+    if has_inbounds || has_clash_api || has_selector {
+        return Ok(serde_json::to_string_pretty(&value)?);
+    }
+    if nodes.is_empty() {
+        bail!("bare sing-box subscription has no proxy nodes");
+    }
+    let mut outbounds = value
+        .get("outbounds")
+        .and_then(|outbounds| outbounds.as_array())
+        .cloned()
+        .context("sing-box subscription lacks an outbounds array")?;
+    let selector_tag = "🚀节点选择";
+    let direct_tag = "direct";
+    outbounds.insert(
+        0,
+        serde_json::json!({
+            "type": "selector",
+            "tag": selector_tag,
+            "outbounds": nodes.iter().map(|node| node.tag.clone()).collect::<Vec<_>>()
+        }),
+    );
+    if !outbounds
+        .iter()
+        .any(|outbound| outbound.get("tag").and_then(|tag| tag.as_str()) == Some(direct_tag))
+    {
+        outbounds.push(serde_json::json!({ "type": "direct", "tag": direct_tag }));
+    }
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "log": { "level": "info" },
+        "inbounds": [],
+        "outbounds": outbounds,
+        "route": { "auto_detect_interface": true, "final": selector_tag },
+        "experimental": {
+            "clash_api": {
+                "external_controller": "127.0.0.1:9090",
+                "secret": ""
+            }
+        }
+    }))?)
 }
 
 /// Converts share URIs (vless/vmess/hysteria2/tuic/anytls) into sing-box
@@ -397,6 +466,36 @@ mod tests {
         assert_eq!(
             normalize_url("https://other/sub/xyz"),
             format!("https://other/sub/xyz/{TARGET_FORMAT}"),
+        );
+    }
+
+    #[test]
+    fn recognizes_only_a_bare_sing_box_source_as_a_compatibility_fallback() {
+        let bare = "https://sub.example.test/sub/cred-abc/sing-box.json";
+        assert_eq!(bare_sing_box_fallback_url(bare).as_deref(), Some(bare));
+        assert_eq!(
+            bare_sing_box_fallback_url("https://sub.example.test/sub/cred-abc/clash.yaml"),
+            None
+        );
+        assert_eq!(bare_sing_box_fallback_url("file:C:/profile.json"), None);
+    }
+
+    #[test]
+    fn wraps_a_bare_node_list_into_a_local_runtime_profile() {
+        let body = serde_json::json!({
+            "outbounds": [
+                {"type": "vless", "tag": "node-a", "server": "1.2.3.4", "server_port": 443, "uuid": "u"}
+            ]
+        })
+        .to_string();
+        let snapshot = parse(&body).expect("bare node list parses");
+        let value: serde_json::Value = serde_json::from_str(&snapshot.raw).expect("runtime JSON");
+        assert_eq!(value["outbounds"][0]["type"], "selector");
+        assert_eq!(value["outbounds"][0]["tag"], "🚀节点选择");
+        assert_eq!(value["route"]["final"], "🚀节点选择");
+        assert_eq!(
+            value["experimental"]["clash_api"]["external_controller"],
+            "127.0.0.1:9090"
         );
     }
 

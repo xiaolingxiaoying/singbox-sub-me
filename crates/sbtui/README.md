@@ -75,6 +75,8 @@ cargo build --release -p sbtui
 
 - 订阅支持 sbctl 四种格式链接 + 二维码/总览页链接（自动归一化），也支持纯
   sing-box JSON 链接与 Base64 URI 列表（自动转换）；
+- 兼容旧版 sbctl：若完整客户端配置端点不存在，且原始链接是 `sing-box.json`，
+  客户端会回退到该裸节点端点，并在本地补齐选择器、入站与 Clash API；
 - 订阅缓存按档案存放在 `cache/`，更新失败时保留上次缓存；
 - 内核从 sing-box 官方 Release 下载并进行 SHA-256 校验；Windows 的 TUN 模式另需
   将 `wintun.dll` 放在内核同目录；

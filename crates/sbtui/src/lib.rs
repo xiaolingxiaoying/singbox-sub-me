@@ -626,7 +626,7 @@ async fn stop_core(app: &mut App) -> Result<()> {
 }
 
 async fn update_subscription(app: &mut App) -> Result<()> {
-    let (name, url, mirror) = {
+    let (name, url, source, mirror) = {
         let profile = app
             .profiles
             .active_profile()
@@ -634,25 +634,27 @@ async fn update_subscription(app: &mut App) -> Result<()> {
         (
             profile.name.clone(),
             profile.url.clone(),
+            profile.source.clone(),
             app.settings.mirror.clone(),
         )
     };
     app.status = format!("正在更新订阅 {name}…");
-    let fetched = match subscription::fetch(&url, &mirror).await {
-        Ok(fetched) => fetched,
-        Err(error) => {
-            // Offline fallback: keep serving the previous cache rather than
-            // failing the update and stranding the user with nothing.
-            let cache = settings::profile_cache_path(&app.dir, &name);
-            if tokio::fs::try_exists(&cache).await.unwrap_or(false) {
-                app.status = format!("订阅更新失败（{error}）；继续使用上次缓存");
-                let status = app.status.clone();
-                app.log(status);
-                return Ok(());
+    let (fetched, used_bare_compatibility) =
+        match fetch_subscription_with_compatibility(&url, &source, &mirror).await {
+            Ok(result) => result,
+            Err(error) => {
+                // Offline fallback: keep serving the previous cache rather than
+                // failing the update and stranding the user with nothing.
+                let cache = settings::profile_cache_path(&app.dir, &name);
+                if tokio::fs::try_exists(&cache).await.unwrap_or(false) {
+                    app.status = format!("订阅更新失败（{error}）；继续使用上次缓存");
+                    let status = app.status.clone();
+                    app.log(status);
+                    return Ok(());
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
-    };
+        };
     app.subscription_usage = fetched.userinfo;
     let snapshot = subscription::parse(&fetched.body)?;
     let cache = settings::profile_cache_path(&app.dir, &name);
@@ -663,10 +665,45 @@ async fn update_subscription(app: &mut App) -> Result<()> {
         }
     }
     app.profiles.save(&app.dir)?;
-    app.status = format!("订阅已更新（{} 个节点）", snapshot.nodes.len());
+    app.status = if used_bare_compatibility {
+        format!(
+            "订阅已更新（{} 个节点；已兼容旧版裸节点端点）",
+            snapshot.nodes.len()
+        )
+    } else {
+        format!("订阅已更新（{} 个节点）", snapshot.nodes.len())
+    };
     let status = app.status.clone();
     app.log(status);
     Ok(())
+}
+
+/// Fetch a full client profile first. Old sbctl deployments may expose only
+/// the original `sing-box.json` node list; when that exact source is known,
+/// retry it and let `subscription::parse` construct the required local
+/// runtime wrapper.
+async fn fetch_subscription_with_compatibility(
+    url: &str,
+    source: &str,
+    mirror: &str,
+) -> Result<(subscription::Fetched, bool)> {
+    match subscription::fetch(url, mirror).await {
+        Ok(fetched) => Ok((fetched, false)),
+        Err(primary_error) => {
+            let Some(fallback_url) = subscription::bare_sing_box_fallback_url(source) else {
+                return Err(primary_error);
+            };
+            if fallback_url == url {
+                return Err(primary_error);
+            }
+            match subscription::fetch(&fallback_url, mirror).await {
+                Ok(fetched) => Ok((fetched, true)),
+                Err(fallback_error) => {
+                    Err(fallback_error.context(format!("完整配置端点也失败: {primary_error:#}")))
+                }
+            }
+        }
+    }
 }
 
 async fn download_core(app: &mut App) -> Result<()> {
