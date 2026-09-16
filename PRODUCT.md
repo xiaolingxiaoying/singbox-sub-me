@@ -8,11 +8,15 @@ adaptive
 
 ## Users
 
-拥有私有 sing-box 订阅、在 Windows、Linux 或 macOS 终端中管理本地代理的个人用户。用户需要在不离开终端的情况下导入订阅、选择节点、了解连通状态，并在系统代理与 TUN 模式之间安全切换。
+拥有私有 sing-box 订阅、在 Windows、Linux 或 macOS 终端里管理本地代理的个人用户，以及
+在 Windows 桌面使用图形界面的同一批用户。用户需要在不离开终端或窗口的情况下导入订阅、
+选择节点、了解连通状态，并在系统代理与 TUN 模式之间安全切换。
 
 ## Product Purpose
 
-`sbtui` 是 `sbctl` 私有订阅的终端代理客户端。它管理订阅与 sing-box 内核，并把代理、流量、连接和日志状态集中到一个全键盘界面中。
+`client-core` 是共享控制面：订阅、内核生命周期、clash_api、系统代理与设置只实现一次。
+`sbtui` 是它的终端界面，`sbgui` 是它的 Windows 桌面界面。两者都管理订阅与 sing-box
+内核，并把代理、流量、连接和日志状态集中到一个全键盘界面或桌面窗口中。
 
 ## Positioning
 
@@ -20,7 +24,8 @@ adaptive
 
 ## Operating Context
 
-用户通常在个人电脑的终端中短时、高频地查看代理是否工作、切换节点、刷新订阅和排查连接问题。网络状态与可恢复性比装饰性更重要。
+用户通常在个人电脑的终端或桌面窗口中短时、高频地查看代理是否工作、切换节点、刷新订阅
+和排查连接问题。网络状态与可恢复性比装饰性更重要。
 
 ## Capabilities and Constraints
 
@@ -31,8 +36,10 @@ adaptive
 
 ## Evidence on Hand
 
-- 当前客户端实现：`crates/sbtui/src/lib.rs`。
-- 现有键盘操作与功能说明：`crates/sbtui/README.md`。
+- 共享控制面：`crates/client-core/src/lib.rs`。
+- 终端客户端实现：`crates/sbtui/src/lib.rs`，说明见 `crates/sbtui/README.md`。
+- 桌面客户端实现：`crates/sbgui/src/main.rs`，说明见 `crates/sbgui/README.md`。
+- 上游差距分析：`docs/research/client-review-and-upstream-gap.md`。
 
 ## Product Principles
 
