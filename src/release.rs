@@ -127,10 +127,49 @@ pub fn validate_manifest_fields(manifest: &ReleaseManifest) -> Result<(), Releas
 /// `signature`, compact, with object keys in sorted order. Both the Rust
 /// update logic and the bootstrap install script canonicalize this way (the
 /// script uses `jq -S -c 'del(.signature)'`), and the exact encoding is pinned
-/// by `canonical_bytes_are_stable`.
+/// by `canonical_bytes_exclude_the_signature_and_pin_the_exact_encoding`.
 pub fn canonical_bytes(manifest: &ReleaseManifest) -> Result<Vec<u8>, ReleaseError> {
     let value = serde_json::to_value(manifest)?;
-    Ok(serde_json::to_vec(&value)?)
+    let mut out = Vec::new();
+    write_canonical_json(&value, &mut out)?;
+    Ok(out)
+}
+
+/// Writes `value` as compact JSON with every object's keys sorted, matching
+/// the `jq -S -c` canonicalization the install script performs. Sorting is done
+/// explicitly rather than relying on `serde_json`'s map type, because the
+/// signed payload must not change when another workspace member enables the
+/// `preserve_order` feature (which would otherwise make `Value` keep insertion
+/// order and break verification of previously signed manifests).
+fn write_canonical_json(value: &serde_json::Value, out: &mut Vec<u8>) -> Result<(), ReleaseError> {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort_unstable();
+            out.push(b'{');
+            for (index, key) in keys.iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                out.extend_from_slice(&serde_json::to_vec(key)?);
+                out.push(b':');
+                write_canonical_json(&map[*key], out)?;
+            }
+            out.push(b'}');
+        }
+        serde_json::Value::Array(items) => {
+            out.push(b'[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                write_canonical_json(item, out)?;
+            }
+            out.push(b']');
+        }
+        other => out.extend_from_slice(&serde_json::to_vec(other)?),
+    }
+    Ok(())
 }
 
 fn verify_signature(manifest: &ReleaseManifest) -> Result<(), ReleaseError> {
