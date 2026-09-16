@@ -109,6 +109,7 @@ fn titlebar() -> impl IntoElement {
                 .flex()
                 .items_center()
                 .gap(px(10.0))
+                .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
                 .child(div().w(px(9.0)).h(px(9.0)).rounded(px(5.0)).bg(rgb(CYAN)))
                 .child(
                     div()
@@ -123,7 +124,12 @@ fn titlebar() -> impl IntoElement {
                         .child("代理控制台"),
                 ),
         )
-        .child(div().flex_1())
+        .child(
+            div()
+                .flex_1()
+                .h_full()
+                .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move()),
+        )
         .child(
             div()
                 .mr(px(12.0))
@@ -638,6 +644,7 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 titlebar: None,
+                is_movable: true,
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
