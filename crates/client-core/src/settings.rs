@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Settings {
     /// Download mirror prefix for GitHub releases and subscriptions; empty
     /// means direct connectivity.
@@ -23,6 +23,48 @@ pub struct Settings {
     /// Subscription auto-update interval in minutes; 0 disables it.
     #[serde(default)]
     pub auto_update_minutes: u64,
+    /// The local mixed inbound port the system proxy points at.
+    #[serde(default = "default_mixed_port")]
+    pub mixed_port: u16,
+    /// The latency-test probe URL used by clash_api delay requests.
+    #[serde(default = "default_test_url")]
+    pub test_url: String,
+    /// Start the core automatically when the client launches.
+    #[serde(default)]
+    pub auto_start: bool,
+    /// Enable the system proxy automatically once the core is healthy.
+    #[serde(default = "default_true")]
+    pub auto_system_proxy: bool,
+    /// The traffic mode the next core start uses.
+    #[serde(default)]
+    pub traffic_mode: crate::system_proxy::TrafficMode,
+}
+
+fn default_mixed_port() -> u16 {
+    crate::system_proxy::LOCAL_MIXED_PORT
+}
+
+fn default_test_url() -> String {
+    crate::clash_api::DEFAULT_TEST_URL.to_owned()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            mirror: String::new(),
+            core_version: String::new(),
+            auto_update_minutes: 0,
+            mixed_port: default_mixed_port(),
+            test_url: default_test_url(),
+            auto_start: false,
+            auto_system_proxy: true,
+            traffic_mode: crate::system_proxy::TrafficMode::SystemProxy,
+        }
+    }
 }
 
 impl Settings {
@@ -129,10 +171,17 @@ pub fn wintun_path(dir: &Path) -> PathBuf {
 }
 
 pub fn data_dir() -> Result<PathBuf> {
+    data_dir_for("sbtui")
+}
+
+/// The data directory for one client application name. The TUI and GUI keep
+/// separate profile/core copies so two clients on the same machine cannot
+/// fight over the same sing-box process while still sharing the layout.
+pub fn data_dir_for(app: &str) -> Result<PathBuf> {
     let base = dirs::config_dir().context("cannot resolve the user config directory")?;
-    let dir = base.join("sbtui");
-    fs::create_dir_all(dir.join("cache")).context("creating sbtui data directory")?;
-    fs::create_dir_all(dir.join("core")).context("creating sbtui core directory")?;
+    let dir = base.join(app);
+    fs::create_dir_all(dir.join("cache")).context("creating the client data directory")?;
+    fs::create_dir_all(dir.join("core")).context("creating the client core directory")?;
     Ok(dir)
 }
 

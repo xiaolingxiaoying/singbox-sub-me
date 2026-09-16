@@ -61,7 +61,7 @@ pub struct SubscriptionSnapshot {
 }
 
 /// The `subscription-userinfo` metadata the server attaches to every format.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubscriptionUserinfo {
     pub upload: u64,
     pub download: u64,

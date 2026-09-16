@@ -1095,6 +1095,7 @@ dependencies = [
  "base64 0.22.1",
  "dirs",
  "flate2",
+ "futures-util",
  "reqwest",
  "serde",
  "serde_json",
@@ -5649,6 +5650,7 @@ dependencies = [
  "dirs",
  "gpui",
  "gpui_platform",
+ "tokio",
  "tray-icon",
 ]
 

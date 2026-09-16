@@ -104,9 +104,9 @@ pub async fn download_core(target_dir: &Path, version: &str, mirror: &str) -> Re
     tokio::fs::create_dir_all(target_dir).await?;
     let binary_name = core_binary_name();
     if is_zip {
-        extract_zip_core(&bytes, target_dir, binary_name).await?;
+        extract_zip_core(&bytes, target_dir, binary_name)?;
     } else {
-        extract_tar_gz_core(&bytes, target_dir, binary_name).await?;
+        extract_tar_gz_core(&bytes, target_dir, binary_name)?;
     }
     Ok(target_dir.join(binary_name))
 }
@@ -160,7 +160,7 @@ fn release_asset_name(release: &str, os: &str, arch: &str) -> (String, bool) {
     }
 }
 
-async fn extract_zip_core(bytes: &[u8], target_dir: &Path, binary_name: &str) -> Result<()> {
+fn extract_zip_core(bytes: &[u8], target_dir: &Path, binary_name: &str) -> Result<()> {
     let cursor = std::io::Cursor::new(bytes);
     let mut archive =
         zip::ZipArchive::new(cursor).context("the core archive is not a readable zip")?;
@@ -180,9 +180,9 @@ async fn extract_zip_core(bytes: &[u8], target_dir: &Path, binary_name: &str) ->
         let destination = target_dir.join(file_name);
         let mut buffered = Vec::with_capacity(file.size() as usize);
         std::io::Read::read_to_end(&mut file, &mut buffered)?;
-        tokio::fs::write(&destination, buffered).await?;
+        std::fs::write(&destination, buffered)?;
         if is_binary {
-            mark_executable(&destination).await;
+            mark_executable(&destination);
             extracted = true;
         }
     }
@@ -192,42 +192,48 @@ async fn extract_zip_core(bytes: &[u8], target_dir: &Path, binary_name: &str) ->
     Ok(())
 }
 
-async fn extract_tar_gz_core(bytes: &[u8], target_dir: &Path, binary_name: &str) -> Result<()> {
-    let decoder = flate2::read::GzDecoder::new(bytes);
-    let mut archive = tar::Archive::new(decoder);
-    let mut extracted = false;
-    for entry in archive
-        .entries()
-        .context("the core archive is not a readable tar.gz")?
-    {
-        let mut entry = entry?;
-        let path = entry
-            .path()
-            .context("the core archive has an invalid path")?
-            .into_owned();
-        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if file_name != binary_name {
-            continue;
+fn extract_tar_gz_core(bytes: &[u8], target_dir: &Path, binary_name: &str) -> Result<()> {
+    // The whole extraction happens synchronously and the archive is dropped
+    // before the caller awaits again: `tar::Archive`/`Entry` are not `Send`,
+    // and holding them across an await would make the engine future non-Send.
+    let extracted = {
+        let decoder = flate2::read::GzDecoder::new(bytes);
+        let mut archive = tar::Archive::new(decoder);
+        let mut found: Option<(PathBuf, Vec<u8>)> = None;
+        for entry in archive
+            .entries()
+            .context("the core archive is not a readable tar.gz")?
+        {
+            let mut entry = entry?;
+            let path = entry
+                .path()
+                .context("the core archive has an invalid path")?
+                .into_owned();
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if file_name != binary_name {
+                continue;
+            }
+            let mut buffered = Vec::with_capacity(entry.size() as usize);
+            std::io::Read::read_to_end(&mut entry, &mut buffered)
+                .context("reading the core binary")?;
+            found = Some((target_dir.join(binary_name), buffered));
+            break;
         }
-        let destination = target_dir.join(binary_name);
-        let mut buffered = Vec::with_capacity(entry.size() as usize);
-        std::io::Read::read_to_end(&mut entry, &mut buffered).context("reading the core binary")?;
-        tokio::fs::write(&destination, buffered).await?;
-        mark_executable(&destination).await;
-        extracted = true;
-        break;
-    }
-    if !extracted {
+        found
+    };
+    let Some((destination, buffered)) = extracted else {
         bail!("the core archive does not contain {binary_name}");
-    }
+    };
+    std::fs::write(&destination, buffered)?;
+    mark_executable(&destination);
     Ok(())
 }
 
-async fn mark_executable(path: &Path) {
+fn mark_executable(path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).await;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
     }
     #[cfg(not(unix))]
     {
@@ -253,7 +259,11 @@ fn core_platform() -> (&'static str, &'static str) {
 /// Rewrites the `inbounds` section of a subscription config for the TUI's
 /// local runtime: mixed proxy inbound (system proxy) or tun inbound (global).
 /// Everything else the subscription carries stays untouched.
-pub fn adapt_inbounds(config_text: &str, mode: crate::system_proxy::TrafficMode) -> Result<String> {
+pub fn adapt_inbounds(
+    config_text: &str,
+    mode: crate::system_proxy::TrafficMode,
+    mixed_port: u16,
+) -> Result<String> {
     let mut value: serde_json::Value =
         serde_json::from_str(config_text).context("the active configuration is not JSON")?;
     let mut inbounds = match mode {
@@ -262,7 +272,7 @@ pub fn adapt_inbounds(config_text: &str, mode: crate::system_proxy::TrafficMode)
                 "type": "mixed",
                 "tag": "mixed-in",
                 "listen": "127.0.0.1",
-                "listen_port": 2080
+                "listen_port": mixed_port
             }
         ]),
         crate::system_proxy::TrafficMode::Tun => serde_json::json!([
@@ -308,7 +318,6 @@ mod tests {
         let target_dir = tempfile::tempdir().expect("temporary core directory");
 
         extract_zip_core(&bytes, target_dir.path(), "sing-box.exe")
-            .await
             .expect("a system-proxy core download must not require wintun.dll");
 
         assert!(target_dir.path().join("sing-box.exe").is_file());
@@ -324,15 +333,15 @@ mod tests {
         })
         .to_string();
 
-        let mixed = adapt_inbounds(&config, crate::system_proxy::TrafficMode::SystemProxy)
+        let mixed = adapt_inbounds(&config, crate::system_proxy::TrafficMode::SystemProxy, 2080)
             .expect("mixed adaptation");
         let value: serde_json::Value = serde_json::from_str(&mixed).expect("JSON");
         assert_eq!(value["inbounds"][0]["type"], "mixed");
         assert_eq!(value["inbounds"][0]["listen_port"], 2080);
         assert_eq!(value["route"]["auto_detect_interface"], true);
 
-        let tun =
-            adapt_inbounds(&config, crate::system_proxy::TrafficMode::Tun).expect("tun adaptation");
+        let tun = adapt_inbounds(&config, crate::system_proxy::TrafficMode::Tun, 1080)
+            .expect("tun adaptation");
         let value: serde_json::Value = serde_json::from_str(&tun).expect("JSON");
         assert_eq!(value["inbounds"][0]["type"], "tun");
         assert_eq!(value["inbounds"][0]["auto_route"], true);

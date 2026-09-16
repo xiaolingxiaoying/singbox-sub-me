@@ -6,15 +6,12 @@
 //! subscription profiles. The control channel is the clash_api endpoint that
 //! the server-side full client profile exposes on 127.0.0.1:9090.
 
-mod clash_api;
-mod core;
-mod settings;
-mod subscription;
-mod system_proxy;
-
-/// Shared control-plane types are available to future UI adapters without
-/// making the terminal renderer part of their dependency graph.
 pub use client_core::{ClientCommand, ClientController, ClientError, ClientEvent, ClientSnapshot};
+/// The shared control plane lives in `client-core` so the desktop client can
+/// reuse exactly the same clash_api client, core manager, settings store,
+/// subscription handling and OS-proxy integration. Re-exported at the crate
+/// root so existing `crate::clash_api::…` paths keep working.
+pub use client_core::{clash_api, core, settings, subscription, system_proxy};
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -29,18 +26,19 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, Tabs,
+    Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Sparkline, Table, Tabs,
 };
 use tokio::process::Child;
 
-use crate::clash_api::{ClashApi, OutboundMode};
+use crate::clash_api::{ClashApi, OutboundMode, SELECTOR_TAG};
 use crate::settings::{Profile, Profiles, Settings};
 use crate::system_proxy::TrafficMode;
 
 const TAB_TITLES: [&str; 5] = ["概览", "节点", "连接", "日志", "设置"];
 const TICK_MS: u64 = 500;
 const LOG_LINES: usize = 500;
-const SELECTOR_TAG: &str = "🚀节点选择";
+/// How many rate samples the dashboard sparkline keeps.
+const TRAFFIC_HISTORY: usize = 300;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tab {
@@ -102,6 +100,13 @@ enum InputGoal {
     ProfileEditUrl,
     CoreVersion,
     Mirror,
+    AutoUpdate,
+    MixedPort,
+    TestUrl,
+    /// A substring filter over the connection table.
+    ConnFilter,
+    /// A substring filter over the kernel log tail.
+    LogQuery,
 }
 
 /// Connection-table sort order, cycled with `S`.
@@ -191,15 +196,21 @@ struct App {
     selected_group: usize,
     selected_member: usize,
     delays: HashMap<String, u64>,
+    /// Members whose most recent latency test failed or timed out.
+    delay_failed: Vec<String>,
     mode_outbound: OutboundMode,
     system_proxy_on: bool,
     up: u64,
     down: u64,
     total_up: u64,
     total_down: u64,
+    /// Rolling `(up, down)` rate history for the dashboard sparkline.
+    traffic_history: VecDeque<(u64, u64)>,
     last_totals: Option<(u64, u64, Instant)>,
     connections: clash_api::ConnectionsSnapshot,
     conn_sort: ConnSort,
+    /// Case-insensitive substring filter for the connection table.
+    conn_filter: String,
     subscription_usage: Option<subscription::SubscriptionUserinfo>,
     logs: VecDeque<String>,
     /// Kernel log tail state: the Logs page streams `cache/core.log` from
@@ -222,12 +233,16 @@ struct App {
     /// Automatic restart state after an unexpected core exit.
     restart_attempts: u32,
     restart_at: Option<Instant>,
+    /// When the proxy groups were last polled (they change rarely).
+    proxies_refresh_at: Option<Instant>,
     /// Pending confirmations for the mode switch and the exit-keep-proxy prompt.
     confirm_mode: bool,
     confirm_quit: bool,
     /// Logs page: pause the live tail and filter by level.
     log_paused: bool,
     log_filter: LogFilter,
+    /// Case-insensitive substring filter applied on top of the level filter.
+    log_query: String,
     /// A discoverable keyboard reference overlay for first-run users.
     show_help: bool,
 }
@@ -239,6 +254,7 @@ impl App {
         let core_version = core_path
             .as_deref()
             .and_then(|path| core::detect_version(path).ok());
+        let settings_mode = settings.traffic_mode;
         Self {
             tab: Tab::Dashboard,
             dir,
@@ -248,21 +264,24 @@ impl App {
             core_version,
             core_child: None,
             running: false,
-            mode: TrafficMode::SystemProxy,
+            mode: settings_mode,
             api: ClashApi::new(clash_api::DEFAULT_CONTROLLER),
             groups: Vec::new(),
             selected_group: 0,
             selected_member: 0,
             delays: HashMap::new(),
+            delay_failed: Vec::new(),
             mode_outbound: OutboundMode::Rule,
             system_proxy_on: false,
             up: 0,
             down: 0,
             total_up: 0,
             total_down: 0,
+            traffic_history: VecDeque::new(),
             last_totals: None,
             connections: Default::default(),
             conn_sort: ConnSort::Download,
+            conn_filter: String::new(),
             subscription_usage: None,
             logs: VecDeque::with_capacity(LOG_LINES),
             show_rules: false,
@@ -279,10 +298,12 @@ impl App {
             group_list: ListState::default(),
             restart_attempts: 0,
             restart_at: None,
+            proxies_refresh_at: None,
             confirm_mode: false,
             confirm_quit: false,
             log_paused: false,
             log_filter: LogFilter::All,
+            log_query: String::new(),
             show_help: false,
         }
     }
@@ -370,6 +391,8 @@ impl App {
         self.running = false;
         self.groups.clear();
         self.connections = Default::default();
+        self.traffic_history.clear();
+        self.proxies_refresh_at = None;
         if self.system_proxy_on {
             let _ = system_proxy::disable();
             self.system_proxy_on = false;
@@ -392,14 +415,23 @@ impl App {
         }
         match self.api.proxies().await {
             Ok((groups, _nodes)) => {
-                if let Some(position) = groups
-                    .iter()
-                    .find(|g| g.name == SELECTOR_TAG)
-                    .and_then(|selector| selector.all.iter().position(|m| m == &selector.now))
-                {
-                    self.selected_member = position;
-                }
                 self.groups = groups;
+                if self.selected_group >= self.groups.len() {
+                    self.selected_group = 0;
+                }
+                if let Some(group) = self.groups.get(self.selected_group) {
+                    if let Some(position) = group.all.iter().position(|member| member == &group.now)
+                    {
+                        self.selected_member = position;
+                    } else if self.selected_member >= group.all.len() {
+                        self.selected_member = 0;
+                    }
+                }
+                // Keep the stateful list widget's own selection aligned with
+                // `selected_group`, otherwise the highlighted row is wrong.
+                if !self.groups.is_empty() {
+                    self.group_list.select(Some(self.selected_group));
+                }
                 self.mode_outbound = self.api.mode().await.unwrap_or(OutboundMode::Rule);
             }
             Err(error) => self.log(format!("刷新代理组失败: {error}")),
@@ -436,9 +468,21 @@ impl App {
                 self.total_up = totals.0;
                 self.total_down = totals.1;
                 self.connections = snapshot;
+                self.push_traffic_sample();
                 sort_connections(self);
+                if self.selected_member >= self.connections.connections.len() {
+                    self.selected_member = 0;
+                }
             }
             Err(error) => self.log(format!("刷新连接失败: {error}")),
+        }
+    }
+
+    /// Appends the current rates to the dashboard history window.
+    fn push_traffic_sample(&mut self) {
+        self.traffic_history.push_back((self.up, self.down));
+        while self.traffic_history.len() > TRAFFIC_HISTORY {
+            self.traffic_history.pop_front();
         }
     }
 }
@@ -474,6 +518,14 @@ async fn run_app(
     profiles: Profiles,
 ) -> Result<()> {
     let mut app = App::new(dir, settings, profiles);
+    if app.settings.auto_start && app.core_path.is_some() && app.profiles.active.is_some() {
+        app.status = "启动时自动启动内核…".to_owned();
+        if let Err(error) = start_core(&mut app).await {
+            app.status = format!("自动启动失败: {error}");
+            let status = app.status.clone();
+            app.log(status);
+        }
+    }
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
 
@@ -510,7 +562,11 @@ async fn run_app(
                         // A crash schedules the backed-off restart itself.
                     } else {
                         app.refresh_connections().await;
-                        if app.groups.is_empty() {
+                        if app
+                            .proxies_refresh_at
+                            .is_none_or(|at| at.elapsed() >= Duration::from_secs(3))
+                        {
+                            app.proxies_refresh_at = Some(Instant::now());
                             app.refresh_proxies().await;
                         }
                         app.tail_core_log();
@@ -569,7 +625,7 @@ async fn start_core(app: &mut App) -> Result<()> {
     let raw = tokio::fs::read_to_string(&cache)
         .await
         .context("读取订阅缓存失败；先按 u 更新订阅")?;
-    let adapted = core::adapt_inbounds(&raw, app.mode)?;
+    let adapted = core::adapt_inbounds(&raw, app.mode, app.settings.mixed_port)?;
     let active = app.dir.join("cache/active-config.json");
     tokio::fs::write(&active, adapted).await?;
     core::check_config(&core, &active)?;
@@ -582,12 +638,12 @@ async fn start_core(app: &mut App) -> Result<()> {
             app.restart_attempts = 0;
             app.restart_at = None;
             if app.mode == TrafficMode::SystemProxy {
-                match system_proxy::enable(system_proxy::LOCAL_MIXED_PORT) {
+                match system_proxy::enable(app.settings.mixed_port) {
                     Ok(()) => {
                         app.system_proxy_on = true;
                         app.status = format!(
                             "内核已启动；系统代理 → 127.0.0.1:{}",
-                            system_proxy::LOCAL_MIXED_PORT
+                            app.settings.mixed_port
                         );
                     }
                     Err(error) => app.status = format!("内核已启动；系统代理设置失败: {error}"),
@@ -623,6 +679,8 @@ async fn stop_core(app: &mut App) -> Result<()> {
     }
     app.groups.clear();
     app.connections = Default::default();
+    app.traffic_history.clear();
+    app.proxies_refresh_at = None;
     app.status = "内核已停止。".to_owned();
     let status = app.status.clone();
     app.log(status);
@@ -856,7 +914,7 @@ async fn handle_key(app: &mut App, key: KeyCode) -> Result<()> {
                 .core_logs
                 .iter()
                 .rev()
-                .find(|line| app.log_filter.matches(line))
+                .find(|line| app.log_filter.matches(line) && log_query_matches(app, line))
                 .or_else(|| app.logs.back())
                 .cloned();
             match line {
@@ -866,6 +924,55 @@ async fn handle_key(app: &mut App, key: KeyCode) -> Result<()> {
                 }
                 None => app.status = "没有可复制的日志行".to_owned(),
             }
+        }
+        KeyCode::Char('/') if app.tab == Tab::Connections => {
+            app.input = Some(InputGoal::ConnFilter);
+            app.input_text = app.conn_filter.clone();
+            app.status = "输入连接过滤关键字（留空 = 显示全部）".to_owned();
+        }
+        KeyCode::Char('/') if app.tab == Tab::Logs => {
+            app.input = Some(InputGoal::LogQuery);
+            app.input_text = app.log_query.clone();
+            app.status = "输入日志关键字（留空 = 不过滤）".to_owned();
+        }
+        KeyCode::Char('a') if app.tab == Tab::Settings => {
+            app.input = Some(InputGoal::AutoUpdate);
+            app.input_text = app.settings.auto_update_minutes.to_string();
+            app.status = "自动更新间隔（分钟，0 = 关闭）".to_owned();
+        }
+        KeyCode::Char('P') if app.tab == Tab::Settings => {
+            app.input = Some(InputGoal::MixedPort);
+            app.input_text = app.settings.mixed_port.to_string();
+            app.status = "本地混合代理端口（1024–65535）".to_owned();
+        }
+        KeyCode::Char('U') if app.tab == Tab::Settings => {
+            app.input = Some(InputGoal::TestUrl);
+            app.input_text = app.settings.test_url.clone();
+            app.status = "延迟测试地址".to_owned();
+        }
+        KeyCode::Char('g') if app.tab == Tab::Settings => {
+            app.settings.auto_start = !app.settings.auto_start;
+            let _ = app.settings.save(&app.dir);
+            app.status = format!(
+                "启动时自动启动内核: {}",
+                if app.settings.auto_start {
+                    "开"
+                } else {
+                    "关"
+                }
+            );
+        }
+        KeyCode::Char('y') if app.tab == Tab::Settings => {
+            app.settings.auto_system_proxy = !app.settings.auto_system_proxy;
+            let _ = app.settings.save(&app.dir);
+            app.status = format!(
+                "内核就绪后自动开启系统代理: {}",
+                if app.settings.auto_system_proxy {
+                    "开"
+                } else {
+                    "关"
+                }
+            );
         }
         _ => {}
     }
@@ -955,14 +1062,18 @@ fn move_cursor(app: &mut App, delta: isize) {
             app.selected_group =
                 ((app.selected_group as isize + delta).clamp(0, len as isize - 1)) as usize;
             app.selected_member = 0;
+            app.group_list.select(Some(app.selected_group));
         }
         Tab::Proxies => {}
-        Tab::Connections if !app.connections.connections.is_empty() => {
-            let len = app.connections.connections.len();
-            app.selected_member =
-                ((app.selected_member as isize + delta).clamp(0, len as isize - 1)) as usize;
+        Tab::Connections => {
+            let len = visible_connections(app).len();
+            if len > 0 {
+                app.selected_member =
+                    ((app.selected_member as isize + delta).clamp(0, len as isize - 1)) as usize;
+            } else {
+                app.selected_member = 0;
+            }
         }
-        Tab::Connections => {}
         Tab::Settings if !app.profiles.profiles.is_empty() => {
             let len = app.profiles.profiles.len();
             let current = app.profiles_list.selected().unwrap_or(0) as isize;
@@ -1016,12 +1127,25 @@ async fn test_current_delay(app: &mut App) {
     let Some(node) = group.all.get(app.selected_member).cloned() else {
         return;
     };
-    let delay = app.api.delay(&node).await.ok();
-    if let Some(delay) = delay {
-        app.delays.insert(node, delay);
+    match app.api.delay_with(&node, &app.settings.test_url).await {
+        Ok(delay) => {
+            app.delays.insert(node.clone(), delay);
+            app.delay_failed.retain(|failed| failed != &node);
+            app.status = format!("{node} 延迟 {delay} ms");
+        }
+        Err(error) => {
+            app.delays.remove(&node);
+            if !app.delay_failed.contains(&node) {
+                app.delay_failed.push(node.clone());
+            }
+            app.status = format!("{node} 延迟测试失败: {error}");
+        }
     }
 }
 
+/// Tests every member of the selected group concurrently. Serial testing made a
+/// large group take `members × timeout`; issuing all probes at once and polling
+/// them together returns in roughly one timeout.
 async fn test_group_delays(app: &mut App) {
     if !app.running {
         return;
@@ -1029,24 +1153,57 @@ async fn test_group_delays(app: &mut App) {
     let Some(group) = app.groups.get(app.selected_group).cloned() else {
         return;
     };
-    app.status = format!("正在测试 {} 组延迟…", group.name);
-    for member in &group.all {
-        if let Ok(delay) = app.api.delay(member).await {
-            app.delays.insert(member.clone(), delay);
+    if group.all.is_empty() {
+        return;
+    }
+    app.status = format!("正在并发测试 {} 组 {} 个节点…", group.name, group.all.len());
+    let test_url = app.settings.test_url.clone();
+    let api = app.api.clone();
+    let results = futures_util::future::join_all(group.all.iter().cloned().map(|member| {
+        let api = api.clone();
+        let test_url = test_url.clone();
+        async move { (member.clone(), api.delay_with(&member, &test_url).await) }
+    }))
+    .await;
+    let mut ok = 0;
+    for (member, result) in results {
+        match result {
+            Ok(delay) => {
+                app.delays.insert(member.clone(), delay);
+                app.delay_failed.retain(|failed| failed != &member);
+                ok += 1;
+            }
+            Err(_) => {
+                app.delays.remove(&member);
+                if !app.delay_failed.contains(&member) {
+                    app.delay_failed.push(member.clone());
+                }
+            }
         }
     }
-    app.status = "延迟测试完成".to_owned();
+    app.status = format!(
+        "{} 组延迟测试完成：{ok}/{} 可用",
+        group.name,
+        group.all.len()
+    );
+}
+
+/// Connections after the connection-table filter is applied, in display order.
+fn visible_connections(app: &App) -> Vec<&clash_api::Connection> {
+    app.connections
+        .connections
+        .iter()
+        .filter(|connection| connection.matches(&app.conn_filter))
+        .collect()
 }
 
 async fn close_selected_connection(app: &mut App) {
     if !app.running {
         return;
     }
-    let Some(connection) = app
-        .connections
-        .connections
+    let Some(connection) = visible_connections(app)
         .get(app.selected_member)
-        .cloned()
+        .map(|connection| (*connection).clone())
     else {
         return;
     };
@@ -1138,12 +1295,9 @@ fn toggle_system_proxy(app: &mut App) -> Result<()> {
         app.system_proxy_on = false;
         app.status = "系统代理已关闭".to_owned();
     } else {
-        system_proxy::enable(system_proxy::LOCAL_MIXED_PORT)?;
+        system_proxy::enable(app.settings.mixed_port)?;
         app.system_proxy_on = true;
-        app.status = format!(
-            "系统代理已开启 → 127.0.0.1:{}",
-            system_proxy::LOCAL_MIXED_PORT
-        );
+        app.status = format!("系统代理已开启 → 127.0.0.1:{}", app.settings.mixed_port);
     }
     Ok(())
 }
@@ -1166,6 +1320,8 @@ fn toggle_mode(app: &mut App) {
         TrafficMode::SystemProxy => TrafficMode::Tun,
         TrafficMode::Tun => TrafficMode::SystemProxy,
     };
+    app.settings.traffic_mode = app.mode;
+    let _ = app.settings.save(&app.dir);
     let privilege_note = if app.mode == TrafficMode::Tun && !system_proxy::can_use_tun() {
         "；⚠ 当前终端没有管理员/root 权限，TUN 启动会被拒绝"
     } else if app.mode == TrafficMode::Tun
@@ -1276,6 +1432,60 @@ async fn commit_input(app: &mut App, goal: InputGoal) -> Result<()> {
             app.settings.mirror = text;
             app.settings.save(&app.dir)?;
             app.status = "镜像前缀已保存".to_owned();
+        }
+        InputGoal::AutoUpdate => {
+            let minutes = if text.is_empty() {
+                0
+            } else {
+                match text.parse::<u64>() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        app.status = "自动更新间隔必须是整数分钟".to_owned();
+                        return Ok(());
+                    }
+                }
+            };
+            app.settings.auto_update_minutes = minutes;
+            app.settings.save(&app.dir)?;
+            app.status = if minutes == 0 {
+                "已关闭订阅自动更新".to_owned()
+            } else {
+                format!("订阅每 {minutes} 分钟自动更新")
+            };
+        }
+        InputGoal::MixedPort => match text.parse::<u16>() {
+            Ok(port) if port >= 1024 => {
+                app.settings.mixed_port = port;
+                app.settings.save(&app.dir)?;
+                app.status = format!("混合代理端口已设为 {port}（重启内核生效）");
+            }
+            _ => app.status = "端口必须是 1024–65535 之间的整数".to_owned(),
+        },
+        InputGoal::TestUrl => {
+            if text.is_empty() {
+                app.status = "延迟测试地址不能为空".to_owned();
+            } else {
+                app.settings.test_url = text;
+                app.settings.save(&app.dir)?;
+                app.status = "延迟测试地址已保存".to_owned();
+            }
+        }
+        InputGoal::ConnFilter => {
+            app.conn_filter = text;
+            app.selected_member = 0;
+            app.status = if app.conn_filter.is_empty() {
+                "已清除连接过滤".to_owned()
+            } else {
+                format!("连接过滤: {}", app.conn_filter)
+            };
+        }
+        InputGoal::LogQuery => {
+            app.log_query = text;
+            app.status = if app.log_query.is_empty() {
+                "已清除日志关键字".to_owned()
+            } else {
+                format!("日志关键字: {}", app.log_query)
+            };
         }
     }
     Ok(())
@@ -1390,9 +1600,9 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let hint = match app.tab {
         Tab::Dashboard => "s 启动/停止  ·  u 更新订阅  ·  p 系统代理  ·  m 切换模式",
         Tab::Proxies => "↑↓ 选择  ·  Enter 切换  ·  t 测当前  ·  T 测全组",
-        Tab::Connections => "↑↓ 选择  ·  x 关闭连接  ·  X 关闭全部  ·  S 排序",
-        Tab::Logs => "Space 暂停  ·  l 级别  ·  c 复制  ·  r 分流规则",
-        Tab::Settings => "n 新增  ·  e 编辑  ·  Delete 删除  ·  d 下载内核",
+        Tab::Connections => "↑↓ 选择  ·  x 关闭连接  ·  X 关闭全部  ·  S 排序  ·  / 过滤",
+        Tab::Logs => "Space 暂停  ·  l 级别  ·  / 关键字  ·  c 复制  ·  r 分流规则",
+        Tab::Settings => "n 新增  ·  e 编辑  ·  Delete 删除  ·  d 下载内核  ·  a/P/U 选项",
     };
     let line = Line::from(vec![
         Span::styled(" ", Style::default()),
@@ -1514,9 +1724,9 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
     let page_keys = match app.tab {
         Tab::Dashboard => "s 启动/停止 · u 更新订阅 · p 开/关系统代理 · m 切换模式",
         Tab::Proxies => "↑↓ 选择 · Enter 切换 · t 测当前 · T 测全组",
-        Tab::Connections => "↑↓ 选择 · x 关闭连接 · X 关闭全部 · S 切换排序",
-        Tab::Logs => "Space 暂停 · l 切换级别 · c 复制 · r 查看规则",
-        Tab::Settings => "n 新增 · e 编辑 · Delete 删除 · d 下载内核",
+        Tab::Connections => "↑↓ 选择 · x 关闭连接 · X 关闭全部 · S 切换排序 · / 关键字过滤",
+        Tab::Logs => "Space 暂停 · l 切换级别 · / 关键字过滤 · c 复制 · r 查看规则",
+        Tab::Settings => "n 新增 · e 编辑 · Delete 删除 · d 下载内核 · a/P/U/g/y 选项",
     };
     let body = vec![
         Line::from(Span::styled(
@@ -1602,7 +1812,17 @@ fn input_label(goal: &InputGoal) -> &'static str {
         InputGoal::ProfileEditUrl => "新的订阅链接（留空取消）",
         InputGoal::CoreVersion => "内核版本（留空 = 最新）",
         InputGoal::Mirror => "镜像前缀（留空 = 直连）",
+        InputGoal::AutoUpdate => "自动更新间隔（分钟，0 = 关闭）",
+        InputGoal::MixedPort => "混合代理端口",
+        InputGoal::TestUrl => "延迟测试地址",
+        InputGoal::ConnFilter => "连接过滤关键字（留空 = 全部）",
+        InputGoal::LogQuery => "日志关键字（留空 = 不过滤）",
     }
+}
+
+/// Whether a kernel log line contains the active keyword filter.
+fn log_query_matches(app: &App, line: &str) -> bool {
+    app.log_query.is_empty() || line.to_lowercase().contains(&app.log_query.to_lowercase())
 }
 
 fn delay_color(delay: Option<u64>) -> Color {
@@ -1734,35 +1954,7 @@ fn draw_dashboard(frame: &mut Frame, area: ratatui::prelude::Rect, app: &App) {
     frame.render_widget(Paragraph::new(network).block(panel("网络路径")), content[0]);
     let metrics = Layout::horizontal([Constraint::Percentage(52), Constraint::Percentage(48)])
         .split(content[1]);
-    let traffic = vec![
-        Line::from(vec![
-            Span::styled("↓ ", Style::default().fg(CYAN)),
-            Span::styled(
-                format!("{}/s", human_bytes(app.down)),
-                Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(Span::styled(meter(app.down, 24), Style::default().fg(CYAN))),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("↑ ", Style::default().fg(MINT)),
-            Span::styled(
-                format!("{}/s", human_bytes(app.up)),
-                Style::default().fg(MINT).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(Span::styled(meter(app.up, 24), Style::default().fg(MINT))),
-        Line::from(""),
-        Line::from(Span::styled(
-            format!(
-                "累计 ↓ {}  ↑ {}",
-                human_bytes(app.total_down),
-                human_bytes(app.total_up)
-            ),
-            Style::default().fg(MUTED),
-        )),
-    ];
-    frame.render_widget(Paragraph::new(traffic).block(panel("实时流量")), metrics[0]);
+    draw_traffic_panel(frame, metrics[0], app);
     let activity: Vec<Line> = app
         .logs
         .iter()
@@ -1814,6 +2006,90 @@ fn draw_dashboard(frame: &mut Frame, area: ratatui::prelude::Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(subscription).block(panel("订阅与核心")),
         rail[1],
+    );
+}
+
+/// The dashboard traffic panel: live rates plus a sparkline over the recent
+/// rate history, scaled to the window's peak.
+fn draw_traffic_panel(frame: &mut Frame, area: Rect, app: &App) {
+    let peak = app
+        .traffic_history
+        .iter()
+        .map(|(up, down)| (*up).max(*down))
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let block = panel(format!(
+        "实时流量 · 近 {} 秒",
+        app.traffic_history.len() as u64 * TICK_MS / 1000
+    ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height < 6 {
+        frame.render_widget(
+            Paragraph::new(format!(
+                "↓ {}/s   ↑ {}/s",
+                human_bytes(app.down),
+                human_bytes(app.up)
+            ))
+            .style(Style::default().fg(CYAN)),
+            inner,
+        );
+        return;
+    }
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Min(1),
+    ])
+    .split(inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("↓ ", Style::default().fg(CYAN)),
+            Span::styled(
+                format!("{}/s", human_bytes(app.down)),
+                Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        rows[0],
+    );
+    frame.render_widget(
+        Sparkline::default()
+            .data(app.traffic_history.iter().map(|(_, down)| *down))
+            .max(peak)
+            .style(Style::default().fg(CYAN)),
+        rows[1],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("↑ ", Style::default().fg(MINT)),
+            Span::styled(
+                format!("{}/s", human_bytes(app.up)),
+                Style::default().fg(MINT).add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        rows[2],
+    );
+    frame.render_widget(
+        Sparkline::default()
+            .data(app.traffic_history.iter().map(|(up, _)| *up))
+            .max(peak)
+            .style(Style::default().fg(MINT)),
+        rows[3],
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            format!(
+                "累计 ↓ {}   ↑ {}   峰值 {}/s",
+                human_bytes(app.total_down),
+                human_bytes(app.total_up),
+                human_bytes(peak)
+            ),
+            Style::default().fg(MUTED),
+        )),
+        rows[4],
     );
 }
 
@@ -1914,13 +2190,19 @@ fn draw_proxies(frame: &mut Frame, area: ratatui::prelude::Rect, app: &mut App) 
             .iter()
             .map(|member| {
                 let delay = app.delays.get(member).copied();
+                let failed = app.delay_failed.contains(member);
                 let marker = if member == &group.now { "● " } else { "○ " };
-                let delay_text = delay
-                    .map(|d| format!("{d}ms"))
-                    .unwrap_or_else(|| "-".to_owned());
+                let delay_text = if failed {
+                    "超时".to_owned()
+                } else {
+                    delay
+                        .map(|d| format!("{d}ms"))
+                        .unwrap_or_else(|| "-".to_owned())
+                };
+                let color = if failed { DANGER } else { delay_color(delay) };
                 ListItem::new(Span::styled(
                     format!("{marker}{member}  [{delay_text}]"),
-                    Style::default().fg(delay_color(delay)),
+                    Style::default().fg(color),
                 ))
             })
             .collect();
@@ -1948,47 +2230,69 @@ fn draw_proxies(frame: &mut Frame, area: ratatui::prelude::Rect, app: &mut App) 
 }
 
 fn draw_connections(frame: &mut Frame, area: ratatui::prelude::Rect, app: &App) {
-    let rows = app
-        .connections
-        .connections
-        .iter()
-        .enumerate()
-        .map(|(index, connection)| {
-            Row::new(vec![
-                Cell::from(if index == app.selected_member {
-                    "●"
-                } else {
-                    ""
-                }),
-                Cell::from(format!(
-                    "{}:{}",
-                    connection.metadata.destination_ip, connection.metadata.destination_port
-                )),
-                Cell::from(connection.metadata.destination_host.clone()),
-                Cell::from(connection.metadata.network.clone()),
-                Cell::from(human_bytes(connection.upload)),
-                Cell::from(human_bytes(connection.download)),
-            ])
-        });
+    let visible = visible_connections(app);
+    let rows = visible.iter().enumerate().map(|(index, connection)| {
+        let chains = if connection.chains.is_empty() {
+            "-".to_owned()
+        } else {
+            connection.chains.join(" → ")
+        };
+        let rule = if connection.rule.is_empty() {
+            "-".to_owned()
+        } else {
+            connection.rule.clone()
+        };
+        Row::new(vec![
+            Cell::from(if index == app.selected_member {
+                "●"
+            } else {
+                ""
+            }),
+            Cell::from(format!(
+                "{}:{}",
+                connection.metadata.destination_ip, connection.metadata.destination_port
+            )),
+            Cell::from(connection.metadata.destination_host.clone()),
+            Cell::from(connection.metadata.network.clone()),
+            Cell::from(rule),
+            Cell::from(chains),
+            Cell::from(human_bytes(connection.upload)),
+            Cell::from(human_bytes(connection.download)),
+        ])
+    });
     let table = Table::new(
         rows,
         [
             Constraint::Length(2),
-            Constraint::Length(24),
-            Constraint::Min(20),
-            Constraint::Length(8),
-            Constraint::Length(10),
-            Constraint::Length(10),
+            Constraint::Length(23),
+            Constraint::Min(18),
+            Constraint::Length(6),
+            Constraint::Length(12),
+            Constraint::Min(14),
+            Constraint::Length(9),
+            Constraint::Length(9),
         ],
     )
     .header(
-        Row::new(vec!["", "目标", "主机", "网络", "上传", "下载"])
-            .style(Style::default().fg(CYAN).bold()),
+        Row::new(vec![
+            "", "目标", "主机", "网络", "规则", "链路", "上传", "下载",
+        ])
+        .style(Style::default().fg(CYAN).bold()),
     )
     .block(panel(format!(
-        "活动连接 · {} · {} 条",
+        "活动连接 · {} · {} 条{}{}",
         app.conn_sort.label(),
-        app.connections.connections.len()
+        visible.len(),
+        if app.conn_filter.is_empty() {
+            String::new()
+        } else {
+            format!(" · 过滤「{}」", app.conn_filter)
+        },
+        if visible.is_empty() && !app.connections.connections.is_empty() {
+            " · 无匹配"
+        } else {
+            ""
+        }
     )));
     frame.render_widget(table, area);
 }
@@ -2009,22 +2313,28 @@ fn draw_logs(frame: &mut Frame, area: ratatui::prelude::Rect, app: &App) {
     let filtered: Vec<Line> = app
         .core_logs
         .iter()
-        .filter(|line| app.log_filter.matches(line))
+        .filter(|line| app.log_filter.matches(line) && log_query_matches(app, line))
         .map(|line| Line::from(line.clone()))
         .collect();
     let lines = if filtered.is_empty() {
         app.logs
             .iter()
+            .filter(|line| log_query_matches(app, line))
             .map(|line| Line::from(line.clone()))
             .collect()
     } else {
         filtered
     };
     let title = format!(
-        "日志 [{}]{}（Space 暂停，l 级别，c 复制，r 规则）",
+        "日志 [{}]{}（Space 暂停，l 级别，/ 关键字，c 复制，r 规则）",
         app.log_filter.label(),
         if app.log_paused { " · 已暂停" } else { "" }
     );
+    let title = if app.log_query.is_empty() {
+        title
+    } else {
+        format!("{title} · 关键字「{}」", app.log_query)
+    };
     frame.render_widget(Paragraph::new(lines).block(panel(title)), area);
 }
 
@@ -2066,11 +2376,8 @@ fn draw_settings(frame: &mut Frame, area: ratatui::prelude::Rect, app: &mut App)
                 .unwrap_or_else(|| "未安装".into())
         )),
         Line::from(format!(
-            "版本: {}",
-            app.core_version.clone().unwrap_or_else(|| "未检测".into())
-        )),
-        Line::from(format!(
-            "镜像: {}",
+            "版本: {}   镜像: {}",
+            app.core_version.clone().unwrap_or_else(|| "未检测".into()),
             if app.settings.mirror.is_empty() {
                 "直连"
             } else {
@@ -2078,14 +2385,38 @@ fn draw_settings(frame: &mut Frame, area: ratatui::prelude::Rect, app: &mut App)
             }
         )),
         Line::from(format!(
-            "自动更新: {} 分钟",
-            app.settings.auto_update_minutes
+            "模式: {}   混合端口: {}   延迟地址: {}",
+            app.mode.label(),
+            app.settings.mixed_port,
+            app.settings.test_url
         )),
-        Line::from(format!("系统代理后端: {}", system_proxy::platform_label())),
+        Line::from(format!(
+            "自动更新: {}   启动内核: {}   自动系统代理: {}",
+            if app.settings.auto_update_minutes == 0 {
+                "关".to_owned()
+            } else {
+                format!("{} 分钟", app.settings.auto_update_minutes)
+            },
+            if app.settings.auto_start {
+                "开"
+            } else {
+                "关"
+            },
+            if app.settings.auto_system_proxy {
+                "开"
+            } else {
+                "关"
+            }
+        )),
+        Line::from(format!(
+            "系统代理后端: {}   订阅用量: {}",
+            system_proxy::platform_label(),
+            usage_label(app.subscription_usage)
+        )),
         Line::from(""),
-        Line::from(
-            "快捷键: n 新增档案 ｜ f 本地文件 ｜ e 改链接 ｜ Delete 删除档案 ｜ u 更新订阅 ｜ v 改内核版本 ｜ r 改镜像 ｜ d 下载内核",
-        ),
+        Line::from("档案: n 新增 ｜ f 本地文件 ｜ e 改链接 ｜ Delete 删除 ｜ Enter 激活"),
+        Line::from("内核: v 改版本 ｜ r 改镜像 ｜ d 下载 ｜ u 更新订阅"),
+        Line::from("选项: a 自动更新 ｜ P 混合端口 ｜ U 延迟地址 ｜ g 启动内核 ｜ y 自动代理"),
     ];
     frame.render_widget(Paragraph::new(info).block(panel("运行环境")), columns[1]);
 }
@@ -2120,7 +2451,7 @@ fn usage_label(usage: Option<subscription::SubscriptionUserinfo>) -> String {
     let Some(usage) = usage else {
         return "未知（更新订阅后显示）".to_owned();
     };
-    match usage.remaining() {
+    let mut text = match usage.remaining() {
         Some(remaining) => format!(
             "已用 {} / {}（剩余 {}）",
             human_bytes(usage.used()),
@@ -2128,7 +2459,16 @@ fn usage_label(usage: Option<subscription::SubscriptionUserinfo>) -> String {
             human_bytes(remaining)
         ),
         None => format!("已用 {}（未设配额）", human_bytes(usage.used())),
+    };
+    if let Some(expire) = usage.expire {
+        let now = now_epoch();
+        if expire > now {
+            text.push_str(&format!(" · {} 天后重置", (expire - now) / 86_400));
+        } else {
+            text.push_str(" · 已到期");
+        }
     }
+    text
 }
 
 fn age_label(epoch_seconds: u64) -> String {
@@ -2176,5 +2516,89 @@ mod tests {
     fn meter_keeps_the_requested_visual_width() {
         assert_eq!(meter(0, 12).chars().count(), 12);
         assert_eq!(meter(1024 * 1024, 12).chars().count(), 12);
+    }
+
+    fn test_app() -> App {
+        App::new(
+            PathBuf::from("/nonexistent-sbtui-test"),
+            Settings::default(),
+            Profiles::default(),
+        )
+    }
+
+    fn connection(host: &str, rule: &str) -> clash_api::Connection {
+        clash_api::Connection {
+            id: host.to_owned(),
+            metadata: clash_api::ConnectionMetadata {
+                destination_host: host.to_owned(),
+                ..Default::default()
+            },
+            rule: rule.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn connection_filter_keeps_only_matching_rows() {
+        let mut app = test_app();
+        app.connections.connections = vec![
+            connection("api.github.com", "Proxy"),
+            connection("cdn.example.net", "DIRECT"),
+        ];
+        app.conn_filter = "github".to_owned();
+        let visible = visible_connections(&app);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].metadata.destination_host, "api.github.com");
+
+        app.conn_filter = "direct".to_owned();
+        assert_eq!(visible_connections(&app).len(), 1);
+
+        app.conn_filter.clear();
+        assert_eq!(visible_connections(&app).len(), 2);
+    }
+
+    #[test]
+    fn log_query_matches_are_case_insensitive() {
+        let mut app = test_app();
+        app.log_query = "DNS".to_owned();
+        assert!(log_query_matches(&app, "[123] inbound/dns: lookup"));
+        assert!(!log_query_matches(&app, "[123] outbound/tcp: connect"));
+        app.log_query.clear();
+        assert!(log_query_matches(&app, "anything"));
+    }
+
+    #[test]
+    fn traffic_history_is_bounded_and_tracks_the_peak() {
+        let mut app = test_app();
+        for index in 0..(TRAFFIC_HISTORY + 25) {
+            app.down = index as u64;
+            app.up = 0;
+            app.push_traffic_sample();
+        }
+        assert_eq!(app.traffic_history.len(), TRAFFIC_HISTORY);
+        let peak = app
+            .traffic_history
+            .iter()
+            .map(|(up, down)| (*up).max(*down))
+            .max()
+            .unwrap();
+        assert_eq!(peak, (TRAFFIC_HISTORY + 24) as u64);
+    }
+
+    #[test]
+    fn usage_label_reports_the_reset_window() {
+        let usage = subscription::SubscriptionUserinfo {
+            upload: 0,
+            download: 0,
+            total: 1024,
+            expire: Some(now_epoch() + 3 * 86_400),
+        };
+        let label = usage_label(Some(usage));
+        assert!(label.contains("3 天后重置"), "unexpected label: {label}");
+        let expired = subscription::SubscriptionUserinfo {
+            expire: Some(now_epoch().saturating_sub(10)),
+            ..usage
+        };
+        assert!(usage_label(Some(expired)).contains("已到期"));
     }
 }

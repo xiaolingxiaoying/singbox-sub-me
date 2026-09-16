@@ -10,6 +10,18 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_CONTROLLER: &str = "http://127.0.0.1:9090";
 
+/// The selector group tag the sbctl server-side client profile generates.
+pub const SELECTOR_TAG: &str = "🚀节点选择";
+/// The automatic latency group tag the server generates.
+pub const AUTO_TAG: &str = "♻️自动选择";
+/// The direct outbound tag the server generates.
+pub const DIRECT_TAG: &str = "🎯直连";
+
+/// The default latency probe: a tiny 204 endpoint reachable from mainland
+/// China without a proxy, matching the server-side selector default.
+pub const DEFAULT_TEST_URL: &str = "http://aliyun.com/generate_204";
+
+#[derive(Clone)]
 pub struct ClashApi {
     base: String,
     client: reqwest::Client,
@@ -59,8 +71,35 @@ pub struct Connection {
     pub download: u64,
     #[serde(default)]
     pub start: String,
+    /// The routing rule that matched, as reported by clash_api.
+    #[serde(default)]
+    pub rule: String,
+    /// The outbound chain the connection traverses, outermost last.
+    #[serde(default)]
+    pub chains: Vec<String>,
     #[serde(default)]
     pub metadata: ConnectionMetadata,
+}
+
+impl Connection {
+    /// Case-insensitive match over the fields a user would search for.
+    pub fn matches(&self, query: &str) -> bool {
+        let query = query.to_lowercase();
+        if query.is_empty() {
+            return true;
+        }
+        let haystack = format!(
+            "{} {} {} {} {} {}",
+            self.metadata.destination_host,
+            self.metadata.destination_ip,
+            self.metadata.destination_port,
+            self.metadata.network,
+            self.rule,
+            self.chains.join(" ")
+        )
+        .to_lowercase();
+        haystack.contains(&query)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -87,8 +126,9 @@ pub struct ConnectionsSnapshot {
     pub connections: Vec<Connection>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutboundMode {
+    #[default]
     Rule,
     Global,
     Direct,
@@ -216,10 +256,16 @@ impl ClashApi {
 
     /// Measures latency for one node through the core (returns milliseconds).
     pub async fn delay(&self, node: &str) -> Result<u64> {
+        self.delay_with(node, DEFAULT_TEST_URL).await
+    }
+
+    /// Measures latency against a caller-supplied probe URL.
+    pub async fn delay_with(&self, node: &str, test_url: &str) -> Result<u64> {
         let url = format!(
-            "{}/proxies/{}/delay?timeout=5000&url=http%3A%2F%2Faliyun.com%2Fgenerate_204",
+            "{}/proxies/{}/delay?timeout=5000&url={}",
             self.base,
-            urlencoded(node)
+            urlencoded(node),
+            urlencoded(test_url)
         );
         let value: serde_json::Value = self
             .client

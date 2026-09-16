@@ -1,20 +1,20 @@
 //! UI-independent shared client control plane.
+//!
+//! Both the terminal client (`sbtui`) and the desktop client (`sbgui`) build on
+//! this crate: it owns the clash_api control channel, the sing-box core
+//! lifecycle, the persisted settings/profiles, subscription handling, and the
+//! operating-system proxy integration. UIs only render [`ClientSnapshot`] state
+//! and send [`ClientCommand`]s, so the two clients cannot drift apart.
 
-#[path = "../../sbtui/src/clash_api.rs"]
 pub mod clash_api;
-#[path = "../../sbtui/src/core.rs"]
-pub mod core;
-#[path = "../../sbtui/src/settings.rs"]
-pub mod settings;
-#[path = "../../sbtui/src/subscription.rs"]
-pub mod subscription;
-#[path = "../../sbtui/src/system_proxy.rs"]
-pub mod system_proxy;
-
 pub mod command;
 pub mod controller;
+pub mod core;
 pub mod event;
+pub mod settings;
 pub mod state;
+pub mod subscription;
+pub mod system_proxy;
 
 pub use command::ClientCommand;
 pub use controller::ClientController;

@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 
 /// How the core receives traffic: a local mixed inbound paired with the OS
 /// proxy, or the tun inbound that takes over routing globally.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrafficMode {
+    #[default]
     SystemProxy,
     Tun,
 }
