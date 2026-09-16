@@ -6,7 +6,7 @@ license = "MIT OR Apache-2.0"
 description = "Control plane for a private sing-box deployment"
 
 [workspace]
-members = ["crates/sbtui"]
+members = ["crates/sbtui", "crates/client-core", "crates/sbgui"]
 
 [dependencies]
 base64 = "0.22.1"

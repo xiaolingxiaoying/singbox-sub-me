@@ -50,7 +50,7 @@ pub struct HistoryEntry {
     pub delay: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Connection {
     pub id: String,
     #[serde(default)]
@@ -63,7 +63,7 @@ pub struct Connection {
     pub metadata: ConnectionMetadata,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ConnectionMetadata {
     #[serde(default)]
     pub network: String,
@@ -77,7 +77,7 @@ pub struct ConnectionMetadata {
     pub inbound_ip: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ConnectionsSnapshot {
     #[serde(default, rename = "uploadTotal")]
     pub upload_total: u64,

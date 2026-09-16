@@ -1,0 +1,25 @@
+[package]
+name = "sbgui"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Windows desktop GUI for the sing-box proxy client"
+
+[[bin]]
+name = "sbgui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.99"
+client-core = { path = "../client-core" }
+dirs = "6.0.0"
+
+# GPUI is pre-1.0; keep the GUI and platform crates on the same upstream revision.
+gpui = { git = "https://github.com/zed-industries/zed.git", rev = "739fdbef762f7e514d62e1fa650c1b7cac5bbff4", package = "gpui", default-features = false }
+gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "739fdbef762f7e514d62e1fa650c1b7cac5bbff4", package = "gpui_platform", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.21"
+
+[profile.release]
+panic = "abort"

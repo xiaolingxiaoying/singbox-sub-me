@@ -12,6 +12,10 @@ mod settings;
 mod subscription;
 mod system_proxy;
 
+/// Shared control-plane types are available to future UI adapters without
+/// making the terminal renderer part of their dependency graph.
+pub use client_core::{ClientCommand, ClientController, ClientError, ClientEvent, ClientSnapshot};
+
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
