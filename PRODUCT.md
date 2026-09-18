@@ -40,6 +40,7 @@ adaptive
 - 终端客户端实现：`crates/sbtui/src/lib.rs`，说明见 `crates/sbtui/README.md`。
 - 桌面客户端实现：`crates/sbgui/src/main.rs`，说明见 `crates/sbgui/README.md`。
 - 上游差距分析：`docs/research/client-review-and-upstream-gap.md`。
+- 客户端功能完成度审查（含 Clash Party / sing-box 对照与复核命令）：`docs/research/client-feature-completeness-review.md`。
 
 ## Product Principles
 

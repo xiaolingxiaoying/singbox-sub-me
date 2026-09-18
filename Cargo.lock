@@ -5648,10 +5648,14 @@ dependencies = [
  "anyhow",
  "client-core",
  "dirs",
+ "embed-resource",
  "gpui",
  "gpui_platform",
+ "raw-window-handle",
+ "serde_json",
  "tokio",
  "tray-icon",
+ "windows 0.61.3",
 ]
 
 [[package]]

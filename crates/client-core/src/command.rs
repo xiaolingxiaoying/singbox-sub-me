@@ -50,6 +50,10 @@ pub enum ClientCommand {
     StopCore,
     RestartCore,
     UpdateSubscription,
+    /// Imports a subscription URL as a new local profile and makes it active.
+    ImportSubscription(String),
+    /// Removes a local subscription profile and its cached configuration.
+    RemoveProfile(String),
     DownloadCore,
     SwitchProfile(String),
     /// Selects a member inside one proxy group (the group name matters because

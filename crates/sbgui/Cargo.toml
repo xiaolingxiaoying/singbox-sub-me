@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Desktop GUI for the sing-box proxy client"
+build = "build.rs"
 
 [[bin]]
 name = "sbgui"
@@ -13,6 +14,7 @@ path = "src/main.rs"
 anyhow = "1.0.99"
 client-core = { path = "../client-core" }
 dirs = "6.0.0"
+serde_json = "1.0.145"
 tokio = { version = "1.48.0", features = ["rt-multi-thread"] }
 
 # GPUI is pre-1.0; keep the GUI and platform crates on the same upstream revision.
@@ -20,4 +22,9 @@ gpui = { git = "https://github.com/zed-industries/zed.git", rev = "739fdbef762f7
 gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "739fdbef762f7e514d62e1fa650c1b7cac5bbff4", package = "gpui_platform", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6.2"
+windows = { version = "0.61.3", features = ["Win32_Graphics_Dwm"] }
 tray-icon = "0.21"
+
+[build-dependencies]
+embed-resource = "3.0.11"

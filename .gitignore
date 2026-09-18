@@ -20,3 +20,7 @@ Thumbs.db
 # Local artifacts never committed
 sbctl-linux-amd64
 .scratch/vps-connectivity-hardening/ssh_run.py
+
+# Local build output and design tooling
+dist/
+.impeccable/

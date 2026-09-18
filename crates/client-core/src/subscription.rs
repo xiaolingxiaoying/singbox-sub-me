@@ -271,7 +271,11 @@ fn wrap_bare_node_config(value: serde_json::Value, nodes: &[NodeSummary]) -> Res
 }
 
 /// Converts share URIs (vless/vmess/hysteria2/tuic/anytls) into sing-box
-/// outbounds. Only the fields the TUI and the core need are preserved.
+/// outbounds. Only the fields the TUI and the core need are preserved. A URI
+/// list carries no inbounds, selector, or clash_api, so the result is wrapped
+/// into the same locally runnable shape as a bare node list — without that,
+/// the core would start with no control endpoint and be killed by the
+/// startup probe.
 pub fn parse_uri_list(text: &str) -> Result<SubscriptionSnapshot> {
     let mut outbounds = Vec::new();
     for line in text.lines() {
@@ -284,8 +288,10 @@ pub fn parse_uri_list(text: &str) -> Result<SubscriptionSnapshot> {
         }
     }
     let mut snapshot = summarize(&outbounds)?;
-    snapshot.raw = serde_json::to_string_pretty(&serde_json::json!({ "outbounds": outbounds }))
-        .expect("JSON values serialize");
+    snapshot.raw = wrap_bare_node_config(
+        serde_json::json!({ "outbounds": outbounds }),
+        &snapshot.nodes,
+    )?;
     Ok(snapshot)
 }
 
@@ -514,9 +520,27 @@ mod tests {
         let mut protocols: Vec<&str> = snapshot.nodes.iter().map(|n| n.protocol.as_str()).collect();
         protocols.sort();
         assert_eq!(protocols, vec!["anytls", "hysteria2", "tuic", "vless"]);
-        // The converted outbounds must be a runnable sing-box config skeleton.
+        // A URI list only carries node outbounds, so the parsed raw config
+        // must be augmented into a locally runnable skeleton: a selector to
+        // switch nodes, a direct fallback, and the clash_api endpoint the
+        // UIs control the core through.
         let value: serde_json::Value = serde_json::from_str(&snapshot.raw).expect("raw is JSON");
-        assert_eq!(value["outbounds"].as_array().map(Vec::len), Some(4));
+        assert_eq!(value["outbounds"][0]["type"], "selector");
+        assert_eq!(value["route"]["final"], "🚀节点选择");
+        assert!(value["inbounds"].as_array().is_some());
+        assert_eq!(
+            value["experimental"]["clash_api"]["external_controller"],
+            "127.0.0.1:9090"
+        );
+    }
+
+    #[test]
+    fn wraps_a_plain_uri_list_into_a_local_runtime_profile() {
+        let body = "hysteria2://pass@example.com:8443?insecure=1#hy2-node\n\n";
+        let snapshot = parse(body).expect("plain URI list parses");
+        let value: serde_json::Value = serde_json::from_str(&snapshot.raw).expect("raw is JSON");
+        assert_eq!(value["outbounds"][0]["tag"], "🚀节点选择");
+        assert!(value["experimental"]["clash_api"].is_object());
     }
 
     #[test]

@@ -149,6 +149,30 @@ impl Engine {
         mut command_rx: mpsc::UnboundedReceiver<ClientCommand>,
         shared: Arc<Mutex<ClientSnapshot>>,
     ) {
+        // Mirror the TUI's `auto_start` behavior: bring the core up on
+        // launch so the GUI toggle does something instead of only persisting.
+        if self.settings.auto_start
+            && self.snapshot.core_installed
+            && self.profiles.active_profile().is_some()
+        {
+            self.snapshot.busy = Some("AutoStart".to_owned());
+            let _ = self
+                .event_tx
+                .try_send(ClientEvent::OperationStarted("自动启动内核".into()));
+            if let Err(error) = self.start_core().await {
+                let message = error.to_string();
+                self.snapshot.status = format!("自动启动失败: {message}");
+                self.snapshot.push_event(self.snapshot.status.clone());
+                let _ = self
+                    .event_tx
+                    .try_send(ClientEvent::Error(crate::ClientError {
+                        operation: "自动启动内核".into(),
+                        message,
+                    }));
+            }
+            self.snapshot.busy = None;
+            self.publish(&shared);
+        }
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -289,16 +313,20 @@ impl Engine {
                 Ok(())
             }
             ClientCommand::UpdateSubscription => self.update_subscription().await,
+            ClientCommand::ImportSubscription(url) => self.import_subscription(url).await,
+            ClientCommand::RemoveProfile(name) => self.remove_profile(&name).await,
             ClientCommand::DownloadCore => {
                 self.snapshot.status = "正在下载 sing-box 内核…".to_owned();
                 let version = self.settings.core_version.clone();
                 let mirror = self.settings.mirror.clone();
-                let path = core::download_core(&self.dir.join("core"), &version, &mirror).await?;
+                let download =
+                    core::download_core(&self.dir.join("core"), &version, &mirror).await?;
                 self.snapshot.core_installed = true;
-                self.snapshot.core_version = core::detect_version(&path).ok();
+                self.snapshot.core_version = core::detect_version(&download.path).ok();
                 self.note(format!(
-                    "内核已安装: {}",
-                    self.snapshot.core_version.clone().unwrap_or_default()
+                    "内核已安装: {}（SHA-256 {}…）",
+                    self.snapshot.core_version.clone().unwrap_or_default(),
+                    &download.sha256[..download.sha256.len().min(16)]
                 ));
                 Ok(())
             }
@@ -377,7 +405,7 @@ impl Engine {
                 self.snapshot.restart_attempts = 0;
                 let mut status = "内核已启动".to_owned();
                 if mode == TrafficMode::SystemProxy && self.settings.auto_system_proxy {
-                    match system_proxy::enable(self.settings.mixed_port) {
+                    match system_proxy::enable(&self.dir, self.settings.mixed_port) {
                         Ok(()) => {
                             self.snapshot.system_proxy_enabled = true;
                             status = format!(
@@ -412,7 +440,7 @@ impl Engine {
         self.restart_attempts = 0;
         self.snapshot.restart_attempts = 0;
         if self.snapshot.system_proxy_enabled {
-            let _ = system_proxy::disable();
+            let _ = system_proxy::disable(&self.dir);
             self.snapshot.system_proxy_enabled = false;
         }
         if let Some(mut child) = self.child.take() {
@@ -427,11 +455,11 @@ impl Engine {
 
     fn toggle_system_proxy(&mut self) -> Result<()> {
         if self.snapshot.system_proxy_enabled {
-            system_proxy::disable()?;
+            system_proxy::disable(&self.dir)?;
             self.snapshot.system_proxy_enabled = false;
             self.note("系统代理已关闭");
         } else {
-            system_proxy::enable(self.settings.mixed_port)?;
+            system_proxy::enable(&self.dir, self.settings.mixed_port)?;
             self.snapshot.system_proxy_enabled = true;
             self.note(format!(
                 "系统代理已开启 → 127.0.0.1:{}",
@@ -485,7 +513,7 @@ impl Engine {
             .context("没有激活的订阅档案")?
             .clone();
         self.snapshot.status = format!("正在更新订阅 {}…", profile.name);
-        let fetched = match subscription::fetch(&profile.url, &self.settings.mirror).await {
+        let fetched = match self.fetch_with_compat(&profile.url).await {
             Ok(fetched) => fetched,
             Err(error) => {
                 let cache = settings::profile_cache_path(&self.dir, &profile.name);
@@ -512,6 +540,111 @@ impl Engine {
             .active_profile()
             .map(|profile| ProfileSummary::from_profile(profile, true));
         self.note(format!("订阅已更新（{} 个节点）", parsed.nodes.len()));
+        Ok(())
+    }
+
+    /// Fetches the profile URL, retrying the old bare `sing-box.json`
+    /// endpoint when the normalized full-profile link fails on an older
+    /// sbctl server. `parse` wraps that bare node list into a runnable
+    /// client configuration, so the caller needs no special casing.
+    async fn fetch_with_compat(&self, url: &str) -> Result<subscription::Fetched> {
+        match subscription::fetch(url, &self.settings.mirror).await {
+            Ok(fetched) => Ok(fetched),
+            Err(error) => match subscription::bare_sing_box_fallback_url(url) {
+                Some(fallback) => subscription::fetch(&fallback, &self.settings.mirror).await,
+                None => Err(error),
+            },
+        }
+    }
+
+    async fn import_subscription(&mut self, url: String) -> Result<()> {
+        let source = url.trim().to_owned();
+        if !(source.starts_with("https://") || source.starts_with("http://")) {
+            anyhow::bail!("剪贴板内容不是有效的 HTTP/HTTPS 订阅地址");
+        }
+        // Store the canonical full-profile link the same way the TUI does, so
+        // a pasted clash.yaml / qr / index suffix fetches a sing-box client
+        // profile instead of a body the engine cannot parse.
+        let url = subscription::normalize_url(&source);
+
+        if let Some(existing) = self
+            .profiles
+            .profiles
+            .iter()
+            .find(|profile| profile.url == url)
+            .map(|profile| profile.name.clone())
+        {
+            self.profiles.active = Some(existing.clone());
+            self.profiles.save(&self.dir)?;
+            self.snapshot.active_profile = self
+                .profiles
+                .active_profile()
+                .map(|profile| ProfileSummary::from_profile(profile, true));
+            self.snapshot.profiles = profile_summaries(&self.profiles);
+            self.note(format!("订阅已存在，已切换到 {existing}"));
+            return self.update_subscription().await;
+        }
+
+        let mut index = self.profiles.profiles.len() + 1;
+        let name = loop {
+            let candidate = format!("订阅 {index}");
+            if !self
+                .profiles
+                .profiles
+                .iter()
+                .any(|profile| profile.name == candidate)
+            {
+                break candidate;
+            }
+            index += 1;
+        };
+        self.profiles.profiles.push(crate::settings::Profile {
+            name: name.clone(),
+            url,
+            source,
+            last_updated: 0,
+        });
+        self.profiles.active = Some(name.clone());
+        self.profiles.save(&self.dir)?;
+        self.snapshot.profiles = profile_summaries(&self.profiles);
+        self.snapshot.active_profile = self
+            .profiles
+            .active_profile()
+            .map(|profile| ProfileSummary::from_profile(profile, true));
+        self.note(format!("已导入 {name}，正在拉取订阅"));
+        self.update_subscription().await
+    }
+
+    async fn remove_profile(&mut self, name: &str) -> Result<()> {
+        if self.snapshot.core_running && self.profiles.active.as_deref() == Some(name) {
+            anyhow::bail!("删除当前订阅前请先停止内核");
+        }
+        let before = self.profiles.profiles.len();
+        self.profiles
+            .profiles
+            .retain(|profile| profile.name != name);
+        if self.profiles.profiles.len() == before {
+            anyhow::bail!("订阅档案不存在: {name}");
+        }
+        if self.profiles.active.as_deref() == Some(name) {
+            self.profiles.active = self
+                .profiles
+                .profiles
+                .first()
+                .map(|profile| profile.name.clone());
+        }
+        self.profiles.save(&self.dir)?;
+        let cache = settings::profile_cache_path(&self.dir, name);
+        if tokio::fs::try_exists(&cache).await.unwrap_or(false) {
+            tokio::fs::remove_file(cache).await?;
+        }
+        self.snapshot.profiles = profile_summaries(&self.profiles);
+        self.snapshot.active_profile = self
+            .profiles
+            .active_profile()
+            .map(|profile| ProfileSummary::from_profile(profile, true));
+        self.snapshot.subscription_usage = None;
+        self.note(format!("已删除订阅 {name}"));
         Ok(())
     }
 
@@ -646,7 +779,7 @@ impl Engine {
         self.snapshot.connections = Default::default();
         self.snapshot.active_connections = 0;
         if self.snapshot.system_proxy_enabled {
-            let _ = system_proxy::disable();
+            let _ = system_proxy::disable(&self.dir);
             self.snapshot.system_proxy_enabled = false;
         }
         let attempt = self.restart_attempts;

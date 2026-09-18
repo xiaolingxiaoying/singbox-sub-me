@@ -194,7 +194,11 @@ struct App {
     api: ClashApi,
     groups: Vec<clash_api::ProxyGroup>,
     selected_group: usize,
+    /// Highlighted member inside the selected proxy group.
     selected_member: usize,
+    /// Highlighted row in the connection table (independent from the proxy
+    /// member highlight, which `refresh_connections` used to clobber).
+    selected_connection: usize,
     delays: HashMap<String, u64>,
     /// Members whose most recent latency test failed or timed out.
     delay_failed: Vec<String>,
@@ -235,6 +239,10 @@ struct App {
     restart_at: Option<Instant>,
     /// When the proxy groups were last polled (they change rarely).
     proxies_refresh_at: Option<Instant>,
+    /// The group index whose member highlight was last synced to its current
+    /// node. While it matches `selected_group`, polls leave the highlight where
+    /// the user put it instead of snapping back to the running node.
+    proxies_synced_group: Option<usize>,
     /// Pending confirmations for the mode switch and the exit-keep-proxy prompt.
     confirm_mode: bool,
     confirm_quit: bool,
@@ -269,6 +277,7 @@ impl App {
             groups: Vec::new(),
             selected_group: 0,
             selected_member: 0,
+            selected_connection: 0,
             delays: HashMap::new(),
             delay_failed: Vec::new(),
             mode_outbound: OutboundMode::Rule,
@@ -299,6 +308,7 @@ impl App {
             restart_attempts: 0,
             restart_at: None,
             proxies_refresh_at: None,
+            proxies_synced_group: None,
             confirm_mode: false,
             confirm_quit: false,
             log_paused: false,
@@ -350,8 +360,13 @@ impl App {
     /// subscription refresh (auto-update only runs while the core is active).
     fn auto_update_due(&mut self) -> bool {
         let minutes = self.settings.auto_update_minutes;
-        if minutes == 0 || self.profiles.active.is_none() {
+        if minutes == 0 {
             return false;
+        }
+        // Local-file profiles have no URL to refresh; skip them silently.
+        match self.profiles.active_profile() {
+            Some(profile) if !profile.url.trim().is_empty() => {}
+            _ => return false,
         }
         let interval = Duration::from_secs(minutes * 60);
         let due = match self.last_auto_update {
@@ -393,8 +408,9 @@ impl App {
         self.connections = Default::default();
         self.traffic_history.clear();
         self.proxies_refresh_at = None;
+        self.proxies_synced_group = None;
         if self.system_proxy_on {
-            let _ = system_proxy::disable();
+            let _ = system_proxy::disable(&self.dir);
             self.system_proxy_on = false;
         }
         let attempt = self.restart_attempts;
@@ -411,6 +427,7 @@ impl App {
     async fn refresh_proxies(&mut self) {
         if !self.running {
             self.groups.clear();
+            self.proxies_synced_group = None;
             return;
         }
         match self.api.proxies().await {
@@ -418,19 +435,36 @@ impl App {
                 self.groups = groups;
                 if self.selected_group >= self.groups.len() {
                     self.selected_group = 0;
+                    self.proxies_synced_group = None;
                 }
-                if let Some(group) = self.groups.get(self.selected_group) {
-                    if let Some(position) = group.all.iter().position(|member| member == &group.now)
-                    {
-                        self.selected_member = position;
-                    } else if self.selected_member >= group.all.len() {
+                if self.groups.is_empty() {
+                    self.proxies_synced_group = None;
+                    self.selected_member = 0;
+                } else {
+                    let selected_group = self.selected_group;
+                    let synced = self.proxies_synced_group == Some(selected_group);
+                    let (current_position, member_count) = {
+                        let group = &self.groups[selected_group];
+                        (
+                            group.all.iter().position(|member| member == &group.now),
+                            group.all.len(),
+                        )
+                    };
+                    // Snap the highlight to the running node only the first time
+                    // a group is shown (or right after the user switches groups).
+                    // Afterwards keep the user's selection, otherwise every poll
+                    // would steal the highlight back to the current node.
+                    if !synced {
+                        self.selected_member = current_position.unwrap_or(0);
+                        self.proxies_synced_group = Some(selected_group);
+                    } else if member_count == 0 {
                         self.selected_member = 0;
+                    } else if self.selected_member >= member_count {
+                        self.selected_member = member_count - 1;
                     }
-                }
-                // Keep the stateful list widget's own selection aligned with
-                // `selected_group`, otherwise the highlighted row is wrong.
-                if !self.groups.is_empty() {
-                    self.group_list.select(Some(self.selected_group));
+                    // Keep the stateful list widget's own selection aligned with
+                    // `selected_group`, otherwise the highlighted row is wrong.
+                    self.group_list.select(Some(selected_group));
                 }
                 self.mode_outbound = self.api.mode().await.unwrap_or(OutboundMode::Rule);
             }
@@ -470,8 +504,8 @@ impl App {
                 self.connections = snapshot;
                 self.push_traffic_sample();
                 sort_connections(self);
-                if self.selected_member >= self.connections.connections.len() {
-                    self.selected_member = 0;
+                if self.selected_connection >= self.connections.connections.len() {
+                    self.selected_connection = 0;
                 }
             }
             Err(error) => self.log(format!("刷新连接失败: {error}")),
@@ -535,10 +569,14 @@ async fn run_app(
                 let Some(event) = event else { break };
                 match event {
                     Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                        let quit_requested = !app.show_help && ((key.code == KeyCode::Char('q')
-                            && key.modifiers.is_empty())
-                            || (key.code == KeyCode::Char('c')
-                                && key.modifiers.contains(KeyModifiers::CONTROL)));
+                        // The quit keys only quit outside the help and input
+                        // overlays; inside them `q` is a plain character for
+                        // the search box or the profile-name editor.
+                        let quit_requested = !app.show_help
+                            && app.input.is_none()
+                            && ((key.code == KeyCode::Char('q') && key.modifiers.is_empty())
+                                || (key.code == KeyCode::Char('c')
+                                    && key.modifiers.contains(KeyModifiers::CONTROL)));
                         if quit_requested {
                             if app.system_proxy_on && !app.confirm_quit {
                                 app.confirm_quit = true;
@@ -593,7 +631,7 @@ async fn run_app(
         let _ = child.kill().await;
     }
     if app.system_proxy_on && !app.confirm_quit {
-        let _ = system_proxy::disable();
+        let _ = system_proxy::disable(&app.dir);
     }
     Ok(())
 }
@@ -637,8 +675,8 @@ async fn start_core(app: &mut App) -> Result<()> {
             app.running = true;
             app.restart_attempts = 0;
             app.restart_at = None;
-            if app.mode == TrafficMode::SystemProxy {
-                match system_proxy::enable(app.settings.mixed_port) {
+            if app.mode == TrafficMode::SystemProxy && app.settings.auto_system_proxy {
+                match system_proxy::enable(&app.dir, app.settings.mixed_port) {
                     Ok(()) => {
                         app.system_proxy_on = true;
                         app.status = format!(
@@ -648,8 +686,10 @@ async fn start_core(app: &mut App) -> Result<()> {
                     }
                     Err(error) => app.status = format!("内核已启动；系统代理设置失败: {error}"),
                 }
-            } else {
+            } else if app.mode == TrafficMode::Tun {
                 app.status = "内核已启动（TUN 模式）。".to_owned();
+            } else {
+                app.status = "内核已启动；系统代理未自动开启（按 p 开启）".to_owned();
             }
             let status = app.status.clone();
             app.log(status);
@@ -671,7 +711,7 @@ async fn stop_core(app: &mut App) -> Result<()> {
     app.restart_at = None;
     app.restart_attempts = 0;
     if app.system_proxy_on {
-        let _ = system_proxy::disable();
+        let _ = system_proxy::disable(&app.dir);
         app.system_proxy_on = false;
     }
     if let Some(mut child) = app.core_child.take() {
@@ -681,6 +721,7 @@ async fn stop_core(app: &mut App) -> Result<()> {
     app.connections = Default::default();
     app.traffic_history.clear();
     app.proxies_refresh_at = None;
+    app.proxies_synced_group = None;
     app.status = "内核已停止。".to_owned();
     let status = app.status.clone();
     app.log(status);
@@ -700,6 +741,9 @@ async fn update_subscription(app: &mut App) -> Result<()> {
             app.settings.mirror.clone(),
         )
     };
+    if url.trim().is_empty() {
+        anyhow::bail!("档案 {name} 是本地文件导入，没有订阅链接；按 e 设置链接或按 f 重新导入");
+    }
     app.status = format!("正在更新订阅 {name}…");
     let (fetched, used_bare_compatibility) =
         match fetch_subscription_with_compatibility(&url, &source, &mirror).await {
@@ -717,8 +761,8 @@ async fn update_subscription(app: &mut App) -> Result<()> {
                 return Err(error);
             }
         };
-    app.subscription_usage = fetched.userinfo;
     let snapshot = subscription::parse(&fetched.body)?;
+    app.subscription_usage = fetched.userinfo;
     let cache = settings::profile_cache_path(&app.dir, &name);
     tokio::fs::write(&cache, &snapshot.raw).await?;
     for profile in &mut app.profiles.profiles {
@@ -773,12 +817,13 @@ async fn download_core(app: &mut App) -> Result<()> {
     let target = app.dir.join("core");
     let version = app.settings.core_version.clone();
     let mirror = app.settings.mirror.clone();
-    let path = core::download_core(&target, &version, &mirror).await?;
-    app.core_path = Some(path.clone());
-    app.core_version = core::detect_version(&path).ok();
+    let download = core::download_core(&target, &version, &mirror).await?;
+    app.core_path = Some(download.path.clone());
+    app.core_version = core::detect_version(&download.path).ok();
     app.status = format!(
-        "内核已安装: {}",
-        app.core_version.clone().unwrap_or_default()
+        "内核已安装: {}（SHA-256 {}…）",
+        app.core_version.clone().unwrap_or_default(),
+        &download.sha256[..download.sha256.len().min(16)]
     );
     let status = app.status.clone();
     app.log(status);
@@ -817,6 +862,8 @@ async fn handle_key(app: &mut App, key: KeyCode) -> Result<()> {
         KeyCode::Char('?') => app.show_help = true,
         KeyCode::Tab => app.tab = app.tab.next(),
         KeyCode::BackTab => app.tab = app.tab.previous(),
+        KeyCode::Left if app.tab == Tab::Proxies => move_proxy_group(app, -1),
+        KeyCode::Right if app.tab == Tab::Proxies => move_proxy_group(app, 1),
         KeyCode::Char(ch @ '1'..='5') => {
             if let Some(tab) = Tab::from_index(ch as usize - '1' as usize) {
                 app.tab = tab;
@@ -836,8 +883,8 @@ async fn handle_key(app: &mut App, key: KeyCode) -> Result<()> {
         }
         KeyCode::Char('p') => toggle_system_proxy(app)?,
         KeyCode::Char('m') => toggle_mode(app),
-        KeyCode::Char('t') => test_current_delay(app).await,
-        KeyCode::Char('T') => test_group_delays(app).await,
+        KeyCode::Char('t') if app.tab == Tab::Proxies => test_current_delay(app).await,
+        KeyCode::Char('T') if app.tab == Tab::Proxies => test_group_delays(app).await,
         KeyCode::Char('u') => {
             if let Err(error) = update_subscription(app).await {
                 app.status = format!("订阅更新失败: {error}");
@@ -845,14 +892,14 @@ async fn handle_key(app: &mut App, key: KeyCode) -> Result<()> {
                 app.log(status);
             }
         }
-        KeyCode::Char('x') => close_selected_connection(app).await,
-        KeyCode::Char('X') => close_all_connections(app).await,
-        KeyCode::Char('S') => {
+        KeyCode::Char('x') if app.tab == Tab::Connections => close_selected_connection(app).await,
+        KeyCode::Char('X') if app.tab == Tab::Connections => close_all_connections(app).await,
+        KeyCode::Char('S') if app.tab == Tab::Connections => {
             app.conn_sort = app.conn_sort.next();
             sort_connections(app);
             app.status = format!("连接排序: {}", app.conn_sort.label());
         }
-        KeyCode::Char('f') => {
+        KeyCode::Char('f') if app.tab == Tab::Settings => {
             app.input = Some(InputGoal::ProfileFile);
             app.input_text.clear();
         }
@@ -864,11 +911,11 @@ async fn handle_key(app: &mut App, key: KeyCode) -> Result<()> {
             }
         }
         KeyCode::Delete if app.tab == Tab::Settings => delete_selected_profile(app)?,
-        KeyCode::Char('n') => {
+        KeyCode::Char('n') if app.tab == Tab::Settings => {
             app.input = Some(InputGoal::ProfileName);
             app.input_text.clear();
         }
-        KeyCode::Char('v') => {
+        KeyCode::Char('v') if app.tab == Tab::Settings => {
             app.input = Some(InputGoal::CoreVersion);
             app.input_text.clear();
         }
@@ -876,7 +923,7 @@ async fn handle_key(app: &mut App, key: KeyCode) -> Result<()> {
             app.input = Some(InputGoal::Mirror);
             app.input_text.clear();
         }
-        KeyCode::Char('d') => {
+        KeyCode::Char('d') if app.tab == Tab::Settings => {
             if let Err(error) = download_core(app).await {
                 app.status = format!("内核下载失败: {error}");
                 let status = app.status.clone();
@@ -1057,21 +1104,14 @@ fn load_rules(app: &mut App) {
 
 fn move_cursor(app: &mut App, delta: isize) {
     match app.tab {
-        Tab::Proxies if !app.groups.is_empty() => {
-            let len = app.groups.len();
-            app.selected_group =
-                ((app.selected_group as isize + delta).clamp(0, len as isize - 1)) as usize;
-            app.selected_member = 0;
-            app.group_list.select(Some(app.selected_group));
-        }
-        Tab::Proxies => {}
+        Tab::Proxies => move_proxy_member(app, delta),
         Tab::Connections => {
             let len = visible_connections(app).len();
             if len > 0 {
-                app.selected_member =
-                    ((app.selected_member as isize + delta).clamp(0, len as isize - 1)) as usize;
+                app.selected_connection = ((app.selected_connection as isize + delta)
+                    .clamp(0, len as isize - 1)) as usize;
             } else {
-                app.selected_member = 0;
+                app.selected_connection = 0;
             }
         }
         Tab::Settings if !app.profiles.profiles.is_empty() => {
@@ -1085,6 +1125,39 @@ fn move_cursor(app: &mut App, delta: isize) {
         }
         _ => {}
     }
+}
+
+/// Moves the member highlight inside the selected proxy group (`↑↓` / `j k`).
+fn move_proxy_member(app: &mut App, delta: isize) {
+    let member_count = app
+        .groups
+        .get(app.selected_group)
+        .map(|group| group.all.len())
+        .unwrap_or(0);
+    if member_count == 0 {
+        return;
+    }
+    app.selected_member =
+        ((app.selected_member as isize + delta).clamp(0, member_count as isize - 1)) as usize;
+}
+
+/// Switches the selected proxy group (`←→`) and snaps the member highlight to
+/// that group's current node.
+fn move_proxy_group(app: &mut App, delta: isize) {
+    if app.groups.is_empty() {
+        return;
+    }
+    let len = app.groups.len() as isize;
+    let next = ((app.selected_group as isize + delta).clamp(0, len - 1)) as usize;
+    let position = app.groups[next]
+        .all
+        .iter()
+        .position(|member| member == &app.groups[next].now)
+        .unwrap_or(0);
+    app.selected_group = next;
+    app.selected_member = position;
+    app.proxies_synced_group = Some(next);
+    app.group_list.select(Some(next));
 }
 
 async fn select_current(app: &mut App) -> Result<()> {
@@ -1202,7 +1275,7 @@ async fn close_selected_connection(app: &mut App) {
         return;
     }
     let Some(connection) = visible_connections(app)
-        .get(app.selected_member)
+        .get(app.selected_connection)
         .map(|connection| (*connection).clone())
     else {
         return;
@@ -1277,12 +1350,20 @@ fn delete_selected_profile(app: &mut App) -> Result<()> {
         app.status = format!("再按 Delete 确认删除档案 {name}（不可撤销）");
         return Ok(());
     }
+    let was_active = app.profiles.active.as_deref() == Some(name.as_str());
+    if was_active && app.running {
+        app.confirm_delete = None;
+        app.status = "内核运行中，先按 s 停止内核再删除当前档案".to_owned();
+        return Ok(());
+    }
     app.profiles.profiles.retain(|profile| profile.name != name);
-    if app.profiles.active.as_deref() == Some(name.as_str()) {
+    if was_active {
         app.profiles.active = None;
+        app.subscription_usage = None;
     }
     app.confirm_delete = None;
     app.profiles.save(&app.dir)?;
+    let _ = std::fs::remove_file(settings::profile_cache_path(&app.dir, &name));
     app.status = format!("已删除档案 {name}");
     let status = app.status.clone();
     app.log(status);
@@ -1291,14 +1372,22 @@ fn delete_selected_profile(app: &mut App) -> Result<()> {
 
 fn toggle_system_proxy(app: &mut App) -> Result<()> {
     if app.system_proxy_on {
-        system_proxy::disable()?;
+        system_proxy::disable(&app.dir)?;
         app.system_proxy_on = false;
         app.status = "系统代理已关闭".to_owned();
-    } else {
-        system_proxy::enable(app.settings.mixed_port)?;
-        app.system_proxy_on = true;
-        app.status = format!("系统代理已开启 → 127.0.0.1:{}", app.settings.mixed_port);
+        return Ok(());
     }
+    if app.mode == TrafficMode::Tun {
+        app.status = "当前是 TUN 模式，系统代理不适用；按 m 切回系统代理模式".to_owned();
+        return Ok(());
+    }
+    if !app.running {
+        app.status = "内核未运行；先按 s 启动内核，再开启系统代理".to_owned();
+        return Ok(());
+    }
+    system_proxy::enable(&app.dir, app.settings.mixed_port)?;
+    app.system_proxy_on = true;
+    app.status = format!("系统代理已开启 → 127.0.0.1:{}", app.settings.mixed_port);
     Ok(())
 }
 
@@ -1403,7 +1492,7 @@ async fn commit_input(app: &mut App, goal: InputGoal) -> Result<()> {
         InputGoal::ProfileEditUrl => {
             let name = app.pending_profile_name.take().unwrap_or_default();
             if text.is_empty() {
-                app.status = "订阅链接不能为空".to_owned();
+                app.status = "已取消编辑".to_owned();
                 return Ok(());
             }
             let normalized = subscription::normalize_url(&text);
@@ -1472,7 +1561,7 @@ async fn commit_input(app: &mut App, goal: InputGoal) -> Result<()> {
         }
         InputGoal::ConnFilter => {
             app.conn_filter = text;
-            app.selected_member = 0;
+            app.selected_connection = 0;
             app.status = if app.conn_filter.is_empty() {
                 "已清除连接过滤".to_owned()
             } else {
@@ -1599,7 +1688,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let hint = match app.tab {
         Tab::Dashboard => "s 启动/停止  ·  u 更新订阅  ·  p 系统代理  ·  m 切换模式",
-        Tab::Proxies => "↑↓ 选择  ·  Enter 切换  ·  t 测当前  ·  T 测全组",
+        Tab::Proxies => "↑↓ 选节点  ·  ←→ 切组  ·  Enter 切换  ·  t 测当前  ·  T 测全组",
         Tab::Connections => "↑↓ 选择  ·  x 关闭连接  ·  X 关闭全部  ·  S 排序  ·  / 过滤",
         Tab::Logs => "Space 暂停  ·  l 级别  ·  / 关键字  ·  c 复制  ·  r 分流规则",
         Tab::Settings => "n 新增  ·  e 编辑  ·  Delete 删除  ·  d 下载内核  ·  a/P/U 选项",
@@ -1723,7 +1812,7 @@ fn draw_input_overlay(frame: &mut Frame, app: &App) {
 fn draw_help_overlay(frame: &mut Frame, app: &App) {
     let page_keys = match app.tab {
         Tab::Dashboard => "s 启动/停止 · u 更新订阅 · p 开/关系统代理 · m 切换模式",
-        Tab::Proxies => "↑↓ 选择 · Enter 切换 · t 测当前 · T 测全组",
+        Tab::Proxies => "↑↓ 选节点 · ←→ 切组 · Enter 切换 · t 测当前 · T 测全组",
         Tab::Connections => "↑↓ 选择 · x 关闭连接 · X 关闭全部 · S 切换排序 · / 关键字过滤",
         Tab::Logs => "Space 暂停 · l 切换级别 · / 关键字过滤 · c 复制 · r 查看规则",
         Tab::Settings => "n 新增 · e 编辑 · Delete 删除 · d 下载内核 · a/P/U/g/y 选项",
@@ -1874,9 +1963,9 @@ fn draw_dashboard(frame: &mut Frame, area: ratatui::prelude::Rect, app: &App) {
             Span::styled("代理  ", Style::default().fg(MUTED)),
             Span::styled(
                 if app.system_proxy_on {
-                    "已接管 127.0.0.1:2080"
+                    format!("已接管 127.0.0.1:{}", app.settings.mixed_port)
                 } else {
-                    "未接管系统网络"
+                    "未接管系统网络".to_owned()
                 },
                 Style::default().fg(if app.system_proxy_on { MINT } else { MUTED }),
             ),
@@ -2243,7 +2332,7 @@ fn draw_connections(frame: &mut Frame, area: ratatui::prelude::Rect, app: &App) 
             connection.rule.clone()
         };
         Row::new(vec![
-            Cell::from(if index == app.selected_member {
+            Cell::from(if index == app.selected_connection {
                 "●"
             } else {
                 ""
@@ -2600,5 +2689,48 @@ mod tests {
             ..usage
         };
         assert!(usage_label(Some(expired)).contains("已到期"));
+    }
+
+    fn selector(name: &str, now: &str, members: &[&str]) -> clash_api::ProxyGroup {
+        clash_api::ProxyGroup {
+            name: name.to_owned(),
+            kind: "Selector".to_owned(),
+            now: now.to_owned(),
+            all: members.iter().map(|member| (*member).to_owned()).collect(),
+            history: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn proxy_member_selection_moves_and_stays_independent_from_connections() {
+        let mut app = test_app();
+        app.groups = vec![selector("g", "b", &["a", "b", "c"])];
+        app.selected_group = 0;
+        app.selected_member = 1;
+
+        move_proxy_member(&mut app, 1);
+        assert_eq!(app.selected_member, 2);
+        move_proxy_member(&mut app, 1);
+        assert_eq!(app.selected_member, 2, "clamps at the last member");
+        move_proxy_member(&mut app, -1);
+        assert_eq!(app.selected_member, 1);
+
+        app.selected_connection = 0;
+        assert_eq!(app.selected_member, 1, "connection state is separate");
+    }
+
+    #[test]
+    fn proxy_group_switch_snaps_member_to_the_current_node() {
+        let mut app = test_app();
+        app.groups = vec![
+            selector("one", "a", &["a", "b"]),
+            selector("two", "y", &["x", "y", "z"]),
+        ];
+        app.selected_group = 0;
+        app.selected_member = 1;
+
+        move_proxy_group(&mut app, 1);
+        assert_eq!(app.selected_group, 1);
+        assert_eq!(app.selected_member, 1, "snaps to the group's current node");
     }
 }

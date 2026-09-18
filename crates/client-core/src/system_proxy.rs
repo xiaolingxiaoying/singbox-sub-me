@@ -7,6 +7,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// How the core receives traffic: a local mixed inbound paired with the OS
 /// proxy, or the tun inbound that takes over routing globally.
@@ -69,18 +70,17 @@ struct LinuxBackup {
     http_port: String,
 }
 
-fn backup_path() -> Option<std::path::PathBuf> {
-    crate::settings::data_dir()
-        .ok()
-        .map(|dir| dir.join("cache/system-proxy-backup.json"))
+/// The backup lives in the calling client's own data directory. Sharing one
+/// global path (the old behavior pinned it to the sbtui directory) let the
+/// GUI overwrite the TUI's captured state and restore the wrong settings.
+fn backup_path(dir: &Path) -> std::path::PathBuf {
+    dir.join("cache/system-proxy-backup.json")
 }
 
-/// Captures the pre-sbtui proxy state once (a later enable must not overwrite
-/// the user's original settings with sbtui's own).
-fn capture_backup() {
-    let Some(path) = backup_path() else {
-        return;
-    };
+/// Captures the pre-existing proxy state once (a later enable must not
+/// overwrite the user's original settings with the client's own).
+fn capture_backup(dir: &Path) {
+    let path = backup_path(dir);
     if path.is_file() {
         return;
     }
@@ -108,10 +108,8 @@ fn capture_backup() {
 
 /// Restores the captured state and removes the backup. A missing or unreadable
 /// backup is not an error (best effort).
-fn restore_backup() -> Result<()> {
-    let Some(path) = backup_path() else {
-        return Ok(());
-    };
+fn restore_backup(dir: &Path) -> Result<()> {
+    let path = backup_path(dir);
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Ok(());
     };
@@ -137,17 +135,19 @@ fn restore_backup() -> Result<()> {
     Ok(())
 }
 
-/// Applies the OS proxy to point at the local mixed inbound.
-pub fn enable(port: u16) -> Result<()> {
-    capture_backup();
+/// Applies the OS proxy to point at the local mixed inbound. `dir` is the
+/// calling client's data directory, which keeps the captured backup scoped
+/// to that client (the TUI and the GUI keep separate data directories).
+pub fn enable(dir: &Path, port: u16) -> Result<()> {
+    capture_backup(dir);
     set_proxy(&format!("{PROXY_SERVER}:{port}"))
 }
 
 /// Restores the OS proxy captured by [`enable`]; when no backup exists this is
 /// the old behavior of clearing the proxy.
-pub fn disable() -> Result<()> {
-    if backup_path().is_some_and(|path| path.is_file()) {
-        return restore_backup();
+pub fn disable(dir: &Path) -> Result<()> {
+    if backup_path(dir).is_file() {
+        return restore_backup(dir);
     }
     set_proxy("")
 }

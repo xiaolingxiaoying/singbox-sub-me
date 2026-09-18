@@ -6,14 +6,23 @@
 //! `...-darwin-<arch>.tar.gz` elsewhere) fetched directly or through a
 //! configured mirror prefix (settings).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
+use sha2::{Digest, Sha256};
 use tokio::process::{Child, Command};
 
 pub struct CoreHandle {
     pub child: Child,
+}
+
+/// The result of a core download: where the binary was installed and the
+/// SHA-256 of the release archive it came from.
+pub struct CoreDownload {
+    pub path: PathBuf,
+    pub sha256: String,
 }
 
 /// The core's reported version (`sing-box version`), or an error when the
@@ -78,7 +87,7 @@ pub fn restart_backoff(attempt: u32) -> std::time::Duration {
 /// directory. The release is resolved through the GitHub API (or the pinned
 /// version) and the versioned asset is fetched: `...-windows-<arch>.zip` on
 /// Windows, `...-linux-<arch>.tar.gz` / `...-darwin-<arch>.tar.gz` elsewhere.
-pub async fn download_core(target_dir: &Path, version: &str, mirror: &str) -> Result<PathBuf> {
+pub async fn download_core(target_dir: &Path, version: &str, mirror: &str) -> Result<CoreDownload> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(600))
         .build()?;
@@ -101,14 +110,47 @@ pub async fn download_core(target_dir: &Path, version: &str, mirror: &str) -> Re
         .await
         .context("reading the core archive")?
         .to_vec();
+    let sha256 = format!("{:x}", Sha256::digest(&bytes));
     tokio::fs::create_dir_all(target_dir).await?;
+    verify_or_record_hash(target_dir, &tag, &sha256)?;
     let binary_name = core_binary_name();
     if is_zip {
         extract_zip_core(&bytes, target_dir, binary_name)?;
     } else {
         extract_tar_gz_core(&bytes, target_dir, binary_name)?;
     }
-    Ok(target_dir.join(binary_name))
+    Ok(CoreDownload {
+        path: target_dir.join(binary_name),
+        sha256,
+    })
+}
+
+/// Trust-on-first-use integrity check over the downloaded archive. sing-box
+/// publishes no official checksum file, so the first download of a release
+/// tag can only be recorded; every later download of the same tag must
+/// reproduce the recorded hash, which turns a mirror silently swapping the
+/// archive into a loud failure instead of an unnoticed binary replacement.
+/// The ledger (`verified-hashes.json`) stays human-readable so the recorded
+/// hash can be compared against a copy of the release the user trusts.
+fn verify_or_record_hash(target_dir: &Path, tag: &str, sha256: &str) -> Result<()> {
+    let ledger_path = target_dir.join("verified-hashes.json");
+    let mut ledger: BTreeMap<String, String> = std::fs::read_to_string(&ledger_path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    match ledger.get(tag) {
+        Some(recorded) if recorded != sha256 => bail!(
+            "下载的 {tag} 内核 SHA-256 与首次记录不一致（{sha256} ≠ {recorded}）；\
+             镜像返回的文件可能已被篡改，请更换镜像，或核对发布页后删除 {} 重试",
+            ledger_path.display()
+        ),
+        Some(_) => Ok(()),
+        None => {
+            ledger.insert(tag.to_owned(), sha256.to_owned());
+            std::fs::write(&ledger_path, serde_json::to_string_pretty(&ledger)?)?;
+            Ok(())
+        }
+    }
 }
 
 /// The sing-box release tag to use: the pinned version normalized to `vX.Y.Z`,
