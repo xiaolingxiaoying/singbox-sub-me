@@ -623,35 +623,40 @@ fn sing_box(root: &Path, command: SingBoxCommand) -> ExitCode {
                     .map_err(sbctl::update::UpdateError::Storage)
             })
             .map(|_| "sing-box installed".to_owned()),
-        SingBoxCommand::Update { manifest, artifact } => {
-            let resolved_manifest = match manifest {
-                Some(path) => sbctl::update::read_manifest(&path),
-                None => sbctl::update::fetch_latest_manifest(),
-            };
-            let result = resolved_manifest.and_then(|manifest| {
-                let temporary = tempfile::NamedTempFile::new().map_err(|error| {
-                    sbctl::update::UpdateError::DownloadFailed("sing-box", error.to_string())
-                })?;
-                let candidate = match artifact {
-                    Some(candidate) => {
-                        sbctl::update::verify_sing_box_artifact(&manifest, &candidate)?;
-                        candidate
-                    }
-                    None => {
-                        let candidate = temporary.path().to_path_buf();
-                        sbctl::update::download_sing_box(&manifest, &candidate)?;
-                        candidate
-                    }
-                };
-                sbctl::update::apply_sing_box(
-                    &sbctl::config::DeploymentStore::new(root),
-                    &manifest,
-                    &candidate,
-                )
-            });
-            result
-                .map(|rollback| format!("sing-box updated; rollback point: {}", rollback.display()))
-        }
+        SingBoxCommand::Update { manifest, artifact } => match manifest {
+            Some(path) => {
+                // 签名 manifest 流程：URL 与摘要全部固定并校验签名后才会使用。
+                sbctl::update::read_manifest(&path)
+                    .and_then(|manifest| {
+                        let temporary = tempfile::NamedTempFile::new().map_err(|error| {
+                            sbctl::update::UpdateError::DownloadFailed(
+                                "sing-box",
+                                error.to_string(),
+                            )
+                        })?;
+                        let candidate = match artifact {
+                            Some(candidate) => {
+                                sbctl::update::verify_sing_box_artifact(&manifest, &candidate)?;
+                                candidate
+                            }
+                            None => {
+                                let candidate = temporary.path().to_path_buf();
+                                sbctl::update::download_sing_box(&manifest, &candidate)?;
+                                candidate
+                            }
+                        };
+                        sbctl::update::apply_sing_box(
+                            &sbctl::config::DeploymentStore::new(root),
+                            &manifest,
+                            &candidate,
+                        )
+                    })
+                    .map(|rollback| {
+                        format!("sing-box updated; rollback point: {}", rollback.display())
+                    })
+            }
+            None => update_sing_box_official(root, artifact.as_deref()),
+        },
         SingBoxCommand::Remove => sbctl::lifecycle::remove_managed_sing_box(root)
             .map(|_| "sing-box removed".to_owned())
             .map_err(sbctl::update::UpdateError::Operation),
@@ -666,6 +671,41 @@ fn sing_box(root: &Path, command: SingBoxCommand) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// Updates the managed sing-box kernel to the latest stable release from the
+/// official SagerNet repository (github.com/SagerNet/sing-box), or installs a
+/// locally supplied candidate artifact. Both paths run the same configuration
+/// check and health-check rollback flow as the signed-manifest update.
+fn update_sing_box_official(
+    root: &Path,
+    artifact: Option<&Path>,
+) -> Result<String, sbctl::update::UpdateError> {
+    let store = sbctl::config::DeploymentStore::new(root);
+    let temporary = tempfile::NamedTempFile::new().map_err(|error| {
+        sbctl::update::UpdateError::DownloadFailed("sing-box", error.to_string())
+    })?;
+    let (candidate, version_note) = match artifact {
+        Some(path) => (path.to_path_buf(), "本地 sing-box 候选".to_owned()),
+        None => {
+            let version = sbctl::update::fetch_latest_official_sing_box_version()?;
+            println!("官方最新稳定版：sing-box {version}，开始下载并校验…");
+            sbctl::update::download_sing_box_official(&version, temporary.path())?;
+            (
+                temporary.path().to_path_buf(),
+                format!("sing-box {version}（官方最新稳定版）"),
+            )
+        }
+    };
+    // The candidate is verified again here: it must run and pass a
+    // `sing-box check` against the active server configuration before the
+    // managed binary is replaced.
+    let contents = fs::read(&candidate)?;
+    let rollback = sbctl::update::install_candidate_sing_box(&store, &candidate, &contents)?;
+    Ok(format!(
+        "{version_note} 更新完成，已通过配置检查与服务健康检查；回滚点：{}",
+        rollback.display()
+    ))
 }
 
 fn release(command: ReleaseCommand) -> ExitCode {
@@ -868,24 +908,45 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
         }
         let sing_box_bin = match options.sing_box_bin {
             Some(path) => path,
-            None => {
-                let manifest_path =
-                    options
-                        .manifest
-                        .ok_or(sbctl::config::ConfigError::InvalidValue(
-                            "installation requires --sing-box-bin or a signed --manifest",
-                        ))?;
-                let manifest = sbctl::update::read_manifest(&manifest_path)
-                    .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
-                let download = tempfile::NamedTempFile::new()
-                    .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
-                sbctl::update::download_sing_box(&manifest, download.path())
-                    .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
-                download
-                    .keep()
-                    .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?
-                    .1
-            }
+            None => match options.manifest {
+                Some(manifest_path) => {
+                    let manifest =
+                        sbctl::update::read_manifest(&manifest_path).map_err(|error| {
+                            sbctl::config::ConfigError::StateContent(error.to_string())
+                        })?;
+                    let download = tempfile::NamedTempFile::new().map_err(|error| {
+                        sbctl::config::ConfigError::StateContent(error.to_string())
+                    })?;
+                    sbctl::update::download_sing_box(&manifest, download.path()).map_err(
+                        |error| sbctl::config::ConfigError::StateContent(error.to_string()),
+                    )?;
+                    download
+                        .keep()
+                        .map_err(|error| {
+                            sbctl::config::ConfigError::StateContent(error.to_string())
+                        })?
+                        .1
+                }
+                None => {
+                    // 默认：直接从官方 SagerNet 仓库安装最新稳定版 sing-box 内核。
+                    let version = sbctl::update::fetch_latest_official_sing_box_version().map_err(
+                        |error| sbctl::config::ConfigError::StateContent(error.to_string()),
+                    )?;
+                    println!("从官方仓库下载 sing-box 最新稳定版 {version} …");
+                    let download = tempfile::NamedTempFile::new().map_err(|error| {
+                        sbctl::config::ConfigError::StateContent(error.to_string())
+                    })?;
+                    sbctl::update::download_sing_box_official(&version, download.path()).map_err(
+                        |error| sbctl::config::ConfigError::StateContent(error.to_string()),
+                    )?;
+                    download
+                        .keep()
+                        .map_err(|error| {
+                            sbctl::config::ConfigError::StateContent(error.to_string())
+                        })?
+                        .1
+                }
+            },
         };
         let artifacts = sbctl::subscription::generated_artifacts(&config, root)
             .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
@@ -1928,7 +1989,20 @@ fn print_subscription_urls(
             Some(format) => sbctl::subscription::subscription_url(&config, format)
                 .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?,
             None => {
-                let mut table = String::new();
+                let mut table = String::from("按客户端选择订阅链接（推荐）：\n\n");
+                for row in sbctl::subscription::client_subscription_matrix() {
+                    table.push_str(&format!("{}：{}\n", row.client, row.note));
+                    for recommended in &row.formats {
+                        let url =
+                            sbctl::subscription::subscription_url(&config, recommended.format)
+                                .map_err(|error| {
+                                    sbctl::config::ConfigError::StateContent(error.to_string())
+                                })?;
+                        table.push_str(&format!("  {url}\n    （{}）\n", recommended.note));
+                    }
+                    table.push('\n');
+                }
+                table.push_str("全部订阅格式：\n\n");
                 for info in sbctl::subscription::subscription_matrix() {
                     let url = sbctl::subscription::subscription_url(&config, info.format).map_err(
                         |error| sbctl::config::ConfigError::StateContent(error.to_string()),
@@ -1949,7 +2023,7 @@ fn print_subscription_urls(
                 let index = sbctl::subscription::route_url(&config, SubscriptionRoute::Index)
                     .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
                 table.push_str(&format!(
-                    "订阅总览页（含全部二维码与导入步骤）：\n  {index}\n"
+                    "订阅总览页（含按客户端速查、全部二维码与导入步骤）：\n  {index}\n"
                 ));
                 table
             }

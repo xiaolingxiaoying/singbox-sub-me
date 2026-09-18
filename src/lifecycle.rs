@@ -182,14 +182,42 @@ fn managed_units(direct: bool) -> Vec<&'static str> {
 /// after this passes, so a unit that starts but immediately fails keeps the
 /// installation rolled back instead of leaving a misleading deployment.
 pub fn check_service_health(root: &Path, direct: bool) -> Result<(), String> {
+    // `Type=simple` units report active the instant the process is forked, so
+    // a single is-active probe can race a daemon that crashes right after
+    // startup. A short bounded wait lets a fast-failing unit surface its
+    // failure before the installation is committed.
+    const HEALTH_CHECK_ATTEMPTS: usize = 5;
+    const HEALTH_CHECK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
     for unit in managed_units(direct) {
-        systemctl(root, &["is-active", "--quiet", unit])?;
+        let mut failure = None;
+        for attempt in 0..HEALTH_CHECK_ATTEMPTS {
+            match systemctl(root, &["is-active", "--quiet", unit]) {
+                Ok(()) => {
+                    failure = None;
+                    break;
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    if attempt + 1 < HEALTH_CHECK_ATTEMPTS {
+                        std::thread::sleep(HEALTH_CHECK_RETRY_DELAY);
+                    }
+                }
+            }
+        }
+        if let Some(error) = failure {
+            return Err(format!(
+                "unit {unit} did not reach active state: {error}; \
+                 run `systemctl status {unit}` and `journalctl -u {unit} -n 50` for details"
+            ));
+        }
     }
     Ok(())
 }
 
 /// Removes only files created by a failed fresh installation. Preflight has
 /// already established that no sing-box deployment existed at these paths.
+/// Failures are collected and reported instead of silently swallowed, so an
+/// incomplete rollback is visible to the administrator.
 pub fn rollback_fresh_installation(root: &Path) {
     let _ = systemctl(
         root,
@@ -203,6 +231,7 @@ pub fn rollback_fresh_installation(root: &Path) {
         ],
     );
     let _ = systemctl(root, &["daemon-reload"]);
+    let mut warnings = Vec::new();
     for relative in [
         "etc/systemd/system/sbctl-http.socket",
         "etc/systemd/system/sbctl.service",
@@ -211,6 +240,7 @@ pub fn rollback_fresh_installation(root: &Path) {
         "etc/systemd/system/sbctl-accounting-reset.timer",
         "etc/sing-box/config.json",
         "usr/local/bin/sing-box",
+        "usr/local/bin/sbctl",
         "etc/sbctl/config.toml",
         CERTBOT_DEPLOY_HOOK,
         OWNERSHIP_MARKER,
@@ -218,8 +248,38 @@ pub fn rollback_fresh_installation(root: &Path) {
         "var/lib/sbctl/artifacts/subscription-sing-box.json",
         "var/lib/sbctl/artifacts/subscription-clash.yaml",
         "var/lib/sbctl/artifacts/subscription-uri.txt",
+        "var/lib/sbctl/artifacts/subscription-base64-uri.txt",
+        "var/lib/sbctl/artifacts/subscription-shadowrocket.txt",
+        "var/lib/sbctl/state.json",
     ] {
-        let _ = fs::remove_file(root.join(relative));
+        if let Err(error) = fs::remove_file(root.join(relative))
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            warnings.push(format!("{relative}: {error}"));
+        }
+    }
+    // Everything under var/lib/sbctl belongs to the failed installation (the
+    // pinned certificates, the ACME webroot, the remaining versioned
+    // artifacts, and the operation lock), so it can be removed wholesale.
+    // etc/sbctl is only pruned when empty: administrator override templates
+    // under etc/sbctl/overrides predate the install and must survive.
+    if let Err(error) = fs::remove_dir_all(root.join("var/lib/sbctl"))
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        warnings.push(format!("var/lib/sbctl: {error}"));
+    }
+    for directory in ["var/lib/sbctl", "etc/sing-box"] {
+        if let Err(error) = fs::remove_dir(root.join(directory))
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            warnings.push(format!("{directory}: {error}"));
+        }
+    }
+    if !warnings.is_empty() {
+        eprintln!(
+            "warning: the installation rollback left files behind; remove them manually:\n  {}",
+            warnings.join("\n  ")
+        );
     }
 }
 
@@ -254,7 +314,7 @@ pub fn uninstall(root: &Path, purge: bool) -> Result<Option<std::path::PathBuf>,
     if sbctl_unit_owned {
         remove_file_if_present(&root.join(SBCTL_UNIT))?;
         remove_file_if_present(&root.join("usr/local/bin/sbctl"))?;
-        remove_file_if_present(&root.join("usr/local/bin/ly"))?;
+        remove_ly_symlink_if_owned(root);
     }
     if sing_box_unit_owned {
         remove_file_if_present(&root.join(SING_BOX_UNIT))?;
@@ -284,8 +344,31 @@ pub fn uninstall(root: &Path, purge: bool) -> Result<Option<std::path::PathBuf>,
         }
         remove_file_if_present(&root.join("etc/sbctl/config.toml"))?;
         remove_directory_if_present(&root.join("var/lib/sbctl"))?;
+        // The uninstall menu double-confirmation promises that --purge deletes
+        // the backups too, so the backup directory must not survive it.
+        remove_directory_if_present(&root.join(BACKUP_ROOT))?;
     }
     Ok(backup)
+}
+
+/// Removes the `ly` convenience symlink only when it points at the sbctl
+/// binary. The shell installer links `ly` to sbctl, but the sbtui desktop
+/// installer reuses the same name for its own binary, which must survive an
+/// sbctl uninstall.
+fn remove_ly_symlink_if_owned(root: &Path) {
+    let path = root.join("usr/local/bin/ly");
+    match fs::read_link(&path) {
+        Ok(target) => {
+            if target.to_string_lossy().ends_with("sbctl")
+                && let Err(error) = fs::remove_file(&path)
+            {
+                eprintln!("warning: could not remove the ly shortcut symlink: {error}");
+            }
+        }
+        Err(_) => {
+            // Missing, or a real binary owned by another tool (sbtui): leave it.
+        }
+    }
 }
 
 fn unit_has_marker(root: &Path, relative: &str, marker: &str) -> Result<bool, String> {
@@ -393,12 +476,15 @@ fn set_executable(path: &Path) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// The directory holding every uninstall backup; --purge removes it wholesale.
+const BACKUP_ROOT: &str = "var/backups/sbctl";
+
 fn backup_persistent_data(root: &Path) -> Result<std::path::PathBuf, String> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let destination = root.join("var/backups/sbctl").join(timestamp.to_string());
+    let destination = root.join(BACKUP_ROOT).join(timestamp.to_string());
     fs::create_dir_all(&destination).map_err(|error| error.to_string())?;
     set_private_directory_permissions(&destination)?;
     for relative in BACKED_UP_PATHS {

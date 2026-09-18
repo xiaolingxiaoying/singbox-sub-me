@@ -146,6 +146,16 @@ pub struct SingBoxVersionProfile {
     pub version: ClientVersion,
     pub supported: &'static str,
     pub notes: &'static str,
+    /// Pre-1.12 cores only accept the legacy DNS server format (address
+    /// strings plus a top-level `dns.fakeip` object); 1.12+ requires the
+    /// typed server objects this tool generates for them.
+    pub typed_dns: bool,
+    /// Route rule actions (`sniff`, `hijack-dns`) arrived in 1.11.0; 1.10
+    /// needs the legacy inbound `sniff` field plus a special `dns` outbound.
+    pub route_rule_actions: bool,
+    /// The AnyTLS outbound was added in sing-box 1.12.0, so 1.10/1.11 client
+    /// profiles cannot contain AnyTLS nodes at all.
+    pub supports_anytls: bool,
     /// `cache_file.store_dns` (optimistic DNS caching) arrived in 1.14.0;
     /// older cores must not receive the field.
     pub supports_store_dns: bool,
@@ -153,26 +163,53 @@ pub struct SingBoxVersionProfile {
 
 pub const CLASH_LEGACY_VERSION: ClientVersion = ClientVersion::new(1, 18);
 
-/// Every sing-box minor from 1.12 up to the latest stable release, each with a
+/// Every sing-box minor from 1.10 up to the latest stable release, each with a
 /// dedicated `sing-box-<major>.<minor>.json` subscription artifact. Ordered
 /// ascending; the last entry is also what `sing-box-full.json` targets.
 pub const SING_BOX_VERSION_PROFILES: &[SingBoxVersionProfile] = &[
     SingBoxVersionProfile {
+        version: ClientVersion::new(1, 10),
+        supported: ">= 1.10.0, < 1.11.0",
+        notes: "旧版 DNS 服务器格式与旧版 sniff/hijack-dns 写法；不支持 AnyTLS 节点（1.12 才加入）；无 store_dns 乐观 DNS 缓存",
+        typed_dns: false,
+        route_rule_actions: false,
+        supports_anytls: false,
+        supports_store_dns: false,
+    },
+    SingBoxVersionProfile {
+        version: ClientVersion::new(1, 11),
+        supported: ">= 1.11.0, < 1.12.0",
+        notes: "旧版 DNS 服务器格式；不支持 AnyTLS 节点（1.12 才加入）；无 store_dns 乐观 DNS 缓存",
+        typed_dns: false,
+        route_rule_actions: true,
+        supports_anytls: false,
+        supports_store_dns: false,
+    },
+    SingBoxVersionProfile {
         version: ClientVersion::new(1, 12),
         supported: ">= 1.12.0, < 1.13.0",
-        notes: "DNS 服务器对象格式（legacy 格式弃用）；geoip/geosite 字段已移除，改用 rule_set；tun 用 address 合并写法",
+        notes: "DNS 服务器对象格式（legacy 格式弃用）；geoip/geosite 字段已移除，改用 rule_set；tun 用 address 合并写法；无 store_dns 乐观 DNS 缓存（1.14 才加入）",
+        typed_dns: true,
+        route_rule_actions: true,
+        supports_anytls: true,
         supports_store_dns: false,
     },
     SingBoxVersionProfile {
         version: ClientVersion::new(1, 13),
         supported: ">= 1.13.0, < 1.14.0",
-        notes: "block/dns 特殊出站与 inbound sniff 字段已移除，统一使用路由规则动作",
+        notes: "block/dns 特殊出站与 inbound sniff 字段已移除，统一使用路由规则动作；无 store_dns 乐观 DNS 缓存（1.14 才加入）",
+        typed_dns: true,
+        route_rule_actions: true,
+        supports_anytls: true,
         supports_store_dns: false,
     },
     SingBoxVersionProfile {
         version: ClientVersion::new(1, 14),
         supported: ">= 1.14.0",
-        notes: "legacy DNS 格式与 DNS 规则 outbound 项已移除；可用 cache_file.store_dns 乐观缓存",
+        notes: "legacy DNS 格式与 DNS 规则 outbound 项已移除；可用 cache_file.store_dns 乐观缓存；字段与服务端运行的最新稳定版一致",
+        typed_dns: true,
+        route_rule_actions: true,
+        supports_anytls: true,
         supports_store_dns: true,
     },
 ];
@@ -210,7 +247,7 @@ fn static_matrix_rows() -> Vec<SubscriptionLinkInfo> {
             format: SubscriptionFormat::SingBoxFull,
             label: "sing-box 完整配置（最新稳定版）".to_owned(),
             audience: "sing-box 最新稳定版".to_owned(),
-            note: "完整客户端配置：DNS / tun / 分流规则 / 代理组 / clash_api".to_owned(),
+            note: "完整客户端配置：DNS / tun / 分流规则 / 代理组 / clash_api，与服务端运行的最新稳定版一致".to_owned(),
         },
         SubscriptionLinkInfo {
             format: SubscriptionFormat::Clash,
@@ -276,6 +313,90 @@ pub fn subscription_matrix() -> Vec<SubscriptionLinkInfo> {
     rows
 }
 
+/// One recommended format inside a per-client quick-pick row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClientSubscriptionFormat {
+    pub format: SubscriptionFormat,
+    /// Why this client should use this format.
+    pub note: String,
+}
+
+/// One row of the per-client quick-pick table: the mainstream client, its
+/// recommended subscription formats in preference order, and a general note.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClientSubscriptionRow {
+    pub client: &'static str,
+    pub formats: Vec<ClientSubscriptionFormat>,
+    pub note: String,
+}
+
+/// The per-client quick-pick table for Clash Party, Clash Verge, sing-box,
+/// V2rayN, and Shadowrocket. Versioned sing-box rows expand dynamically from
+/// the version profile registry so a new upstream minor only needs a registry
+/// entry here too.
+pub fn client_subscription_matrix() -> Vec<ClientSubscriptionRow> {
+    let mut sing_box_formats = vec![ClientSubscriptionFormat {
+        format: SubscriptionFormat::SingBoxFull,
+        note: "客户端内核为最新稳定版时使用".to_owned(),
+    }];
+    for profile in SING_BOX_VERSION_PROFILES {
+        sing_box_formats.push(ClientSubscriptionFormat {
+            format: SubscriptionFormat::SingBoxVersion(profile.version),
+            note: format!("客户端内核为 {} 时使用", profile.supported),
+        });
+    }
+    vec![
+        ClientSubscriptionRow {
+            client: "Clash Party",
+            formats: vec![ClientSubscriptionFormat {
+                format: SubscriptionFormat::Clash,
+                note: "mihomo 内核订阅，导入后自动更新节点".to_owned(),
+            }],
+            note: "Clash Party 使用 mihomo 内核，无需关心 sing-box 版本适配。".to_owned(),
+        },
+        ClientSubscriptionRow {
+            client: "Clash Verge",
+            formats: vec![ClientSubscriptionFormat {
+                format: SubscriptionFormat::Clash,
+                note: "mihomo 内核订阅，导入后自动更新节点".to_owned(),
+            }],
+            note: "Clash Verge（Rev）使用 mihomo 内核；若内置内核较旧，可改用 clash-1.18.yaml。"
+                .to_owned(),
+        },
+        ClientSubscriptionRow {
+            client: "sing-box",
+            formats: sing_box_formats,
+            note: "请按客户端实际内核版本选择对应文件；1.10/1.11 不支持 AnyTLS 节点，\
+                   详见各版本条目的说明。"
+                .to_owned(),
+        },
+        ClientSubscriptionRow {
+            client: "V2rayN",
+            formats: vec![
+                ClientSubscriptionFormat {
+                    format: SubscriptionFormat::Base64Uri,
+                    note: "分享链接订阅（默认内核）".to_owned(),
+                },
+                ClientSubscriptionFormat {
+                    format: SubscriptionFormat::SingBoxFull,
+                    note: "V2rayN 6.6+ 可直接导入 sing-box 完整配置（内置 sing-box 内核）"
+                        .to_owned(),
+                },
+            ],
+            note: "V2rayN 同时支持 Xray 与 sing-box 双内核，按导入方式二选一。".to_owned(),
+        },
+        ClientSubscriptionRow {
+            client: "Shadowrocket",
+            formats: vec![ClientSubscriptionFormat {
+                format: SubscriptionFormat::Shadowrocket,
+                note: "扫码或粘贴订阅链接，自动按 iOS 客户端习惯适配".to_owned(),
+            }],
+            note: "五协议均受支持，但要求 Shadowrocket ≥ 对应协议的最低版本（见总览页导入说明）。"
+                .to_owned(),
+        },
+    ]
+}
+
 #[derive(Debug, Error)]
 pub enum SubscriptionError {
     #[error("external reverse-proxy subscription must bind a loopback address")]
@@ -306,6 +427,8 @@ pub enum SubscriptionError {
     Check(String),
     #[error("override template rejected: {0}")]
     Override(String),
+    #[error("client compatibility: {0}")]
+    ClientIncompatible(String),
     #[error(transparent)]
     Storage(#[from] ConfigError),
 }
@@ -516,6 +639,23 @@ pub fn generated_artifacts(
         ),
     ];
     for profile in SING_BOX_VERSION_PROFILES {
+        // Pre-1.12 client cores have no AnyTLS outbound. A deployment whose
+        // only enabled protocol is AnyTLS has no usable node for those
+        // profiles, so the artifact is skipped (with a warning) instead of
+        // failing the whole generation and blocking every other format.
+        if !profile.supports_anytls
+            && nodes
+                .iter()
+                .all(|node| node.protocol() == ManagedProtocol::Anytls)
+        {
+            eprintln!(
+                "warning: sing-box {} 客户端内核不支持 AnyTLS 协议（1.12.0 才加入）；\
+                 本次未生成 sing-box-{}.json，旧内核客户端将无法导入。\
+                 请在部署中启用至少一个其他协议后重新生成",
+                profile.version, profile.version
+            );
+            continue;
+        }
         artifacts.push((
             SubscriptionFormat::SingBoxVersion(profile.version)
                 .artifact_name()
@@ -979,35 +1119,48 @@ fn subscription_http_response(
                 Ok(body) => body,
                 Err(error) => return unavailable_http_response(credential, &error.to_string()),
             };
-            let traffic = match crate::traffic::report(store, config) {
-                Ok(traffic) => traffic,
-                Err(error) => return unavailable_http_response(credential, &error.to_string()),
-            };
-            // subscription-userinfo follows the common client convention: upload and
-            // download are the bytes used in the current period, while `total` is the
-            // configured monthly allowance. Keep the historical used-total value when
-            // no allowance is configured so unlimited deployments remain informative.
-            let quota = if traffic.monthly_traffic_limit > 0 {
-                traffic.monthly_traffic_limit
-            } else {
-                traffic.total()
-            };
-            Response::builder()
-                .status(StatusCode::OK)
-                .header("Content-Type", format.content_type())
-                .header("Cache-Control", "no-store")
-                .header("X-Content-Type-Options", "nosniff")
-                .header(
-                    "subscription-userinfo",
-                    format!(
+            // The subscription-userinfo header is an addition to the artifact,
+            // not a precondition: a broken or mid-repair accounting state must
+            // not take the subscription itself offline. The failure is logged
+            // redacted and the artifact is served without traffic metadata.
+            let userinfo = match crate::traffic::report(store, config) {
+                Ok(traffic) => {
+                    // subscription-userinfo follows the common client convention:
+                    // upload and download are the bytes used in the current period,
+                    // while `total` is the configured monthly allowance. Keep the
+                    // historical used-total value when no allowance is configured so
+                    // unlimited deployments remain informative.
+                    let quota = if traffic.monthly_traffic_limit > 0 {
+                        traffic.monthly_traffic_limit
+                    } else {
+                        traffic.total()
+                    };
+                    Some(format!(
                         "upload={}; download={}; total={}; expire={}",
                         traffic.transmitted,
                         traffic.received,
                         quota,
                         traffic.next_reset.timestamp()
-                    ),
-                )
-                .header("Connection", "close")
+                    ))
+                }
+                Err(error) => {
+                    eprintln!(
+                        "subscription traffic metadata unavailable: {}",
+                        redact_secret(&error.to_string(), credential)
+                    );
+                    None
+                }
+            };
+            let mut builder = Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", format.content_type())
+                .header("Cache-Control", "no-store")
+                .header("X-Content-Type-Options", "nosniff")
+                .header("Connection", "close");
+            if let Some(value) = &userinfo {
+                builder = builder.header("subscription-userinfo", value);
+            }
+            builder
                 .body(Full::new(Bytes::from(body)))
                 .expect("valid subscription response")
         }
@@ -1301,6 +1454,22 @@ fn sing_box_full(
     nodes: &[CanonicalNode],
     profile: &SingBoxVersionProfile,
 ) -> Result<String, SubscriptionError> {
+    // Pre-1.12 client cores have no AnyTLS outbound, so those profiles must
+    // silently drop the node; refuse to generate an empty-node artifact and
+    // say exactly which knob to turn instead.
+    let compatible_nodes: Vec<CanonicalNode> = nodes
+        .iter()
+        .filter(|node| profile.supports_anytls || node.protocol() != ManagedProtocol::Anytls)
+        .cloned()
+        .collect();
+    if compatible_nodes.is_empty() {
+        return Err(SubscriptionError::ClientIncompatible(format!(
+            "sing-box {} 客户端内核不支持 AnyTLS 协议（1.12.0 才加入）；\
+             请在部署中启用至少一个其他协议，否则请移除 sing-box-{}.json 适配",
+            profile.version, profile.version
+        )));
+    }
+    let nodes = &compatible_nodes;
     let node_tags: Vec<&str> = nodes.iter().map(CanonicalNode::tag).collect();
     let mut outbounds = client_outbounds(config, nodes);
     let mut selector_members: Vec<&str> = vec![AUTO_TAG, DIRECT_TAG];
@@ -1323,23 +1492,51 @@ fn sing_box_full(
     outbounds.push(json!({"type": "direct", "tag": DIRECT_TAG}));
 
     let fake_ip = config.client_dns_mode == crate::config::ClientDnsMode::FakeIp;
-    let mut dns_servers = vec![
-        json!({"type": "udp", "tag": "dns-direct", "server": "223.5.5.5"}),
-        json!({"type": "https", "tag": "dns-proxy", "server": "1.1.1.1", "detour": SELECTOR_TAG}),
-    ];
-    if fake_ip {
-        dns_servers.push(json!({
-            "type": "fakeip",
-            "tag": "dns-fakeip",
-            "inet4_range": "198.18.0.0/15",
-            "inet6_range": "fc00::/18"
-        }));
-    }
+    // 1.12+ requires typed DNS server objects; 1.10/1.11 only accept the
+    // legacy address-string format, with fake-ip as a special `fakeip`
+    // address plus a top-level dns.fakeip object (removed in 1.14).
+    let mut dns = if profile.typed_dns {
+        let mut dns_servers = vec![
+            json!({"type": "udp", "tag": "dns-direct", "server": "223.5.5.5"}),
+            json!({"type": "https", "tag": "dns-proxy", "server": "1.1.1.1", "detour": SELECTOR_TAG}),
+        ];
+        if fake_ip {
+            dns_servers.push(json!({
+                "type": "fakeip",
+                "tag": "dns-fakeip",
+                "inet4_range": "198.18.0.0/15",
+                "inet6_range": "fc00::/18"
+            }));
+        }
+        json!({"servers": dns_servers})
+    } else {
+        let mut dns_servers = vec![
+            json!({"tag": "dns-direct", "address": "223.5.5.5"}),
+            json!({"tag": "dns-proxy", "address": "https://1.1.1.1/dns-query", "detour": SELECTOR_TAG}),
+        ];
+        if fake_ip {
+            dns_servers.push(json!({"tag": "dns-fakeip", "address": "fakeip"}));
+        }
+        let mut dns = json!({"servers": dns_servers});
+        if fake_ip {
+            dns["fakeip"] = json!({
+                "enabled": true,
+                "inet4_range": "198.18.0.0/15",
+                "inet6_range": "fc00::/18"
+            });
+        }
+        dns
+    };
 
-    let mut dns_rules = vec![
-        json!({"clash_mode": "Direct", "server": "dns-direct"}),
-        json!({"clash_mode": "Global", "server": "dns-proxy"}),
-    ];
+    let mut dns_rules = Vec::new();
+    if !profile.typed_dns {
+        // Pre-1.12 cores have no route.default_domain_resolver; the legacy
+        // `outbound: any` DNS rule (removed in 1.14) resolves proxy server
+        // domains through direct DNS instead.
+        dns_rules.push(json!({"outbound": "any", "server": "dns-direct"}));
+    }
+    dns_rules.push(json!({"clash_mode": "Direct", "server": "dns-direct"}));
+    dns_rules.push(json!({"clash_mode": "Global", "server": "dns-proxy"}));
     if config.client_rule_profile == crate::config::ClientRuleProfile::Standard {
         dns_rules.push(json!({"rule_set": ["geosite-cn"], "server": "dns-direct"}));
     }
@@ -1352,13 +1549,11 @@ fn sing_box_full(
     }
     // `independent_cache` is deprecated in 1.14 and removed in 1.16, and
     // brings no benefit here, so the DNS object stays lean across versions.
-    let dns = json!({
-        "servers": dns_servers,
-        "rules": dns_rules,
-        "final": "dns-proxy"
-    });
+    dns["rules"] = json!(dns_rules);
+    dns["final"] = json!("dns-proxy");
 
-    let tun = json!({
+    let legacy_route = !profile.route_rule_actions;
+    let mut tun = json!({
         "type": "tun",
         "tag": "tun-in",
         "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
@@ -1367,16 +1562,26 @@ fn sing_box_full(
         "strict_route": true,
         "stack": "mixed"
     });
+    if legacy_route {
+        // 1.10 has no route rule actions; protocol sniffing is configured on
+        // the inbound and DNS is hijacked through a special `dns` outbound.
+        tun["sniff"] = json!(true);
+    }
 
-    let mut route_rules = vec![
-        json!({"action": "sniff"}),
-        json!({"protocol": "dns", "action": "hijack-dns"}),
-        json!({"ip_is_private": true, "outbound": DIRECT_TAG}),
-        json!({
-            "domain_suffix": AI_DOMAIN_SUFFIXES,
-            "outbound": SELECTOR_TAG
-        }),
-    ];
+    let mut route_rules = Vec::new();
+    if !legacy_route {
+        route_rules.push(json!({"action": "sniff"}));
+    }
+    route_rules.push(if legacy_route {
+        json!({"protocol": "dns", "outbound": "dns-out"})
+    } else {
+        json!({"protocol": "dns", "action": "hijack-dns"})
+    });
+    route_rules.push(json!({"ip_is_private": true, "outbound": DIRECT_TAG}));
+    route_rules.push(json!({
+        "domain_suffix": AI_DOMAIN_SUFFIXES,
+        "outbound": SELECTOR_TAG
+    }));
     let mut rule_sets: Vec<Value> = Vec::new();
     if config.client_rule_profile == crate::config::ClientRuleProfile::Standard {
         route_rules.push(json!({"rule_set": ["geosite-cn", "geoip-cn"], "outbound": DIRECT_TAG}));
@@ -1389,13 +1594,18 @@ fn sing_box_full(
             &format!("{}/geoip/cn.srs", sing_box_rule_set_base(config)),
         ));
     }
-    let route = json!({
+    if legacy_route {
+        outbounds.push(json!({"type": "dns", "tag": "dns-out"}));
+    }
+    let mut route = json!({
         "rules": route_rules,
         "rule_set": rule_sets,
         "final": SELECTOR_TAG,
-        "auto_detect_interface": true,
-        "default_domain_resolver": {"server": "dns-direct"}
+        "auto_detect_interface": true
     });
+    if profile.typed_dns {
+        route["default_domain_resolver"] = json!({"server": "dns-direct"});
+    }
 
     let mut cache_file = json!({"enabled": true, "store_fakeip": fake_ip});
     if profile.supports_store_dns {
@@ -2078,8 +2288,9 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::{
-        SING_BOX_VERSION_PROFILES, SubscriptionFormat, clash, clash_legacy, generated_artifacts,
-        latest_version_profile, regenerate, shadowrocket, sing_box, sing_box_full, uri,
+        SING_BOX_VERSION_PROFILES, SubscriptionFormat, clash, clash_legacy,
+        client_subscription_matrix, generated_artifacts, latest_version_profile, regenerate,
+        shadowrocket, sing_box, sing_box_full, uri,
     };
     use crate::config::{
         DeploymentConfig, DeploymentStore, ManagedProtocol, ProtocolPorts, SubscriptionMode,
@@ -2132,6 +2343,66 @@ mod tests {
             .initialize_with_artifacts(&config, &references)
             .expect("subscription deployment is initialized");
         crate::traffic::reset(&store, &config).expect("accounting state is established");
+        let credential = config.subscription_credential.clone();
+        (store, config, credential)
+    }
+
+    /// A Direct deployment with every Managed protocol enabled, used to verify
+    /// per-version client compatibility (AnyTLS availability, DNS format).
+    fn seed_all_protocols(fixture: &TempDir) -> (DeploymentStore, DeploymentConfig, String) {
+        let statistics = fixture.path().join("sys/class/net/ens3/statistics");
+        fs::create_dir_all(&statistics).expect("statistics directory is created");
+        fs::write(statistics.join("rx_bytes"), "100\n").expect("RX counter is written");
+        fs::write(statistics.join("tx_bytes"), "200\n").expect("TX counter is written");
+        let boot_path = fixture.path().join("proc/sys/kernel/random/boot_id");
+        fs::create_dir_all(boot_path.parent().expect("boot ID has a parent"))
+            .expect("boot ID directory is created");
+        fs::write(boot_path, "boot-a").expect("boot ID is written");
+        let store = DeploymentStore::new(fixture.path());
+        let config = DeploymentConfig::new(
+            SubscriptionMode::Direct,
+            "sub.example.test".into(),
+            None,
+            None,
+            "ens3".into(),
+            vec![
+                ManagedProtocol::VlessReality,
+                ManagedProtocol::VmessWebsocket,
+                ManagedProtocol::Hysteria2,
+                ManagedProtocol::Tuic,
+                ManagedProtocol::Anytls,
+            ],
+            Some("www.cloudflare.com".into()),
+        )
+        .expect("a five-protocol deployment is valid");
+        let credential = config.subscription_credential.clone();
+        (store, config, credential)
+    }
+
+    /// A Direct deployment with exactly one Managed protocol enabled.
+    fn seed_single_protocol(
+        fixture: &TempDir,
+        protocol: ManagedProtocol,
+    ) -> (DeploymentStore, DeploymentConfig, String) {
+        let statistics = fixture.path().join("sys/class/net/ens3/statistics");
+        fs::create_dir_all(&statistics).expect("statistics directory is created");
+        fs::write(statistics.join("rx_bytes"), "100\n").expect("RX counter is written");
+        fs::write(statistics.join("tx_bytes"), "200\n").expect("TX counter is written");
+        let boot_path = fixture.path().join("proc/sys/kernel/random/boot_id");
+        fs::create_dir_all(boot_path.parent().expect("boot ID has a parent"))
+            .expect("boot ID directory is created");
+        fs::write(boot_path, "boot-a").expect("boot ID is written");
+        let store = DeploymentStore::new(fixture.path());
+        let config = DeploymentConfig::new(
+            SubscriptionMode::Direct,
+            "sub.example.test".into(),
+            None,
+            None,
+            "ens3".into(),
+            vec![protocol],
+            Some("www.cloudflare.com".into()),
+        )
+        .expect("a single-protocol deployment is valid");
         let credential = config.subscription_credential.clone();
         (store, config, credential)
     }
@@ -2458,6 +2729,153 @@ mod tests {
     }
 
     #[test]
+    fn pre_anytls_client_profiles_drop_the_anytls_node_and_say_so() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let (_store, config, _) = seed_all_protocols(&fixture);
+        let artifacts = generated_artifacts(&config, fixture.path()).expect("artifacts generate");
+        let parsed = |name: &str| -> serde_json::Value {
+            let contents = artifacts
+                .iter()
+                .find(|(artifact, _)| artifact == name)
+                .map(|(_, contents)| contents.clone())
+                .unwrap_or_else(|| panic!("missing profile artifact {name}"));
+            serde_json::from_str(&contents).expect("profile is JSON")
+        };
+        let has_node = |value: &serde_json::Value, tag: &str| {
+            value["outbounds"]
+                .as_array()
+                .expect("outbounds is an array")
+                .iter()
+                .any(|outbound| outbound["tag"] == tag)
+        };
+
+        for profile in SING_BOX_VERSION_PROFILES {
+            let name = SubscriptionFormat::SingBoxVersion(profile.version)
+                .artifact_name()
+                .into_owned();
+            let value = parsed(&name);
+            assert_eq!(
+                has_node(&value, "sbctl-anytls"),
+                profile.supports_anytls,
+                "AnyTLS node presence mismatch for {name}"
+            );
+        }
+
+        // 1.10: legacy DNS servers, top-level fakeip, inbound sniff, a special
+        // dns outbound, and no route/domain-resolver fields.
+        let legacy = parsed("subscription-sing-box-1.10.json");
+        for server in legacy["dns"]["servers"].as_array().expect("dns servers") {
+            assert!(server.get("address").is_some(), "1.10 DNS must be legacy");
+            assert!(server.get("type").is_none(), "1.10 DNS must not be typed");
+        }
+        assert!(
+            legacy["dns"]["fakeip"]["enabled"]
+                .as_bool()
+                .unwrap_or(false),
+            "1.10 fake-ip must use the top-level dns.fakeip object"
+        );
+        assert!(
+            !legacy["route"].get("default_domain_resolver").is_some(),
+            "1.10 has no route.default_domain_resolver"
+        );
+        assert!(
+            has_node(&legacy, "dns-out"),
+            "1.10 hijacks DNS through a special dns outbound"
+        );
+        assert_eq!(
+            legacy["inbounds"][0]["sniff"], true,
+            "1.10 sniffs at the inbound"
+        );
+
+        // 1.11: legacy DNS but rule actions are available; no dns outbound.
+        let one_eleven = parsed("subscription-sing-box-1.11.json");
+        assert!(
+            one_eleven["dns"]["servers"]
+                .as_array()
+                .expect("dns servers")
+                .iter()
+                .all(|server| server.get("type").is_none()),
+            "1.11 DNS must stay legacy"
+        );
+        assert!(
+            !has_node(&one_eleven, "dns-out"),
+            "1.11 hijacks DNS through the hijack-dns rule action"
+        );
+        let rules = one_eleven["route"]["rules"]
+            .as_array()
+            .expect("route rules");
+        assert!(
+            rules.iter().any(|rule| rule["action"] == "hijack-dns"),
+            "1.11 route rules use actions"
+        );
+
+        // 1.12+: typed DNS and the domain resolver default.
+        let typed = parsed("subscription-sing-box-1.14.json");
+        assert!(
+            typed["dns"]["servers"]
+                .as_array()
+                .expect("dns servers")
+                .iter()
+                .all(|server| server.get("type").is_some()),
+            "1.14 DNS must be typed"
+        );
+        assert_eq!(
+            typed["route"]["default_domain_resolver"]["server"], "dns-direct",
+            "1.14 resolves outbound server domains through default_domain_resolver"
+        );
+    }
+
+    #[test]
+    fn an_anytls_only_deployment_skips_pre_anytls_profiles_with_a_warning() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let (_store, config, _) = seed_single_protocol(&fixture, ManagedProtocol::Anytls);
+        let artifacts =
+            generated_artifacts(&config, fixture.path()).expect("other formats still generate");
+        let names: Vec<&str> = artifacts.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(
+            !names.contains(&"subscription-sing-box-1.10.json"),
+            "the 1.10 profile must be skipped for an AnyTLS-only deployment"
+        );
+        assert!(
+            !names.contains(&"subscription-sing-box-1.11.json"),
+            "the 1.11 profile must be skipped for an AnyTLS-only deployment"
+        );
+        assert!(
+            names.contains(&"subscription-clash.yaml")
+                && names.contains(&"subscription-sing-box-full.json"),
+            "the formats AnyTLS supports must still generate"
+        );
+    }
+
+    #[test]
+    fn the_client_matrix_covers_the_mainstream_clients() {
+        let rows = client_subscription_matrix();
+        let clients: Vec<&str> = rows.iter().map(|row| row.client).collect();
+        for client in [
+            "Clash Party",
+            "Clash Verge",
+            "sing-box",
+            "V2rayN",
+            "Shadowrocket",
+        ] {
+            assert!(
+                clients.contains(&client),
+                "the client matrix must cover {client}"
+            );
+        }
+        let sing_box_row = rows
+            .iter()
+            .find(|row| row.client == "sing-box")
+            .expect("the sing-box row exists");
+        // One recommendation per version profile plus sing-box-full.
+        assert_eq!(
+            sing_box_row.formats.len(),
+            SING_BOX_VERSION_PROFILES.len() + 1,
+            "the sing-box row must recommend one format per supported version"
+        );
+    }
+
+    #[test]
     fn no_domain_ip_fallback_artifacts_use_the_fake_protocol_sni_and_insecure_tls() {
         let config = DeploymentConfig::new_with_ports(
             SubscriptionMode::IpFallback,
@@ -2741,6 +3159,40 @@ mod tests {
         );
         assert!(response.contains("vless://"));
         assert!(response.contains("subscription-userinfo:"));
+        handler.await.expect("handler completes").expect("no error");
+    }
+
+    #[tokio::test]
+    async fn a_broken_accounting_state_degrades_the_userinfo_header_not_the_subscription() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let (store, config, credential) = seed_direct_subscription(&fixture);
+        store
+            .write_state(b"not json")
+            .expect("the accounting state is corrupted");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral listener is available");
+        let port = listener.local_addr().expect("listener address").port();
+
+        let store = Arc::new(store.clone());
+        let config = Arc::new(config);
+        let handler = tokio::spawn(async move {
+            super::serve_http_listener(listener, &store, &config, Some(1)).await
+        });
+
+        let response = http_get(port, &format!("/sub/{credential}/uri")).await;
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "the subscription must survive a broken accounting state: {response}"
+        );
+        assert!(
+            !response.contains("subscription-userinfo:"),
+            "the degraded response must not carry traffic metadata"
+        );
+        assert!(
+            response.contains("vless://"),
+            "the artifact body still serves"
+        );
         handler.await.expect("handler completes").expect("no error");
     }
 

@@ -7,7 +7,7 @@
 
 项目的目标是保留 sing-box 作为数据面，将协议配置、订阅生成、证书生命周期、流量统计、服务管理和安全更新集中到一个可验证、可回滚的原生程序中。
 
-当前版本已具备从签名发布工件安装、配置五种协议、提供订阅、管理 systemd 服务以及安全更新/卸载的完整闭环。项目面向有 Linux VPS 和 systemd 运维能力的用户；它不会替用户修改防火墙、接管现有代理或管理反向代理。
+当前版本已具备从签名发布工件安装、配置五种协议、提供订阅、管理 systemd 服务以及安全更新/卸载的完整闭环。sing-box 内核默认从官方 [SagerNet/sing-box](https://github.com/SagerNet/sing-box) 仓库下载最新稳定版，也可通过签名 manifest 固定版本。项目面向有 Linux VPS 和 systemd 运维能力的用户；它不会替用户修改防火墙、接管现有代理或管理反向代理。
 
 ## 功能概览
 
@@ -21,11 +21,12 @@
 - 端口支持手动指定，也支持自动分配。
 - 自动端口范围为 `10000–65535`，并统一检查 TCP/UDP 冲突和系统占用。
 - 生成多种订阅格式（完整矩阵见 `sbctl sub` 或 [docs/subscription-guide.md](docs/subscription-guide.md)）：
-  - sing-box JSON（精简/完整配置，1.12 → 最新版逐版本适配）
+  - sing-box JSON（精简/完整配置，1.10 → 最新稳定版逐版本适配）
   - Clash/Mihomo YAML（现行稳定版 + 1.18 兼容版）
   - URI 文本 / Base64 URI 文本（V2rayN 等）
   - Shadowrocket 适配 Base64 URI
   - 每条链接对应的二维码（SVG）与中文总览页
+- 按客户端速查：Clash Party、Clash Verge、sing-box、V2rayN、Shadowrocket 各有对应的推荐订阅链接（`sbctl sub` 与订阅总览页）。
 - 订阅凭据与协议凭据分离，只接受路径凭据，不接受 query 参数认证。
 - 支持 Direct、External proxy、IP fallback 三种订阅模式。
 - 支持 VPS 流量统计、自然月/锚定月账期和 `subscription-userinfo`。
@@ -111,7 +112,7 @@ sbctl qr           # 订阅 URL 二维码
 ```bash
 sbctl update --check   # 仅显示可用版本
 sbctl update           # 实际升级（含回滚点）
-sbctl sing-box update  # 仅升级 sing-box 内核
+sbctl sing-box update  # 从官方 SagerNet/sing-box 仓库升级到最新稳定版内核
 ```
 
 卸载（保留备份与配置，`--purge` 连数据一起清除）：
@@ -241,7 +242,9 @@ sbctl restart --sing-box-bin /usr/local/bin/sing-box
 # 管理 sing-box 工件
 sbctl sing-box download --manifest /path/to/manifest.json --output /tmp/sing-box
 sbctl sing-box install --manifest /path/to/manifest.json --artifact /tmp/sing-box
-sbctl sing-box update --manifest /path/to/manifest.json
+sbctl sing-box update           # 从官方 SagerNet/sing-box 仓库升级到最新稳定版（默认）
+sbctl sing-box update --manifest /path/to/manifest.json   # 签名 manifest 固定流程
+sbctl sing-box remove
 sbctl sing-box remove
 
 # 检查并执行经过校验的更新
@@ -253,22 +256,38 @@ sbctl uninstall
 sbctl uninstall --purge
 ```
 
-订阅地址格式为（完整矩阵、版本差异与导入说明见 [docs/subscription-guide.md](docs/subscription-guide.md)）：
+订阅地址格式为（完整矩阵、按客户端速查、版本差异与导入说明见 [docs/subscription-guide.md](docs/subscription-guide.md)）：
 
 ```text
 /sub/<subscription-credential>/sing-box.json        # 精简配置（历史格式，逐字节稳定）
 /sub/<subscription-credential>/sing-box-full.json   # 最新稳定版完整客户端配置
-/sub/<subscription-credential>/sing-box-1.12.json   # sing-box 1.12.x 适配（1.13/1.14 同理）
+/sub/<subscription-credential>/sing-box-1.10.json   # sing-box 1.10.x 适配（1.11/1.12/1.13/1.14 同理）
 /sub/<subscription-credential>/clash.yaml           # mihomo 现行稳定版（rule-set 分流）
 /sub/<subscription-credential>/clash-1.18.yaml      # mihomo 1.18.x 兼容（内置 GEOIP 规则）
 /sub/<subscription-credential>/uri                  # 明文分享 URI
 /sub/<subscription-credential>/uri.txt              # Base64 URI（V2rayN 等）
 /sub/<subscription-credential>/shadowrocket.txt     # Shadowrocket 适配
 /sub/<subscription-credential>/qr/<格式>            # 对应链接的二维码（SVG，扫码即导入）
-/sub/<subscription-credential>/index                # 中文总览页（全链接 + 标注 + 二维码 + 导入步骤）
+/sub/<subscription-credential>/index                # 中文总览页（按客户端速查 + 全链接 + 标注 + 二维码 + 导入步骤）
 ```
 
-sing-box 完整配置包含 DNS（fake-ip、分流解析）、tun 入站、🚀节点选择/♻️自动选择代理组、geosite-cn/geoip-cn 分流、AI 域名（ChatGPT/OpenAI/X.com）分流与 clash_api；每个 sing-box 版本的字段差异见 `docs/research/sing-box-client-version-differences.md`。覆写模板（`sbctl config override`）可在服务端统一追加规则，见 ADR-0021。
+sing-box 完整配置包含 DNS（fake-ip、分流解析）、tun 入站、🚀节点选择/♻️自动选择代理组、geosite-cn/geoip-cn 分流、AI 域名（ChatGPT/OpenAI/X.com）分流与 clash_api；服务端运行的 sing-box 内核始终是最新稳定版（直接从官方 [SagerNet/sing-box](https://github.com/SagerNet/sing-box) 仓库下载）。客户端版本适配覆盖最新 5 个稳定 minor 版本，每个版本字段差异见 `docs/research/sing-box-client-version-differences.md`。需要注意的客户端兼容性在订阅矩阵和总览页中逐一标注：
+
+- **1.10 / 1.11 客户端不支持 AnyTLS 节点**（1.12.0 才加入该协议）；AnyTLS-only 部署不会生成这两个版本的工件，其余格式不受影响。
+- 1.10 / 1.11 / 1.12 / 1.13 的工件**不含 `cache_file.store_dns` 乐观 DNS 缓存**（1.14.0 才加入）。
+- 1.10 / 1.11 使用旧版 DNS 服务器格式（1.14 已移除的写法），1.10 还使用旧版 sniff/hijack-dns 写法。
+
+覆写模板（`sbctl config override`）可在服务端统一追加规则，见 ADR-0021。
+
+### 主流客户端对应订阅链接
+
+| 客户端 | 推荐订阅链接 | 说明 |
+| --- | --- | --- |
+| Clash Party | `clash.yaml` | mihomo 内核，导入后自动更新节点 |
+| Clash Verge | `clash.yaml` | 内置内核较旧时可改用 `clash-1.18.yaml` |
+| sing-box | `sing-box-full.json`，或按内核版本选 `sing-box-<版本>.json` | 1.10/1.11 不支持 AnyTLS 节点 |
+| V2rayN | `uri.txt`（Base64 URI）；6.6+ 也可导入 `sing-box-full.json` | 双内核按导入方式二选一 |
+| Shadowrocket | `shadowrocket.txt` | 五协议均支持，需 ≥ 对应协议最低版本 |
 
 `subscription-credential` 与任何协议的 UUID、password 都不同。订阅响应会包含动态生成的 `subscription-userinfo`，其中的流量统计是整张配置网卡的 VPS traffic，不代表单个协议或用户的流量。
 

@@ -1047,7 +1047,7 @@ fn generate_hysteria2_credentials(
     let mut password = [0_u8; 32];
     getrandom::fill(&mut password).map_err(|error| ConfigError::Randomness(error.to_string()))?;
     Ok(Hysteria2Credentials {
-        listen_port: allocate_udp_port(allocated_ports, requested_port)?,
+        listen_port: allocate_port(allocated_ports, requested_port)?,
         password: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(password),
     })
 }
@@ -1059,7 +1059,7 @@ fn generate_tuic_credentials(
     let mut password = [0_u8; 32];
     getrandom::fill(&mut password).map_err(|error| ConfigError::Randomness(error.to_string()))?;
     Ok(TuicCredentials {
-        listen_port: allocate_udp_port(allocated_ports, requested_port)?,
+        listen_port: allocate_port(allocated_ports, requested_port)?,
         uuid: generate_uuid()?,
         password: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(password),
     })
@@ -1115,36 +1115,21 @@ fn allocate_port(
         allocated_ports.push(port);
         return Ok(port);
     }
-    loop {
+    // The candidate space spans 55536 ports; a bounded retry keeps a hostile
+    // environment (bind blocked by sandbox, genuinely full range) a fast
+    // error instead of an endless loop.
+    const MAX_RANDOM_PORT_ATTEMPTS: usize = 256;
+    for _ in 0..MAX_RANDOM_PORT_ATTEMPTS {
         let port = random_protocol_port()?;
         if !allocated_ports.contains(&port) && ensure_protocol_port_available(port).is_ok() {
             allocated_ports.push(port);
             return Ok(port);
         }
     }
-}
-
-fn allocate_udp_port(
-    allocated_ports: &mut Vec<u16>,
-    requested_port: Option<u16>,
-) -> Result<u16, ConfigError> {
-    if let Some(port) = requested_port {
-        if allocated_ports.contains(&port) {
-            return Err(ConfigError::InvalidValue(
-                "Managed protocol ports must be unique",
-            ));
-        }
-        ensure_protocol_port_available(port)?;
-        allocated_ports.push(port);
-        return Ok(port);
-    }
-    loop {
-        let port = random_protocol_port()?;
-        if !allocated_ports.contains(&port) && ensure_protocol_port_available(port).is_ok() {
-            allocated_ports.push(port);
-            return Ok(port);
-        }
-    }
+    Err(ConfigError::StateContent(format!(
+        "尝试了 {MAX_RANDOM_PORT_ATTEMPTS} 个随机端口（{MIN_PROTOCOL_PORT}-{MAX_PROTOCOL_PORT}）\
+         仍未找到 TCP/UDP 同时可用的端口；请检查系统端口占用（ss -tulpn）或改用 --*-port 手动指定"
+    )))
 }
 
 fn random_protocol_port() -> Result<u16, ConfigError> {
@@ -1154,16 +1139,36 @@ fn random_protocol_port() -> Result<u16, ConfigError> {
     Ok(MIN_PROTOCOL_PORT + (u32::from_le_bytes(bytes) % span) as u16)
 }
 
+/// Probes both TCP and UDP on IPv4 and, when the host has an IPv6 route, on
+/// IPv6 too, because the generated sing-box inbounds listen on `::`. The
+/// probe is inherently a snapshot (another process can still claim the port
+/// before sing-box starts), which the deployment checklist reminds the
+/// administrator to verify with `sbctl node`.
 fn ensure_protocol_port_available(port: u16) -> Result<(), ConfigError> {
     let tcp_available = std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port));
-    if tcp_available.is_err() {
-        return Err(ConfigError::PortUnavailable(port));
+    if let Err(error) = tcp_available {
+        return Err(ConfigError::PortInUse(port, error.to_string()));
     }
     let udp_available = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port));
-    if udp_available.is_err() {
-        return Err(ConfigError::PortUnavailable(port));
+    if let Err(error) = udp_available {
+        return Err(ConfigError::PortInUse(port, error.to_string()));
+    }
+    if host_has_ipv6_connectivity() {
+        let tcp6_available = std::net::TcpListener::bind((std::net::Ipv6Addr::UNSPECIFIED, port));
+        if let Err(error) = tcp6_available {
+            return Err(ConfigError::PortInUse(port, error.to_string()));
+        }
     }
     Ok(())
+}
+
+/// A cheap UDP route-lookup probe for an IPv6 default route; on hosts without
+/// one, IPv6 bind probing is skipped so a v6-less host is not rejected.
+fn host_has_ipv6_connectivity() -> bool {
+    let Ok(socket) = std::net::UdpSocket::bind("[::]:0") else {
+        return false;
+    };
+    socket.connect("[2001:4860:4860::8888]:443").is_ok()
 }
 
 #[derive(Debug, Error)]
@@ -1180,8 +1185,11 @@ pub enum ConfigError {
     Serialize(#[from] toml::ser::Error),
     #[error("could not obtain secure randomness: {0}")]
     Randomness(String),
-    #[error("Managed protocol port {0} is already in use")]
-    PortUnavailable(u16),
+    #[error(
+        "Managed protocol port {0} is already in use ({1}); \
+         free it or pick another port with --vless-port/--vmess-port/--hysteria2-port/--tuic-port/--anytls-port"
+    )]
+    PortInUse(u16, String),
     #[error("configuration storage failed: {0}")]
     Storage(#[from] io::Error),
     #[error("could not update deployment state: {0}")]
@@ -1924,10 +1932,7 @@ mod tests {
             },
         );
 
-        assert!(matches!(
-            result,
-            Err(super::ConfigError::PortUnavailable(_))
-        ));
+        assert!(matches!(result, Err(super::ConfigError::PortInUse(..))));
     }
 
     fn free_port() -> u16 {

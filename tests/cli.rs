@@ -2236,18 +2236,27 @@ fn certificate_obtain_requires_a_valid_email_or_a_confirmed_no_email_path() {
 }
 
 #[test]
-fn subscription_returns_a_redacted_503_for_missing_state_without_logging_the_credential() {
+fn subscription_degrades_to_artifact_only_for_a_missing_state_without_logging_the_credential() {
     let fixture = TempDir::new().expect("temporary root is created");
     let port = free_high_tcp_port();
     let credential = initialize_ip_fallback_subscription(&fixture, port);
     let stderr_log = fixture.path().join("serve.err");
     let mut server = spawn_sbctl_serve(&fixture, port, 2, &stderr_log);
 
-    let unavailable = http_get(port, &format!("/sub/{credential}/uri"));
-    assert!(unavailable.starts_with("HTTP/1.1 503 Service Unavailable"));
+    // A missing accounting state must not take the subscription offline: the
+    // artifact still serves, only the traffic metadata is dropped.
+    let available = http_get(port, &format!("/sub/{credential}/uri"));
     assert!(
-        unavailable.ends_with("\r\n\r\n"),
-        "the 503 has an empty redacted body"
+        available.starts_with("HTTP/1.1 200 OK"),
+        "the subscription survives a missing accounting state: {available}"
+    );
+    assert!(
+        !available.contains("subscription-userinfo:"),
+        "the degraded response must not carry traffic metadata"
+    );
+    assert!(
+        available.contains("vless://"),
+        "the artifact body still serves"
     );
     let rejected = http_get(port, "/sub/wrong-credential/uri");
     assert!(
@@ -2258,17 +2267,17 @@ fn subscription_returns_a_redacted_503_for_missing_state_without_logging_the_cre
 
     let log = fs::read_to_string(&stderr_log).expect("diagnostic log is readable");
     assert!(
-        log.contains("subscription request failed"),
+        log.contains("subscription traffic metadata unavailable"),
         "a redacted diagnostic is written"
     );
     assert!(
         !log.contains(&credential),
-        "the 503 diagnostic must not contain the full Subscription credential"
+        "the diagnostic must not contain the full Subscription credential"
     );
 }
 
 #[test]
-fn subscription_returns_a_redacted_503_for_corrupt_state_without_logging_the_credential() {
+fn subscription_degrades_to_artifact_only_for_a_corrupt_state_without_logging_the_credential() {
     let fixture = TempDir::new().expect("temporary root is created");
     let port = free_high_tcp_port();
     let credential = initialize_ip_fallback_subscription(&fixture, port);
@@ -2278,9 +2287,14 @@ fn subscription_returns_a_redacted_503_for_corrupt_state_without_logging_the_cre
     let stderr_log = fixture.path().join("serve.err");
     let mut server = spawn_sbctl_serve(&fixture, port, 2, &stderr_log);
 
+    let available = http_get(port, &format!("/sub/{credential}/uri"));
     assert!(
-        http_get(port, &format!("/sub/{credential}/uri"))
-            .starts_with("HTTP/1.1 503 Service Unavailable")
+        available.starts_with("HTTP/1.1 200 OK"),
+        "the subscription survives a corrupt accounting state: {available}"
+    );
+    assert!(
+        !available.contains("subscription-userinfo:"),
+        "the degraded response must not carry traffic metadata"
     );
     http_get(port, "/sub/wrong-credential/uri");
     assert!(server.wait().expect("server exits").success());
@@ -2290,7 +2304,7 @@ fn subscription_returns_a_redacted_503_for_corrupt_state_without_logging_the_cre
 }
 
 #[test]
-fn subscription_returns_a_redacted_503_for_a_schema_mismatched_state() {
+fn subscription_degrades_to_artifact_only_for_a_schema_mismatched_state() {
     let fixture = TempDir::new().expect("temporary root is created");
     let port = free_high_tcp_port();
     let credential = initialize_ip_fallback_subscription(&fixture, port);
@@ -2303,9 +2317,14 @@ fn subscription_returns_a_redacted_503_for_a_schema_mismatched_state() {
     let stderr_log = fixture.path().join("serve.err");
     let mut server = spawn_sbctl_serve(&fixture, port, 2, &stderr_log);
 
+    let available = http_get(port, &format!("/sub/{credential}/uri"));
     assert!(
-        http_get(port, &format!("/sub/{credential}/uri"))
-            .starts_with("HTTP/1.1 503 Service Unavailable")
+        available.starts_with("HTTP/1.1 200 OK"),
+        "the subscription survives a schema-mismatched state: {available}"
+    );
+    assert!(
+        !available.contains("subscription-userinfo:"),
+        "the degraded response must not carry traffic metadata"
     );
     http_get(port, "/sub/wrong-credential/uri");
     assert!(server.wait().expect("server exits").success());
@@ -3259,9 +3278,12 @@ fn anchored_month_before_the_first_reset_starts_a_trackable_current_period() {
         .success()
         .stdout(predicate::str::contains("accounting period: pending-first-reset").not())
         .stdout(predicate::str::contains("total: 0 bytes"))
-        .stdout(predicate::str::contains(
-            "next reset: 2099-01-01T00:00:00+00:00",
-        ));
+        // The anchored day is the 1st, so the schedule boundary at the start
+        // of the coming month lies before the 2099 first anchor and ends the
+        // period: the reported next reset is the near boundary, never the
+        // anchor year.
+        .stdout(predicate::str::contains("next reset: 2099").not())
+        .stdout(predicate::str::contains("next reset: "));
 }
 
 #[test]

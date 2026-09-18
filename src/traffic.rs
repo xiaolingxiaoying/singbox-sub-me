@@ -652,12 +652,12 @@ fn accounting_period(
                 reset.minute(),
             )?;
             // Keep traffic metering live from the current monthly boundary even
-            // when the configured first anchor is still in the future. This
-            // matches vps-sub-meter: the first anchor caps the initial period
-            // and becomes its next reset, rather than suppressing all usage
-            // until that instant.
+            // when the configured first anchor is still in the future. The
+            // nearer of the schedule boundary and the first anchor ends the
+            // period, so the reported next reset always matches the instant
+            // the accounting state actually re-baselines.
             let next = if local_now < first_reset {
-                first_reset
+                scheduled_next.min(first_reset)
             } else {
                 scheduled_next
             };
@@ -666,6 +666,11 @@ fn accounting_period(
     })
 }
 
+/// Resolves one local wall-clock time in the accounting timezone. A DST fall
+/// back (ambiguous) resolves to the earlier instant, and a DST spring forward
+/// gap (nonexistent) resolves to the instant one hour later, so a timezone
+/// corner case degrades the reset instant by at most one hour instead of
+/// failing accounting for the entire period.
 fn local_datetime(
     timezone: chrono_tz::Tz,
     year: i32,
@@ -676,12 +681,21 @@ fn local_datetime(
 ) -> Result<DateTime<chrono_tz::Tz>, TrafficError> {
     match timezone.with_ymd_and_hms(year, month, day, hour, minute, 0) {
         LocalResult::Single(value) => Ok(value),
-        LocalResult::Ambiguous(_, _) => Err(TrafficError::Schedule(
-            "reset time is ambiguous in the accounting timezone",
-        )),
-        LocalResult::None => Err(TrafficError::Schedule(
-            "reset time does not exist in the accounting timezone",
-        )),
+        LocalResult::Ambiguous(earliest, _) => Ok(earliest),
+        LocalResult::None => {
+            let shifted = NaiveDate::from_ymd_opt(year, month, day)
+                .and_then(|date| date.and_hms_opt(hour, minute, 0))
+                .and_then(|naive| naive.checked_add_signed(Duration::hours(1)))
+                .ok_or(TrafficError::Schedule(
+                    "reset time does not exist in the accounting timezone",
+                ))?;
+            timezone
+                .from_local_datetime(&shifted)
+                .earliest()
+                .ok_or(TrafficError::Schedule(
+                    "reset time cannot be resolved in the accounting timezone",
+                ))
+        }
     }
 }
 
@@ -801,7 +815,10 @@ mod tests {
         let period = accounting_period(&config, now).unwrap();
 
         assert_eq!(period.identity(), "2024-01-31T09:30:00+00:00");
-        assert_eq!(period.next_reset.to_rfc3339(), "2024-03-31T09:30:00+00:00");
+        // The February schedule boundary (02-29, the short-month clamp of the
+        // 31st) lies before the configured first anchor (03-31), so it ends
+        // this period and the reported next reset matches it.
+        assert_eq!(period.next_reset.to_rfc3339(), "2024-02-29T09:30:00+00:00");
     }
 
     #[test]
@@ -828,32 +845,36 @@ mod tests {
     }
 
     #[test]
-    fn a_nonexistent_dst_local_time_is_rejected() {
+    fn a_nonexistent_dst_local_time_shifts_forward_one_hour() {
         let mut config = config();
         config.accounting_policy = AccountingPolicy::AnchoredMonth;
         config.accounting_timezone = "America/New_York".into();
         config.anchored_reset_at = Some("2024-03-10T02:30".into());
 
-        assert!(
-            accounting_period(&config, Utc.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap()).is_err()
-        );
+        // 02:30 does not exist on the 2024 spring-forward day; the reset
+        // degrades to 03:30 local (07:30 UTC) instead of failing the period.
+        let period =
+            accounting_period(&config, Utc.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap()).unwrap();
+        assert_eq!(period.next_reset.to_rfc3339(), "2024-03-10T07:30:00+00:00");
     }
 
     #[test]
-    fn an_ambiguous_dst_local_time_is_rejected() {
+    fn an_ambiguous_dst_local_time_resolves_to_the_earlier_instant() {
         let mut config = config();
         config.accounting_policy = AccountingPolicy::AnchoredMonth;
         config.accounting_timezone = "America/New_York".into();
         config.anchored_reset_at = Some("2024-11-03T01:30".into());
 
-        assert!(
+        // 01:30 happens twice on the 2024 fall-back day; the earlier (EDT)
+        // instant is used so the period keeps computing.
+        let period =
             accounting_period(&config, Utc.with_ymd_and_hms(2024, 10, 1, 0, 0, 0).unwrap())
-                .is_err()
-        );
+                .unwrap();
+        assert_eq!(period.next_reset.to_rfc3339(), "2024-10-03T05:30:00+00:00");
     }
 
     #[test]
-    fn anchored_month_before_the_first_reset_tracks_live_usage_until_the_anchor() {
+    fn anchored_month_before_the_first_reset_ends_at_the_nearer_boundary() {
         let fixture = TempDir::new().unwrap();
         let store = DeploymentStore::new(fixture.path());
         let mut config = config();
@@ -868,7 +889,10 @@ mod tests {
         assert_eq!(report.transmitted, 0);
         assert_eq!(report.total(), 0);
         assert_eq!(report.accounting_period, "2024-04-15T12:00:00+00:00");
-        assert_eq!(report.next_reset.to_rfc3339(), "2024-06-15T12:00:00+00:00");
+        // The May schedule boundary (05-15) lies before the configured first
+        // anchor (06-15), so it ends the period — the reported next reset
+        // always matches the instant the accounting state re-baselines.
+        assert_eq!(report.next_reset.to_rfc3339(), "2024-05-15T12:00:00+00:00");
         assert!(fixture.path().join("var/lib/sbctl/state.json").exists());
 
         write_interface_fixture(&fixture, 130, 260, "boot-a");

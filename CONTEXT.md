@@ -161,7 +161,7 @@ The complete set of subscription links sbctl generates from one canonical node m
 _Avoid_: Subscription formats only, link list
 
 **Version profile**:
-A per-minor-version variant of the full sing-box client configuration (1.12 onward), generated from one template with only the field differences the upstream changelog research confirms, labeled with its supported range.
+A per-minor-version variant of the full sing-box client configuration (1.10 onward), generated from one template with only the field differences the upstream changelog research confirms, labeled with its supported range. Pre-1.12 profiles use the legacy DNS server format and cannot contain AnyTLS nodes; features the server core has that a client core lacks (for example `store_dns` or AnyTLS) are documented in each profile's note.
 _Avoid_: Per-client custom config, guesswork fields
 
 **Subscription route**:

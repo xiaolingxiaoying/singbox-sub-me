@@ -91,6 +91,8 @@ pub fn fetch_latest_manifest() -> Result<ReleaseManifest, UpdateError> {
             "--location",
             "--silent",
             "--show-error",
+            "--proto",
+            "=https",
             "--connect-timeout",
             "15",
             "--max-time",
@@ -125,6 +127,206 @@ pub fn download_sbctl(manifest: &ReleaseManifest, output: &Path) -> Result<(), U
     download_artifact("sbctl", &manifest.sbctl, output)
 }
 
+/// The official sing-box project the data-plane kernel is downloaded from.
+pub const SING_BOX_OFFICIAL_PROJECT_URL: &str = "https://github.com/SagerNet/sing-box";
+
+const SING_BOX_OFFICIAL_RELEASE_API: &str =
+    "https://api.github.com/repos/SagerNet/sing-box/releases/latest";
+
+/// The archive asset name published by the official project for one version
+/// and architecture, e.g. `sing-box-1.14.1-linux-amd64.tar.gz`.
+fn official_archive_asset(version: &str) -> String {
+    format!(
+        "sing-box-{version}-linux-{}.tar.gz",
+        official_release_arch()
+    )
+}
+
+/// The official release-asset URL for one stable version. The version is
+/// validated with the same strict parser the signed manifest uses, so a
+/// pre-release tag or a malformed string can never reach a download URL.
+pub fn official_sing_box_archive_url(version: &str) -> Result<String, UpdateError> {
+    let parsed = crate::release::parse_version(version, "official sing-box version")
+        .map_err(|error| UpdateError::Operation(error.to_string()))?;
+    let [major, minor, patch] = parsed;
+    let version = format!("{major}.{minor}.{patch}");
+    Ok(format!(
+        "{SING_BOX_OFFICIAL_PROJECT_URL}/releases/download/v{version}/{}",
+        official_archive_asset(&version)
+    ))
+}
+
+/// The host architecture translated to the official release asset naming
+/// (`amd64`/`arm64`).
+pub fn official_release_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        other => other,
+    }
+}
+
+/// Resolves the latest stable sing-box version from the official project.
+/// GitHub's `releases/latest` endpoint already excludes drafts and
+/// pre-releases, so the returned tag is the latest stable version.
+pub fn fetch_latest_official_sing_box_version() -> Result<String, UpdateError> {
+    let temporary = tempfile::NamedTempFile::new().map_err(|error| {
+        UpdateError::DownloadFailed("official sing-box release", error.to_string())
+    })?;
+    let output = Command::new("curl")
+        .args([
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--proto",
+            "=https",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "60",
+            "--header",
+            "Accept: application/vnd.github+json",
+            "--header",
+            "User-Agent: sbctl",
+            "--output",
+        ])
+        .arg(temporary.path())
+        .arg(SING_BOX_OFFICIAL_RELEASE_API)
+        .output()
+        .map_err(|error| {
+            UpdateError::DownloadFailed(
+                "official sing-box release",
+                format!("{error}（需要 curl 命令与可用的 GitHub 访问）"),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(UpdateError::DownloadFailed(
+            "official sing-box release",
+            curl_diagnostic("official sing-box release", &output),
+        ));
+    }
+    let release: serde_json::Value = serde_json::from_reader(fs::File::open(temporary.path())?)
+        .map_err(|error| {
+            UpdateError::DownloadFailed(
+                "official sing-box release",
+                format!("GitHub 返回的不是有效的发布 JSON：{error}"),
+            )
+        })?;
+    let tag = release
+        .get("tag_name")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            UpdateError::DownloadFailed(
+                "official sing-box release",
+                "GitHub 发布 JSON 缺少 tag_name 字段".to_owned(),
+            )
+        })?;
+    let version = tag.strip_prefix('v').unwrap_or(tag);
+    crate::release::parse_version(version, "official sing-box version")
+        .map_err(|error| UpdateError::Operation(error.to_string()))?;
+    Ok(version.to_owned())
+}
+
+/// Downloads the official sing-box release archive, extracts the kernel
+/// binary, confirms it runs and reports the requested version, and copies it
+/// to `output_bin`. Integrity rests on the HTTPS release plus the runtime
+/// version check; the signed-manifest flow remains available for pinned,
+/// hash-verified installs.
+pub fn download_sing_box_official(version: &str, output_bin: &Path) -> Result<(), UpdateError> {
+    let url = official_sing_box_archive_url(version)?;
+    let archive = tempfile::Builder::new()
+        .suffix(".tar.gz")
+        .tempfile()
+        .map_err(|error| UpdateError::DownloadFailed("sing-box", error.to_string()))?;
+    let download = Command::new("curl")
+        .args([
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--proto",
+            "=https",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "600",
+            "--output",
+        ])
+        .arg(archive.path())
+        .arg(&url)
+        .output()
+        .map_err(|error| {
+            UpdateError::DownloadFailed(
+                "sing-box",
+                format!("{error}（需要 curl 命令与可用的 GitHub 访问）"),
+            )
+        })?;
+    if !download.status.success() {
+        return Err(UpdateError::DownloadFailed(
+            "sing-box",
+            curl_diagnostic("sing-box", &download),
+        ));
+    }
+    let extracted = tempfile::tempdir().map_err(|error| {
+        UpdateError::DownloadFailed("sing-box", format!("无法创建解压目录：{error}"))
+    })?;
+    let tar_status = Command::new("tar")
+        .arg("-xzf")
+        .arg(archive.path())
+        .arg("-C")
+        .arg(extracted.path())
+        .status()
+        .map_err(|error| {
+            UpdateError::DownloadFailed(
+                "sing-box",
+                format!("解压官方发布包失败（需要 tar 命令，Debian/Ubuntu 自带）：{error}"),
+            )
+        })?;
+    if !tar_status.success() {
+        return Err(UpdateError::DownloadFailed(
+            "sing-box",
+            format!("tar 解压失败，退出码 {tar_status}；下载的发布包可能不完整"),
+        ));
+    }
+    let candidate = extracted
+        .path()
+        .join(format!(
+            "sing-box-{version}-linux-{}",
+            official_release_arch()
+        ))
+        .join("sing-box");
+    let candidate = candidate.as_path();
+    confirm_sing_box_candidate(version, candidate)?;
+    if let Some(parent) = output_bin.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(candidate, output_bin)?;
+    set_executable(output_bin)?;
+    Ok(())
+}
+
+/// Confirms the candidate kernel runs and identifies itself as `version`, so a
+/// truncated or wrong-architecture archive is caught before installation.
+fn confirm_sing_box_candidate(version: &str, candidate: &Path) -> Result<(), UpdateError> {
+    let output = Command::new(candidate)
+        .arg("version")
+        .output()
+        .map_err(|error| {
+            UpdateError::SbctlHealth(format!(
+                "下载的 sing-box 无法运行（架构不匹配或文件损坏）：{error}"
+            ))
+        })?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() || !stdout.contains(version) {
+        return Err(UpdateError::SbctlHealth(format!(
+            "下载的 sing-box 自检失败：期望版本 {version}，实际输出 {}",
+            stdout.trim()
+        )));
+    }
+    Ok(())
+}
+
 fn download_artifact(
     name: &'static str,
     artifact: &ReleaseArtifact,
@@ -144,6 +346,8 @@ fn download_artifact(
             "--location",
             "--silent",
             "--show-error",
+            "--proto",
+            "=https",
             "--connect-timeout",
             "15",
             "--max-time",
@@ -195,15 +399,27 @@ pub fn verify_sing_box_artifact(
     verify_artifact("sing-box", candidate, &manifest.sing_box.sha256)
 }
 
-/// Updates only the data-plane binary. The existing generated configuration is
-/// checked with the candidate before the managed binary is replaced.
+/// Updates only the data-plane binary from a signed manifest. The existing
+/// generated configuration is checked with the candidate before the managed
+/// binary is replaced.
 pub fn apply_sing_box(
     store: &DeploymentStore,
     manifest: &ReleaseManifest,
     candidate: &Path,
 ) -> Result<PathBuf, UpdateError> {
     verify_trusted(manifest)?;
-    verify_sing_box_artifact(manifest, candidate)?;
+    let verified = read_verified_artifact("sing-box", candidate, &manifest.sing_box.sha256)?;
+    install_candidate_sing_box(store, candidate, &verified)
+}
+
+/// Installs an already-trusted candidate sing-box binary with the full
+/// check → backup → replace → restart → rollback flow. Used by both the
+/// signed-manifest update and the official-release update.
+pub fn install_candidate_sing_box(
+    store: &DeploymentStore,
+    candidate: &Path,
+    verified_contents: &[u8],
+) -> Result<PathBuf, UpdateError> {
     let _lock = store.acquire_operation_lock()?;
     let config = store.load()?;
     let server_config = fs::read_to_string(
@@ -217,7 +433,7 @@ pub fn apply_sing_box(
 
     let rollback = rollback_directory(store.root());
     let backup = backup(store, &rollback, &config)?;
-    write_managed_binary(store, "usr/local/bin/sing-box", &fs::read(candidate)?)?;
+    write_managed_binary(store, "usr/local/bin/sing-box", verified_contents)?;
     if let Err(error) = crate::lifecycle::restart_sing_box_service(store.root()) {
         restore(store, &backup)
             .map_err(|rollback_error| UpdateError::Rollback(rollback_error.to_string()))?;
@@ -240,8 +456,12 @@ pub fn apply(
     sing_box_candidate: &Path,
 ) -> Result<PathBuf, UpdateError> {
     verify_trusted(manifest)?;
-    verify_artifact("sbctl", sbctl_candidate, &manifest.sbctl.sha256)?;
-    verify_artifact("sing-box", sing_box_candidate, &manifest.sing_box.sha256)?;
+    // Read each candidate exactly once and verify the in-memory bytes, so the
+    // installed binary is the very buffer that was hashed — no window for the
+    // file to be swapped between verification and installation.
+    let sbctl_contents = read_verified_artifact("sbctl", sbctl_candidate, &manifest.sbctl.sha256)?;
+    let sing_box_contents =
+        read_verified_artifact("sing-box", sing_box_candidate, &manifest.sing_box.sha256)?;
     check_sbctl_candidate(sbctl_candidate)?;
 
     let _lock = store.acquire_operation_lock()?;
@@ -257,12 +477,20 @@ pub fn apply(
 
     let rollback = rollback_directory(store.root());
     let backup = backup(store, &rollback, &config)?;
-    write_managed_binary(store, "usr/local/bin/sbctl", &fs::read(sbctl_candidate)?)?;
-    write_managed_binary(
-        store,
-        "usr/local/bin/sing-box",
-        &fs::read(sing_box_candidate)?,
-    )?;
+    write_managed_binary(store, "usr/local/bin/sbctl", &sbctl_contents)?;
+    if let Err(error) = write_managed_binary(store, "usr/local/bin/sing-box", &sing_box_contents) {
+        // The services were not restarted yet, so restoring the backup puts
+        // the host back on the previous consistent pair of binaries.
+        if let Err(rollback_error) = restore(store, &backup) {
+            eprintln!(
+                "warning: the automatic rollback failed ({}); restore the rollback point \
+                 {} manually before retrying",
+                rollback_error,
+                rollback.display()
+            );
+        }
+        return Err(error);
+    }
 
     if let Err(error) = crate::lifecycle::restart_services(store.root()) {
         restore(store, &backup)
@@ -386,8 +614,26 @@ fn rollback_directory(root: &Path) -> PathBuf {
 
 fn verify_artifact(name: &'static str, path: &Path, expected: &str) -> Result<(), UpdateError> {
     let contents = fs::read(path)?;
+    verify_bytes(name, &contents, expected)
+}
+
+/// Reads a candidate artifact once and verifies the in-memory bytes against
+/// the pinned digest, returning them so the installation writes exactly the
+/// verified buffer. The comparison is case-insensitive because the manifest
+/// schema accepts uppercase hex digests.
+fn read_verified_artifact(
+    name: &'static str,
+    path: &Path,
+    expected: &str,
+) -> Result<Vec<u8>, UpdateError> {
+    let contents = fs::read(path)?;
+    verify_bytes(name, &contents, expected)?;
+    Ok(contents)
+}
+
+fn verify_bytes(name: &'static str, contents: &[u8], expected: &str) -> Result<(), UpdateError> {
     let actual = format!("{:x}", Sha256::digest(contents));
-    (actual == expected)
+    (actual.eq_ignore_ascii_case(expected))
         .then_some(())
         .ok_or(UpdateError::DigestMismatch(name))
 }

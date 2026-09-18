@@ -5,7 +5,9 @@ sbctl 在同一份节点模型上生成多种订阅格式。所有链接都在 `
 | 链接 | 内容 | 适用客户端 |
 | --- | --- | --- |
 | `/sub/<cred>/sing-box.json` | 仅 outbounds 节点列表（历史格式，逐字节稳定） | sing-box 全版本 |
-| `/sub/<cred>/sing-box-full.json` | 最新稳定版完整客户端配置 | sing-box 最新稳定版 |
+| `/sub/<cred>/sing-box-full.json` | 最新稳定版完整客户端配置 | sing-box 最新稳定版（V2rayN 6.6+ 亦可导入） |
+| `/sub/<cred>/sing-box-1.10.json` | 1.10.x 适配完整配置 | sing-box ≥1.10.0, <1.11.0（无 AnyTLS 节点） |
+| `/sub/<cred>/sing-box-1.11.json` | 1.11.x 适配完整配置 | sing-box ≥1.11.0, <1.12.0（无 AnyTLS 节点） |
 | `/sub/<cred>/sing-box-1.12.json` | 1.12.x 适配完整配置 | sing-box ≥1.12.0, <1.13.0 |
 | `/sub/<cred>/sing-box-1.13.json` | 1.13.x 适配完整配置 | sing-box ≥1.13.0, <1.14.0 |
 | `/sub/<cred>/sing-box-1.14.json` | 1.14.x 适配完整配置 | sing-box ≥1.14.0 |
@@ -15,7 +17,19 @@ sbctl 在同一份节点模型上生成多种订阅格式。所有链接都在 `
 | `/sub/<cred>/uri.txt` | 明文 URI 整体 Base64 | V2rayN 等 |
 | `/sub/<cred>/shadowrocket.txt` | Shadowrocket 适配 Base64 URI | Shadowrocket (iOS) |
 | `/sub/<cred>/qr/<格式>` | 对应链接的二维码（SVG） | 手机扫码导入 |
-| `/sub/<cred>/index` | 中文总览页（全链接 + 标注 + 二维码 + 导入步骤） | 浏览器 |
+| `/sub/<cred>/index` | 中文总览页（按客户端速查 + 全链接 + 标注 + 二维码 + 导入步骤） | 浏览器 |
+
+## 按客户端选择（主流客户端速查）
+
+| 客户端 | 推荐订阅链接 | 说明 |
+| --- | --- | --- |
+| Clash Party | `clash.yaml` | mihomo 内核订阅，导入后自动更新节点 |
+| Clash Verge | `clash.yaml` | mihomo 内核；内置内核较旧时改用 `clash-1.18.yaml` |
+| sing-box | `sing-box-full.json`；按客户端实际内核版本选 `sing-box-<版本>.json` | 1.10/1.11 不支持 AnyTLS 节点（1.12.0 才加入） |
+| V2rayN | `uri.txt`（Base64 URI，默认内核） | 6.6+ 可直接导入 `sing-box-full.json`（内置 sing-box 内核） |
+| Shadowrocket | `shadowrocket.txt` | 五协议均支持，需 ≥ 对应协议最低版本（见下文） |
+
+`sbctl sub` 会先输出以上按客户端速查，再输出完整矩阵；`index` 总览页顶部同样提供该速查表。
 
 ## 完整客户端配置包含什么
 
@@ -28,17 +42,19 @@ sbctl 在同一份节点模型上生成多种订阅格式。所有链接都在 `
 - `route`：AI 域名（chatgpt/openai/x.com 等）优先走选择组；geosite-cn / geoip-cn rule-set 直连（standard 档）；私有地址直连；`default_domain_resolver` 指向直连 DNS；
 - `experimental`：clash_api（127.0.0.1:9090，供 SFA/SFW 面板与 sbtui 使用）+ cache_file（记住选择与 fake-ip 映射）。
 
-## sing-box 版本差异（1.12 → 1.14）
+## sing-box 版本差异（1.10 → 1.14）
 
 差异以官方 changelog 研究为准（`docs/research/sing-box-client-version-differences.md`）：
 
-| 版本 | DNS servers | 特殊出站/ sniff 字段 | 其他 |
+| 版本 | DNS servers | 特殊出站/ sniff 字段 | 客户端兼容性说明 |
 | --- | --- | --- | --- |
-| 1.12.x | 新对象格式（legacy 告警） | 仍可用（弃用） | geoip/geosite 字段已移除，tun 用 `address` |
-| 1.13.x | 新对象格式 | 已移除，改规则动作 | WireGuard 出站移除（本配置未用） |
-| 1.14.x | legacy 格式移除 | 已移除 | DNS 规则 `outbound` 项移除；`cache_file.store_dns` 可用 |
+| 1.10.x | legacy 字符串格式 + 顶层 fakeip | 入站 `sniff` 字段 + 特殊 `dns` outbound | **不含 AnyTLS 节点**；无 `store_dns`；无 `default_domain_resolver`（用 `outbound: any` DNS 规则） |
+| 1.11.x | legacy 字符串格式 + 顶层 fakeip | 规则动作（`action: sniff` / `hijack-dns`） | **不含 AnyTLS 节点**；无 `store_dns` |
+| 1.12.x | 新对象格式（legacy 告警） | 仍可用（弃用） | geoip/geosite 字段已移除，tun 用 `address`；无 `store_dns` |
+| 1.13.x | 新对象格式 | 已移除，改规则动作 | WireGuard 出站移除（本配置未用）；无 `store_dns` |
+| 1.14.x | legacy 格式移除 | 已移除 | DNS 规则 `outbound` 项移除；`cache_file.store_dns` 可用；与服务端运行的最新稳定版一致 |
 
-所有 profile 共用一套模板：fakeip 用 DNS 服务器对象（1.12+）、tun 用 `address`、路由全部使用动作式规则与 rule_set，因此 1.12–1.14 都能通过 `sing-box check`。仅 `store_dns` 按 profile 能力开关。
+生成策略：每个版本 profile 只带该版本内核能接受的字段——1.10/1.11 用 legacy DNS 与顶层 `dns.fakeip`，1.10 的路由规则不用动作式写法，任何版本都不会收到它不认识的字段。`store_dns` 仅 1.14 工件携带。AnyTLS 节点只在 1.12+ 工件中出现；**当部署只启用了 AnyTLS 时，1.10/1.11 工件不会生成**（生成时打印警告，其余格式不受影响）。
 
 ## mihomo 差异（1.18 → 1.19）
 

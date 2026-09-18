@@ -1,8 +1,41 @@
-# sing-box 客户端完整配置版本差异化调查报告（1.12.0 → 2026-09 最新稳定版）
+# sing-box 客户端完整配置版本差异化调查报告（1.10.0 → 2026-09 最新稳定版）
 
-- 调查日期：2026-09-14
+- 调查日期：2026-09-14（2026-09-19 增补 1.10/1.11 适配与官方内核下载）
 - 调查方式：联网核实 GitHub Releases/Tags API、sing-box 官方文档（sing-box.sagernet.org）、mihomo 官方 wiki（wiki.metacubex.one）、MetaCubeX 仓库、Shadowrocket 官方 Telegram 频道（ShadowrocketNews）及各协议官方 URI 规范。
 - 标注约定：所有无法从一手来源核实的内容均标注「未确认」。
+- 2026-09-19 更新：经 GitHub Tags API 复核，最新稳定版为 **1.14.1**（1.15 仍为 alpha 预发布）；订阅适配覆盖 **1.10 → 1.14 最新 5 个稳定 minor 版本**。1.10/1.11 的差异化字段依据官方迁移文档（migration.md）的 Deprecated 形态核实。
+
+---
+
+## 0. 1.10 / 1.11 客户端适配增补（2026-09-19）
+
+### 0.1 版本特性差异
+
+| 特性 | 1.10 | 1.11 | 1.12 | 1.13 | 1.14 |
+|---|---|---|---|---|---|
+| DNS 服务器格式 | legacy（address 字符串） | legacy | 新 type 对象 | 新 type 对象 | 新 type 对象（legacy 已移除） |
+| fake-ip | 顶层 `dns.fakeip` + `address: "fakeip"` 服务器 | 同左 | `type: "fakeip"` DNS 服务器 | 同左 | 同左（顶层对象已移除） |
+| 路由规则动作（sniff/hijack-dns） | 无（入站 `sniff` 字段 + 特殊 `dns` outbound） | **有**（`action` 字段） | 有 | 有（旧写法已移除） | 有 |
+| `route.default_domain_resolver` | 无（用 `{"outbound": "any"}` DNS 规则） | 同左 | 有 | 有 | 有（outbound DNS 规则项已移除） |
+| AnyTLS | **无** | **无** | 有 | 有 | 有 |
+| `cache_file.store_dns` | 无 | 无 | 无 | 无 | 有 |
+| TUN `address` 合并写法 | 有（1.10.0 引入） | 有 | 有 | 有 | 有 |
+
+来源：官方迁移文档（`docs/migration.md`：Migrate to new DNS server formats / Migrate legacy special outbounds / Migrate legacy inbound fields / outbound DNS rule items → domain resolver）、v1.11.15 源码 `option/dns.go`（`DNSFakeIPOptions` 含 `enabled`/`inet4_range`/`inet6_range`）、官方 deprecated 页。
+
+### 0.2 生成器行为（src/subscription.rs）
+
+- `SING_BOX_VERSION_PROFILES` 覆盖 1.10–1.14，每个 profile 携带 `typed_dns`、`route_rule_actions`、`supports_anytls`、`supports_store_dns` 四个开关。
+- 1.10/1.11 工件：legacy DNS 服务器（`{"address": ..., "tag": ..., "detour": ...}`）、顶层 `dns.fakeip`、DNS 规则前置 `{"outbound": "any", "server": "dns-direct"}` 解析代理服务器域名、不含 `route.default_domain_resolver`、**不含 AnyTLS 节点**。
+- 1.10 额外差异：tun 入站 `sniff: true`、路由规则 `{"protocol": "dns", "outbound": "dns-out"}` + 特殊 `{"type": "dns", "tag": "dns-out"}` outbound；1.11 起改用 `{"action": "sniff"}` / `{"protocol": "dns", "action": "hijack-dns"}`。
+- **AnyTLS-only 部署**：1.10/1.11 工件没有可用节点，生成时跳过这两个工件并打印警告（中文），其余格式正常生成。
+- 服务端与客户端的功能差异在每个版本条目的说明（notes）与订阅总览页中标注。
+
+### 0.3 内核下载来源变更（2026-09-19）
+
+- 服务端 sing-box 内核默认改为从官方仓库下载：`https://api.github.com/repos/SagerNet/sing-box/releases/latest`（该端点自动排除 draft 与 pre-release，返回最新稳定版）→ `releases/download/v<版本>/sing-box-<版本>-linux-<amd64|arm64>.tar.gz`。
+- 下载后解压并执行 `sing-box version` 自检（确认版本与可执行性），再走原有的 check → 备份 → 替换 → 健康检查 → 回滚流程。
+- 完整性依赖 HTTPS 与官方发布；需要固定版本与哈希校验时仍可使用签名 manifest 流程（`--manifest`）。
 
 ---
 

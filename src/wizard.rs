@@ -23,6 +23,8 @@ pub enum WizardError {
     Io(#[from] io::Error),
     #[error("configuration wizard produced an invalid deployment: {0}")]
     Config(#[from] ConfigError),
+    #[error("configuration wizard input is invalid: {0}")]
+    Invalid(String),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -635,7 +637,9 @@ fn ask_required<C: Prompts, T>(
 
 /// Asks an optional value. An empty answer returns the current value (`None`
 /// when there is none); a non-empty answer must parse, otherwise the wizard
-/// re-prompts with the validation message.
+/// re-prompts with the validation message. A persisted value that no longer
+/// parses (a legacy format, for example) surfaces as a wizard error instead
+/// of aborting the process.
 fn ask_value<C: Prompts, T>(
     prompts: &mut C,
     label: &str,
@@ -645,9 +649,13 @@ fn ask_value<C: Prompts, T>(
     loop {
         let answer = prompts.ask(label, current.as_deref())?;
         if answer.is_empty() {
-            return Ok(current
-                .as_deref()
-                .map(|value| parse(value).expect("a persisted current value always parses")));
+            return match current.as_deref().map(&parse) {
+                None => Ok(None),
+                Some(Ok(value)) => Ok(Some(value)),
+                Some(Err(message)) => Err(WizardError::Invalid(format!(
+                    "当前保存的值无法解析（{message}）；请重新输入一个合法值"
+                ))),
+            };
         }
         match parse(&answer) {
             Ok(value) => return Ok(Some(value)),
