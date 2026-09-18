@@ -560,7 +560,7 @@ impl Engine {
     async fn import_subscription(&mut self, url: String) -> Result<()> {
         let source = url.trim().to_owned();
         if !(source.starts_with("https://") || source.starts_with("http://")) {
-            anyhow::bail!("剪贴板内容不是有效的 HTTP/HTTPS 订阅地址");
+            anyhow::bail!("订阅地址必须是有效的 HTTP/HTTPS 链接");
         }
         // Store the canonical full-profile link the same way the TUI does, so
         // a pasted clash.yaml / qr / index suffix fetches a sing-box client

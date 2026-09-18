@@ -363,6 +363,21 @@ grep -n "fn backup_path" -A 3 crates/client-core/src/system_proxy.rs
 
 **仍未完成**（承接原 P1 清单）：GUI 文本输入组件、托盘/服务模式/热切换、TUI 收敛到 `ClientController` 并异步化长操作、连接/日志的历史持久化。
 
+### 2026-09-19 修订（二）：GUI 文本输入落地（P1#1 分水岭 + P1#5）
+
+按审查建议先做 GUI。本轮为 sbgui 实现了最小单行文本输入组件（`TextField` + `InputField` + `FieldSpec`，`main.rs`），并接入四个页面，§4.2 中"无文本输入"及其连锁缺口就此关闭：
+
+- **组件**：click 聚焦（`track_focus` + `FocusHandle`）、`on_key_down` 键入（取 `key_char`，space/backspace 兜底）、Enter 提交、Esc 还原、仅在行尾追加/退格（与 TUI 输入框同模型）；未聚焦的设置字段随快照自动回同步，不会显示过期值。IME（中文输入）尚未支持，筛选与设置项为 ASCII 场景。
+- **订阅页**：新增手动输入地址导入（此前只能剪贴板）；非法输入由引擎状态行报错，合法 HTTP(S) 导入后清空。
+- **连接页**：关键字实时筛选（`Connection::matches`），计数显示"匹配 N / M 条"，新增"无匹配连接"空态。
+- **日志页**：级别 chips（全部/info+/warn+/error，`log_level_rank` 按行内级别标记判定）+ 关键字过滤。
+- **设置页**：镜像前缀、固定内核版本（空 = 跟随最新）、混合端口、延迟地址、自动更新间隔五项改为可编辑（回车保存）；端口非法输入不提交并还原；混合端口/流量模式在内核运行期仍由引擎拒绝并显示在状态行。
+- **测试**：sbgui 首批单元测试（`parse_port`/`parse_count`/`log_level_rank`，3 个）；`cargo check`/`clippy`/`fmt` 全部通过（注意：服务端 `src/` 存在与本轮无关的既有格式漂移）。
+
+复核口径更新：§9-1 的 `grep -c "TextInput\|InputState"` 现在仍可能为 0（本组件不叫这个名字），应改查 `grep -c "track_focus\|on_key_down" crates/sbgui/src/main.rs`（修复后期望 > 0）。
+
+**仍然未完成**：托盘/开机自启执行/服务模式/热切换、GUI 主题与 i18n、TUI 收敛到 `ClientController` 与异步化、连接/日志历史持久化、IME 输入。
+
 回归验证：
 
 ```bash

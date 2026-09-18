@@ -30,10 +30,10 @@ use client_core::system_proxy::TrafficMode;
 use client_core::{ClientCommand, ClientController};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, AppContext as _, AssetSource, Bounds, ClickEvent, Context, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
-    TitlebarOptions, Window, WindowBounds, WindowControlArea, WindowOptions, div, px, rgb, rgba,
-    size, svg,
+    App, AppContext as _, AssetSource, Bounds, ClickEvent, Context, FocusHandle,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBounds, WindowControlArea,
+    WindowOptions, div, px, rgb, rgba, size, svg,
 };
 use gpui_platform::application;
 
@@ -144,6 +144,70 @@ enum ExitChoice {
     Restore,
 }
 
+/// The text fields the window renders, indexing `Sbgui::inputs`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InputField {
+    ConnFilter,
+    LogQuery,
+    SubUrl,
+    Mirror,
+    MixedPort,
+    TestUrl,
+    AutoUpdateMinutes,
+    CoreVersion,
+}
+
+const INPUT_FIELDS: [InputField; 8] = [
+    InputField::ConnFilter,
+    InputField::LogQuery,
+    InputField::SubUrl,
+    InputField::Mirror,
+    InputField::MixedPort,
+    InputField::TestUrl,
+    InputField::AutoUpdateMinutes,
+    InputField::CoreVersion,
+];
+
+/// A minimal single-line text field: click to focus, type to edit, Enter to
+/// commit, Esc to reset. Editing is append/backspace with the caret always at
+/// the end — the same model the TUI's input overlay uses — and the typed
+/// character comes from the keystroke's `key_char`. IME composition (typing
+/// Chinese into a field) is not handled yet; filters and settings are ASCII.
+struct TextField {
+    focus: FocusHandle,
+    text: String,
+}
+
+/// The render-time identity of one field, bundled so field helpers stay
+/// readable (`text_field(spec, window, cx)`).
+struct FieldSpec {
+    field: InputField,
+    id: &'static str,
+    placeholder: &'static str,
+    width: f32,
+}
+
+/// The logs-page level filter, mirroring the TUI's `info+`/`warn+`/`error`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum LogLevelFilter {
+    #[default]
+    All,
+    Info,
+    Warn,
+    Error,
+}
+
+impl LogLevelFilter {
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "全部",
+            Self::Info => "info+",
+            Self::Warn => "warn+",
+            Self::Error => "error",
+        }
+    }
+}
+
 struct Sbgui {
     controller: ClientController,
     data_dir: PathBuf,
@@ -154,10 +218,14 @@ struct Sbgui {
     confirm_exit: bool,
     /// The exit decision, once made; a set choice lets the window close.
     exit_choice: Option<ExitChoice>,
+    /// Text fields, indexed by `InputField as usize`.
+    inputs: [TextField; INPUT_FIELDS.len()],
+    /// The logs-page level filter.
+    log_level: LogLevelFilter,
 }
 
 impl Sbgui {
-    fn new(controller: ClientController, data_dir: PathBuf) -> Self {
+    fn new(controller: ClientController, data_dir: PathBuf, cx: &mut Context<Self>) -> Self {
         let snapshot = controller.snapshot();
         Self {
             controller,
@@ -167,11 +235,156 @@ impl Sbgui {
             group_index: 0,
             confirm_exit: false,
             exit_choice: None,
+            inputs: INPUT_FIELDS.map(|_| TextField {
+                focus: cx.focus_handle(),
+                text: String::new(),
+            }),
+            log_level: LogLevelFilter::default(),
         }
+    }
+
+    fn field(&self, field: InputField) -> &TextField {
+        &self.inputs[field as usize]
+    }
+
+    fn field_mut(&mut self, field: InputField) -> &mut TextField {
+        &mut self.inputs[field as usize]
     }
 
     fn send(&self, command: ClientCommand) {
         let _ = self.controller.send(command);
+    }
+
+    /// Fields that mirror persisted settings re-sync from the snapshot
+    /// whenever they are not being edited, so the UI never shows a stale
+    /// value after the engine applies (or rejects) a change.
+    fn sync_fields(&mut self, window: &Window) {
+        let settings = &self.snapshot.settings;
+        let expected = [
+            (InputField::Mirror, settings.mirror.clone()),
+            (InputField::MixedPort, settings.mixed_port.to_string()),
+            (InputField::TestUrl, settings.test_url.clone()),
+            (
+                InputField::AutoUpdateMinutes,
+                settings.auto_update_minutes.to_string(),
+            ),
+            (InputField::CoreVersion, settings.core_version.clone()),
+        ];
+        for (field, value) in expected {
+            let state = self.field_mut(field);
+            if !state.focus.is_focused(window) && state.text != value {
+                state.text = value;
+            }
+        }
+    }
+
+    fn handle_field_key(
+        &mut self,
+        field: InputField,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let keystroke = &event.keystroke;
+        let modifier_held = keystroke.modifiers.control
+            || keystroke.modifiers.alt
+            || keystroke.modifiers.platform
+            || keystroke.modifiers.function;
+        if !modifier_held {
+            if let Some(typed) = keystroke
+                .key_char
+                .as_deref()
+                .filter(|typed| !typed.contains('\n') && !typed.contains('\r'))
+            {
+                self.field_mut(field).text.push_str(typed);
+            } else {
+                match keystroke.key.as_str() {
+                    "backspace" => {
+                        self.field_mut(field).text.pop();
+                    }
+                    "space" => self.field_mut(field).text.push(' '),
+                    _ => {}
+                }
+            }
+        }
+        match keystroke.key.as_str() {
+            "enter" => self.commit_field(field, cx),
+            "escape" => self.reset_field(field),
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    /// Applies a committed field. The two filters already apply live on every
+    /// keystroke; the settings fields send a partial update, and the engine
+    /// reports the outcome (including rejection while the core runs) in the
+    /// page header's status line.
+    fn commit_field(&mut self, field: InputField, cx: &mut Context<Self>) {
+        let text = self.field(field).text.trim().to_owned();
+        match field {
+            InputField::ConnFilter | InputField::LogQuery => {}
+            InputField::SubUrl => self.submit_sub_url(cx),
+            InputField::Mirror => self.send(ClientCommand::UpdateSettings(SettingsPatch {
+                mirror: Some(text),
+                ..Default::default()
+            })),
+            InputField::MixedPort => match parse_port(&text) {
+                Some(port) => self.send(ClientCommand::UpdateSettings(SettingsPatch {
+                    mixed_port: Some(port),
+                    ..Default::default()
+                })),
+                None => self.reset_field(field),
+            },
+            InputField::TestUrl => {
+                if !text.is_empty() {
+                    self.send(ClientCommand::UpdateSettings(SettingsPatch {
+                        test_url: Some(text),
+                        ..Default::default()
+                    }));
+                }
+            }
+            InputField::AutoUpdateMinutes => match parse_count(&text) {
+                Some(minutes) => self.send(ClientCommand::UpdateSettings(SettingsPatch {
+                    auto_update_minutes: Some(minutes),
+                    ..Default::default()
+                })),
+                None => self.reset_field(field),
+            },
+            InputField::CoreVersion => {
+                // Empty means "track the latest release" again.
+                self.send(ClientCommand::UpdateSettings(SettingsPatch {
+                    core_version: Some(text.trim_start_matches('v').to_owned()),
+                    ..Default::default()
+                }));
+            }
+        }
+    }
+
+    fn submit_sub_url(&mut self, cx: &mut Context<Self>) {
+        let text = self.field(InputField::SubUrl).text.trim().to_owned();
+        if text.is_empty() {
+            return;
+        }
+        self.send(ClientCommand::ImportSubscription(text.clone()));
+        // A non-HTTP line stays in the field so it can be fixed; the engine's
+        // rejection shows up in the header status line either way.
+        if text.starts_with("https://") || text.starts_with("http://") {
+            self.field_mut(InputField::SubUrl).text.clear();
+        }
+        cx.notify();
+    }
+
+    /// Esc: filters and the import field clear; settings fields restore the
+    /// persisted value, so a half-typed edit never pretends to be saved.
+    fn reset_field(&mut self, field: InputField) {
+        let value = match field {
+            InputField::ConnFilter | InputField::LogQuery | InputField::SubUrl => String::new(),
+            InputField::Mirror => self.snapshot.settings.mirror.clone(),
+            InputField::MixedPort => self.snapshot.settings.mixed_port.to_string(),
+            InputField::TestUrl => self.snapshot.settings.test_url.clone(),
+            InputField::AutoUpdateMinutes => self.snapshot.settings.auto_update_minutes.to_string(),
+            InputField::CoreVersion => self.snapshot.settings.core_version.clone(),
+        };
+        self.field_mut(field).text = value;
     }
 
     /// GPUI asks this before the window closes; both the custom close button
@@ -213,6 +426,7 @@ impl Sbgui {
 
 impl Render for Sbgui {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_fields(window);
         let page = self.page;
         div()
             .size_full()
@@ -249,7 +463,7 @@ impl Render for Sbgui {
                                     .overflow_y_scroll()
                                     .px(px(CONTENT_PAD))
                                     .pb(px(CONTENT_PAD))
-                                    .child(self.content(cx)),
+                                    .child(self.content(window, cx)),
                             ),
                     ),
             )
@@ -967,16 +1181,83 @@ impl Sbgui {
             .child(label)
     }
 
-    fn content(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn content(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         match self.page {
             Page::Dashboard => self.dashboard(cx),
-            Page::Subscriptions => self.subscriptions(cx),
+            Page::Subscriptions => self.subscriptions(window, cx),
             Page::Proxies => self.proxies(cx),
             Page::Rules => self.rules(cx),
-            Page::Connections => self.connections(cx),
-            Page::Logs => self.logs(cx),
-            Page::Settings => self.settings(cx),
+            Page::Connections => self.connections(window, cx),
+            Page::Logs => self.logs(window, cx),
+            Page::Settings => self.settings(window, cx),
         }
+    }
+
+    /// One single-line text field. Click focuses; typing edits live; Enter
+    /// commits (`commit_field`); Esc resets (`reset_field`).
+    fn text_field(
+        &self,
+        spec: FieldSpec,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let FieldSpec {
+            field,
+            id,
+            placeholder,
+            width,
+        } = spec;
+        let state = self.field(field);
+        let focused = state.focus.is_focused(window);
+        let empty = state.text.is_empty();
+        div()
+            .id(id)
+            .w(px(width))
+            .min_w(px(120.0))
+            .px(px(10.0))
+            .py(px(7.0))
+            .rounded(px(7.0))
+            .bg(rgb(SURFACE))
+            .border_1()
+            .border_color(rgb(if focused { CYAN } else { BORDER }))
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .cursor_pointer()
+            .text_size(px(12.0))
+            .text_color(rgb(if empty { FAINT } else { TEXT }))
+            .track_focus(&state.focus)
+            .on_click(cx.listener(move |view, _: &ClickEvent, window, cx| {
+                view.field(field).focus.focus(window, cx);
+                cx.notify();
+            }))
+            .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                view.handle_field_key(field, event, cx);
+            }))
+            .child(if empty {
+                placeholder.to_owned()
+            } else {
+                state.text.clone()
+            })
+            .children(focused.then(|| div().w(px(1.5)).h(px(15.0)).bg(rgb(CYAN))))
+    }
+
+    /// A label with an editable value line for the settings page.
+    fn edit_line(
+        &self,
+        label: &'static str,
+        spec: FieldSpec,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .mt(px(10.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(12.0))
+            .child(div().text_size(px(12.0)).text_color(rgb(TEXT)).child(label))
+            .child(self.text_field(spec, window, cx))
     }
 
     // ------------------------------------------------------------ dashboard
@@ -1160,7 +1441,7 @@ impl Sbgui {
 
     // --------------------------------------------------------- subscriptions
 
-    fn subscriptions(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn subscriptions(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let profiles = self.snapshot.profiles.clone();
         let import = div()
             .id("import-from-clipboard")
@@ -1181,31 +1462,77 @@ impl Sbgui {
             }))
             .child("从剪贴板导入");
 
-        let mut root = div()
+        let manual_import = div()
+            .id("import-manual")
+            .px(px(16.0))
+            .py(px(11.0))
+            .rounded(px(13.0))
+            .bg(rgb(SURFACE))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .text_size(px(12.0))
+            .text_color(rgb(TEXT))
+            .cursor_pointer()
+            .hover(|style| style.border_color(rgb(CYAN)).text_color(rgb(CYAN)))
+            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                view.submit_sub_url(cx);
+            }))
+            .child("导入");
+
+        let manual_row = div()
+            .mt(px(12.0))
+            .w_full()
             .flex()
-            .flex_col()
-            .gap(px(SECTION_GAP))
-            .child(
-                div()
-                    .p(px(16.0))
-                    .rounded(px(RADIUS))
-                    .bg(rgb(SURFACE_2))
-                    .flex()
-                    .items_center()
-                    .gap(px(14.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(div().text_size(px(13.0)).text_color(rgb(TEXT)).child("复制订阅地址后直接导入"))
-                            .child(div().mt(px(4.0)).text_size(px(11.0)).text_color(rgb(MUTED)).child("支持 HTTP/HTTPS 的 sing-box JSON 或完整订阅地址。导入后会立即拉取并设为当前档案。")),
-                    )
-                    .child(import),
-            );
+            .items_center()
+            .gap(px(10.0))
+            .child(self.text_field(
+                FieldSpec {
+                    field: InputField::SubUrl,
+                    id: "sub-url",
+                    placeholder: "https://… 直接输入或粘贴订阅地址，回车导入",
+                    width: 420.0,
+                },
+                window,
+                cx,
+            ))
+            .child(manual_import);
+
+        let mut root = div().flex().flex_col().gap(px(SECTION_GAP)).child(
+            div()
+                .p(px(16.0))
+                .rounded(px(RADIUS))
+                .bg(rgb(SURFACE_2))
+                .flex()
+                .items_center()
+                .gap(px(14.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .text_color(rgb(TEXT))
+                                .child("导入订阅地址"),
+                        )
+                        .child(
+                            div()
+                                .mt(px(4.0))
+                                .text_size(px(11.0))
+                                .text_color(rgb(MUTED))
+                                .child(
+                                    "支持 HTTP/HTTPS 的 sing-box JSON 或完整订阅地址；\
+                                         sbctl 的 qr / index / clash.yaml 后缀会自动归一化。",
+                                ),
+                        )
+                        .child(manual_row),
+                )
+                .child(import),
+        );
 
         if profiles.is_empty() {
             return root.child(empty_state(
                 "还没有订阅",
-                "复制订阅链接，然后点击上方「从剪贴板导入」。",
+                "在上方输入地址回车，或复制订阅链接后点击「从剪贴板导入」。",
                 None,
                 cx,
             ));
@@ -1664,11 +1991,16 @@ impl Sbgui {
 
     // ---------------------------------------------------------- connections
 
-    fn connections(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn connections(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+        let query = self.field(InputField::ConnFilter).text.trim().to_owned();
         let mut connections = self.snapshot.connections.connections.clone();
         // The header advertises download-first ordering, so the rows must
         // actually follow it: the biggest current bandwidth users lead.
         connections.sort_by_key(|connection| std::cmp::Reverse(connection.download));
+        let total = connections.len();
+        if !query.is_empty() {
+            connections.retain(|connection| connection.matches(&query));
+        }
         let rows: Vec<gpui::AnyElement> = connections
             .iter()
             .enumerate()
@@ -1687,15 +2019,16 @@ impl Sbgui {
                     .child(
                         div()
                             .flex_1()
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(MUTED))
-                                    .child(format!(
-                                        "{} 条活动连接 · 按下载流量排序",
+                            .child(div().text_size(px(11.0)).text_color(rgb(MUTED)).child(
+                                if query.is_empty() {
+                                    format!("{total} 条活动连接 · 按下载流量排序")
+                                } else {
+                                    format!(
+                                        "匹配 {} / {total} 条 · 按下载流量排序",
                                         connections.len()
-                                    )),
-                            )
+                                    )
+                                },
+                            ))
                             .child(
                                 div()
                                     .mt(px(3.0))
@@ -1704,6 +2037,16 @@ impl Sbgui {
                                     .child("行右侧按钮可断开单条连接"),
                             ),
                     )
+                    .child(self.text_field(
+                        FieldSpec {
+                            field: InputField::ConnFilter,
+                            id: "conn-filter",
+                            placeholder: "按主机 / 目标 / 规则筛选…",
+                            width: 240.0,
+                        },
+                        window,
+                        cx,
+                    ))
                     .child(self.action(
                         "close-all",
                         "关闭全部",
@@ -1724,7 +2067,7 @@ impl Sbgui {
                             .child(div().flex().flex_col().gap(px(4.0)).children(rows)),
                     ),
             )
-            .children(if connections.is_empty() {
+            .children(if total == 0 {
                 Some(empty_state(
                     "暂无活动连接",
                     "内核运行后，经过本机代理的连接会实时显示在这里。",
@@ -1735,6 +2078,13 @@ impl Sbgui {
                     },
                     cx,
                 ))
+            } else if connections.is_empty() {
+                Some(empty_state(
+                    "无匹配连接",
+                    "换个关键字，或按 Esc 清空筛选。",
+                    None,
+                    cx,
+                ))
             } else {
                 None
             })
@@ -1742,9 +2092,34 @@ impl Sbgui {
 
     // ----------------------------------------------------------------- logs
 
-    fn logs(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let kernel: Vec<String> = self.snapshot.core_logs.iter().cloned().collect();
-        let events: Vec<String> = self.snapshot.events.iter().cloned().collect();
+    fn logs(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+        let query = self.field(InputField::LogQuery).text.trim().to_lowercase();
+        let level = self.log_level;
+        let keep = |line: &str| -> bool {
+            if !query.is_empty() && !line.to_lowercase().contains(&query) {
+                return false;
+            }
+            match level {
+                LogLevelFilter::All => true,
+                LogLevelFilter::Info => log_level_rank(line) >= 1,
+                LogLevelFilter::Warn => log_level_rank(line) >= 2,
+                LogLevelFilter::Error => log_level_rank(line) >= 3,
+            }
+        };
+        let kernel: Vec<String> = self
+            .snapshot
+            .core_logs
+            .iter()
+            .filter(|line| keep(line))
+            .cloned()
+            .collect();
+        let events: Vec<String> = self
+            .snapshot
+            .events
+            .iter()
+            .filter(|line| keep(line))
+            .cloned()
+            .collect();
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         for (index, line) in kernel.iter().rev().take(180).rev().enumerate() {
             rows.push(log_row(index, "sing-box", line));
@@ -1752,6 +2127,34 @@ impl Sbgui {
         let event_offset = rows.len();
         for (index, line) in events.iter().rev().take(60).rev().enumerate() {
             rows.push(log_row(event_offset + index, "客户端", line));
+        }
+        let mut level_chips: Vec<gpui::AnyElement> = Vec::new();
+        for candidate in [
+            LogLevelFilter::All,
+            LogLevelFilter::Info,
+            LogLevelFilter::Warn,
+            LogLevelFilter::Error,
+        ] {
+            let active = self.log_level == candidate;
+            level_chips.push(
+                div()
+                    .id(format!("log-level-{:?}", candidate))
+                    .px(px(10.0))
+                    .py(px(4.0))
+                    .rounded(px(12.0))
+                    .text_size(px(11.0))
+                    .cursor_pointer()
+                    .bg(rgb(if active { BLUE_2 } else { SURFACE_2 }))
+                    .border_1()
+                    .border_color(rgb(if active { CYAN } else { BORDER }))
+                    .text_color(rgb(if active { CYAN } else { MUTED }))
+                    .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                        view.log_level = candidate;
+                        cx.notify();
+                    }))
+                    .child(candidate.label())
+                    .into_any_element(),
+            );
         }
         div()
             .flex()
@@ -1768,15 +2171,30 @@ impl Sbgui {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(8.0))
-                            .child(pill("内核日志", CYAN))
-                            .child(pill("客户端事件", MUTED)),
+                            .gap(px(6.0))
+                            .children(level_chips),
                     )
                     .child(
                         div()
-                            .text_size(px(11.0))
-                            .text_color(rgb(MUTED))
-                            .child(format!("{} 行 · cache/core.log", rows.len())),
+                            .flex()
+                            .items_center()
+                            .gap(px(12.0))
+                            .child(self.text_field(
+                                FieldSpec {
+                                    field: InputField::LogQuery,
+                                    id: "log-query",
+                                    placeholder: "按关键字过滤日志…",
+                                    width: 240.0,
+                                },
+                                window,
+                                cx,
+                            ))
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(MUTED))
+                                    .child(format!("{} 行", rows.len())),
+                            ),
                     ),
             )
             .child(
@@ -1836,7 +2254,7 @@ impl Sbgui {
 
     // ------------------------------------------------------------- settings
 
-    fn settings(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn settings(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let snapshot = &self.snapshot;
         let profiles = snapshot.profiles.clone();
         let profile_rows: Vec<gpui::AnyElement> = profiles
@@ -1967,14 +2385,35 @@ impl Sbgui {
                                     "缺失"
                                 },
                             ))
-                            .child(setting_line(
-                                "镜像前缀",
-                                if snapshot.settings.mirror.is_empty() {
-                                    "直连"
-                                } else {
-                                    &snapshot.settings.mirror
+                            .child(self.edit_line(
+                                "固定版本",
+                                FieldSpec {
+                                    field: InputField::CoreVersion,
+                                    id: "core-version-field",
+                                    placeholder: "留空跟随最新",
+                                    width: 150.0,
                                 },
+                                window,
+                                cx,
                             ))
+                            .child(self.edit_line(
+                                "镜像前缀",
+                                FieldSpec {
+                                    field: InputField::Mirror,
+                                    id: "mirror-field",
+                                    placeholder: "直连",
+                                    width: 150.0,
+                                },
+                                window,
+                                cx,
+                            ))
+                            .child(
+                                div()
+                                    .mt(px(6.0))
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(FAINT))
+                                    .child("输入后按 Enter 保存，Esc 还原。"),
+                            )
                             .child(div().mt(px(12.0)).child(self.action(
                                 "download-core",
                                 "检查并更新内核",
@@ -1992,11 +2431,28 @@ impl Sbgui {
                     .child(
                         settings_panel("端口与出站")
                             .child(setting_line("流量模式", snapshot.traffic_mode.label()))
-                            .child(setting_line(
+                            .child(self.edit_line(
                                 "混合端口",
-                                &snapshot.settings.mixed_port.to_string(),
+                                FieldSpec {
+                                    field: InputField::MixedPort,
+                                    id: "mixed-port-field",
+                                    placeholder: "2080",
+                                    width: 110.0,
+                                },
+                                window,
+                                cx,
                             ))
-                            .child(setting_line("延迟地址", &snapshot.settings.test_url))
+                            .child(self.edit_line(
+                                "延迟地址",
+                                FieldSpec {
+                                    field: InputField::TestUrl,
+                                    id: "test-url-field",
+                                    placeholder: "https://…",
+                                    width: 110.0,
+                                },
+                                window,
+                                cx,
+                            ))
                             .child(setting_line("出站模式", snapshot.outbound_mode.label()))
                             .child(
                                 div()
@@ -2082,14 +2538,26 @@ impl Sbgui {
                                     ..Default::default()
                                 },
                             ))
-                            .child(setting_line(
-                                "订阅自动更新",
-                                &if snapshot.settings.auto_update_minutes == 0 {
-                                    "关闭".to_owned()
-                                } else {
-                                    format!("每 {} 分钟", snapshot.settings.auto_update_minutes)
+                            .child(self.edit_line(
+                                "自动更新间隔（分钟）",
+                                FieldSpec {
+                                    field: InputField::AutoUpdateMinutes,
+                                    id: "auto-update-field",
+                                    placeholder: "0 = 关闭",
+                                    width: 110.0,
                                 },
+                                window,
+                                cx,
                             ))
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(FAINT))
+                                    .child(format!(
+                                        "当前每 {} 分钟自动更新；0 为关闭。输入后按 Enter 保存。",
+                                        snapshot.settings.auto_update_minutes
+                                    )),
+                            )
                             .child(
                                 div()
                                     .mt(px(10.0))
@@ -2972,7 +3440,7 @@ fn main() {
                     apply_windows_window_chrome(window);
 
                     let view = cx.new(|cx| {
-                        let view = Sbgui::new(controller, ui_data_dir);
+                        let view = Sbgui::new(controller, ui_data_dir, cx);
                         let refresh = cx.spawn(async move |this, cx| {
                             loop {
                                 cx.background_executor()
@@ -3031,4 +3499,63 @@ fn apply_windows_window_chrome(window: &Window) {
             std::mem::size_of_val(&preference) as u32,
         )
     };
+}
+
+/// Parses the mixed-inbound port. 0 would point the system proxy nowhere, so
+/// it is rejected; the engine rejects the change anyway while the core runs.
+fn parse_port(text: &str) -> Option<u16> {
+    text.trim().parse::<u16>().ok().filter(|port| *port > 0)
+}
+
+/// Parses the auto-update interval in minutes; 0 ("off") is a valid value.
+fn parse_count(text: &str) -> Option<u64> {
+    text.trim().parse::<u64>().ok()
+}
+
+/// Ranks a log line by its level marker: 0 = no marker, 1 = info, 2 = warn,
+/// 3 = error. Kernel lines carry sing-box's `INFO`/`WARN`/`ERROR` prefixes;
+/// client events embed Chinese words like 失败.
+fn log_level_rank(line: &str) -> u8 {
+    let lower = line.to_lowercase();
+    if lower.contains("error") || line.contains("失败") || line.contains("错误") {
+        3
+    } else if lower.contains("warn") {
+        2
+    } else if lower.contains("info") {
+        1
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_port_accepts_real_ports_and_rejects_zero_or_garbage() {
+        assert_eq!(parse_port("2080"), Some(2080));
+        assert_eq!(parse_port(" 7890 "), Some(7890));
+        assert_eq!(parse_port("0"), None);
+        assert_eq!(parse_port(""), None);
+        assert_eq!(parse_port("abc"), None);
+        assert_eq!(parse_port("99999"), None);
+    }
+
+    #[test]
+    fn parse_count_accepts_zero_for_off() {
+        assert_eq!(parse_count("0"), Some(0));
+        assert_eq!(parse_count("30"), Some(30));
+        assert_eq!(parse_count("-1"), None);
+        assert_eq!(parse_count(""), None);
+    }
+
+    #[test]
+    fn log_level_rank_orders_lines_by_marker() {
+        assert_eq!(log_level_rank("ERROR[0001] inbound broken"), 3);
+        assert_eq!(log_level_rank("导入订阅失败: timeout"), 3);
+        assert_eq!(log_level_rank("WARN[0002] slow dial"), 2);
+        assert_eq!(log_level_rank("INFO[0003] started"), 1);
+        assert_eq!(log_level_rank("内核已启动"), 0);
+    }
 }
