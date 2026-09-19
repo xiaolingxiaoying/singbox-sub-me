@@ -69,6 +69,136 @@ pub struct TrafficPoint {
     pub down: u64,
 }
 
+/// One routing rule of the active configuration, rendered for the UIs' rules
+/// views. `outbound` is the target outbound tag, or the rule's `action` when
+/// the rule uses a non-forward action (sing-box 1.11+).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteRuleSnapshot {
+    pub matcher: String,
+    pub outbound: String,
+}
+
+/// One `route.rule_set` entry of the active configuration.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleSetSummary {
+    pub tag: String,
+    pub url: String,
+    /// `remote` or `local`, as declared in the configuration.
+    pub kind: String,
+}
+
+/// Extracts the routing rules and rule-set summaries the UIs' rules views
+/// render. Matching conditions collapse into one human line; both clients
+/// previously parsed this themselves from `cache/active-config.json`, so the
+/// engine now publishes it once and the UIs stay identical.
+pub fn parse_route_rules(config_text: &str) -> (Vec<RouteRuleSnapshot>, Vec<RuleSetSummary>) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(config_text) else {
+        return (Vec::new(), Vec::new());
+    };
+    let Some(route) = value.get("route") else {
+        return (Vec::new(), Vec::new());
+    };
+    let rule_sets = route
+        .get("rule_set")
+        .and_then(|sets| sets.as_array())
+        .map(|sets| {
+            sets.iter()
+                .map(|set| RuleSetSummary {
+                    tag: set
+                        .get("tag")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("?")
+                        .to_owned(),
+                    url: set
+                        .get("url")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    kind: set
+                        .get("type")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("remote")
+                        .to_owned(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut rules = Vec::new();
+    if let Some(list) = route.get("rules").and_then(|rules| rules.as_array()) {
+        for rule in list {
+            let outbound = rule
+                .get("outbound")
+                .or_else(|| rule.get("action"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("未指定")
+                .to_owned();
+            rules.push(RouteRuleSnapshot {
+                matcher: rule_matcher(rule),
+                outbound,
+            });
+        }
+    }
+    if let Some(final_outbound) = route.get("final").and_then(|value| value.as_str()) {
+        rules.push(RouteRuleSnapshot {
+            matcher: "其他未命中流量".to_owned(),
+            outbound: final_outbound.to_owned(),
+        });
+    }
+    (rules, rule_sets)
+}
+
+/// One human-readable line describing a rule's matching conditions.
+fn rule_matcher(rule: &serde_json::Value) -> String {
+    let list_value = |key: &str| {
+        rule.get(key)
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .collect::<Vec<_>>()
+                    .join("、")
+            })
+    };
+    let plain_value = |key: &str| {
+        rule.get(key)
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+    };
+    if let Some(value) = list_value("domain_suffix") {
+        return format!("域名后缀 · {value}");
+    }
+    if let Some(value) = list_value("domain") {
+        return format!("域名 · {value}");
+    }
+    if let Some(value) = list_value("domain_keyword") {
+        return format!("域名关键字 · {value}");
+    }
+    if let Some(value) = list_value("rule_set") {
+        return format!("规则集 · {value}");
+    }
+    if let Some(value) = list_value("ip_cidr") {
+        return format!("网段 · {value}");
+    }
+    if rule.get("ip_is_private").is_some() {
+        return "私有地址".to_owned();
+    }
+    if let Some(protocol) = plain_value("protocol") {
+        return format!("协议 · {protocol}");
+    }
+    if let Some(network) = plain_value("network") {
+        return format!("网络 · {network}");
+    }
+    if let Some(port) = plain_value("port").or_else(|| {
+        rule.get("port")
+            .and_then(|value| value.as_u64())
+            .map(|value| value.to_string())
+    }) {
+        return format!("端口 · {port}");
+    }
+    "其他匹配条件".to_owned()
+}
+
 /// The UI-facing view of the persistent preferences that clients can change.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingsSnapshot {
@@ -120,6 +250,17 @@ pub struct ClientSnapshot {
     pub events: VecDeque<String>,
     pub core_version: Option<String>,
     pub core_installed: bool,
+    /// The version the running core reports through clash_api; `None` while
+    /// the core is stopped. Distinct from `core_version`, the installed
+    /// binary's `sing-box version` string.
+    pub core_runtime_version: Option<String>,
+    /// The core's current heap usage in bytes, from the clash_api `/memory`
+    /// endpoint; 0 while the core is stopped.
+    pub memory_used: u64,
+    /// The routing rules and rule-set sources of the active configuration,
+    /// published by the engine so both UIs render the same rules view.
+    pub rules: Vec<RouteRuleSnapshot>,
+    pub rule_sets: Vec<RuleSetSummary>,
     pub subscription_usage: Option<SubscriptionUserinfo>,
     pub settings: SettingsSnapshot,
     pub status: String,
@@ -152,6 +293,10 @@ impl Default for ClientSnapshot {
             events: VecDeque::new(),
             core_version: None,
             core_installed: false,
+            core_runtime_version: None,
+            memory_used: 0,
+            rules: Vec::new(),
+            rule_sets: Vec::new(),
             subscription_usage: None,
             settings: SettingsSnapshot::default(),
             status: "就绪。先导入订阅，再启动内核。".to_owned(),
@@ -240,5 +385,51 @@ mod tests {
             ..Default::default()
         };
         assert!(!selector.is_auto());
+    }
+
+    #[test]
+    fn parse_route_rules_covers_matchers_rule_sets_and_final() {
+        let config = serde_json::json!({
+            "route": {
+                "rule_set": [
+                    {"type": "remote", "tag": "geoip-cn", "url": "https://example/srs"},
+                    {"type": "local", "tag": "lan"}
+                ],
+                "rules": [
+                    {"rule_set": ["geoip-cn"], "outbound": "🚀节点选择"},
+                    {"domain_suffix": [".cn"], "outbound": "🎯直连"},
+                    {"ip_is_private": "always", "outbound": "🎯直连"},
+                    {"protocol": "dns", "action": "hijack-dns"},
+                    {"port": 443, "outbound": "🚀节点选择"}
+                ],
+                "final": "🚀节点选择"
+            }
+        })
+        .to_string();
+        let (rules, rule_sets) = parse_route_rules(&config);
+        assert_eq!(rule_sets.len(), 2);
+        assert_eq!(rule_sets[0].tag, "geoip-cn");
+        assert_eq!(rule_sets[0].kind, "remote");
+        assert_eq!(rule_sets[1].kind, "local");
+        assert_eq!(rules.len(), 6);
+        assert_eq!(rules[0].matcher, "规则集 · geoip-cn");
+        assert_eq!(rules[0].outbound, "🚀节点选择");
+        assert!(rules[1].matcher.starts_with("域名后缀"));
+        assert_eq!(rules[2].matcher, "私有地址");
+        assert_eq!(rules[3].matcher, "协议 · dns");
+        assert_eq!(rules[3].outbound, "hijack-dns");
+        assert_eq!(rules[4].matcher, "端口 · 443");
+        assert_eq!(rules[5].matcher, "其他未命中流量");
+        assert_eq!(rules[5].outbound, "🚀节点选择");
+    }
+
+    #[test]
+    fn parse_route_rules_tolerates_invalid_or_empty_configs() {
+        assert_eq!(parse_route_rules("not json"), (Vec::new(), Vec::new()));
+        assert_eq!(parse_route_rules("{}"), (Vec::new(), Vec::new()));
+        assert_eq!(
+            parse_route_rules(r#"{"route":{}}"#),
+            (Vec::new(), Vec::new())
+        );
     }
 }

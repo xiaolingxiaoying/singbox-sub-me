@@ -18,7 +18,7 @@ use crate::clash_api::ClashApi;
 use crate::settings::{self, Profiles, Settings};
 use crate::state::{ClientSnapshot, ProfileSummary, ProxyGroupSnapshot};
 use crate::system_proxy::{self, TrafficMode};
-use crate::{ClientCommand, ClientEvent, core, subscription};
+use crate::{ClientCommand, ClientError, ClientEvent, core, subscription};
 
 /// How often the engine wakes up to poll the core and check timers.
 const TICK: Duration = Duration::from_millis(500);
@@ -87,7 +87,12 @@ struct Engine {
     api: ClashApi,
     child: Option<core::CoreHandle>,
     snapshot: ClientSnapshot,
+    /// Delays measured by this client's own latency tests; they override the
+    /// core-reported history in the UI display.
     delays: HashMap<String, u64>,
+    /// Last known delays the core itself reports through `/proxies` node
+    /// history, so the node list shows latencies before any manual test.
+    reported_delays: HashMap<String, u64>,
     failed: Vec<String>,
     last_traffic_at: Instant,
     last_proxies_at: Instant,
@@ -123,6 +128,13 @@ impl Engine {
         } else {
             "就绪。先下载 sing-box 内核，再导入订阅。".to_owned()
         };
+        // The active configuration from a previous run is still the rules
+        // source until the next start rewrites it.
+        if let Ok(text) = std::fs::read_to_string(dir.join("cache/active-config.json")) {
+            let (rules, rule_sets) = crate::state::parse_route_rules(&text);
+            snapshot.rules = rules;
+            snapshot.rule_sets = rule_sets;
+        }
         Self {
             dir,
             settings,
@@ -131,6 +143,7 @@ impl Engine {
             child: None,
             snapshot,
             delays: HashMap::new(),
+            reported_delays: HashMap::new(),
             failed: Vec::new(),
             last_traffic_at: Instant::now() - TRAFFIC_EVERY,
             last_proxies_at: Instant::now() - PROXIES_EVERY,
@@ -155,7 +168,7 @@ impl Engine {
             && self.snapshot.core_installed
             && self.profiles.active_profile().is_some()
         {
-            self.snapshot.busy = Some("AutoStart".to_owned());
+            self.snapshot.busy = Some("自动启动内核".to_owned());
             let _ = self
                 .event_tx
                 .try_send(ClientEvent::OperationStarted("自动启动内核".into()));
@@ -163,12 +176,10 @@ impl Engine {
                 let message = error.to_string();
                 self.snapshot.status = format!("自动启动失败: {message}");
                 self.snapshot.push_event(self.snapshot.status.clone());
-                let _ = self
-                    .event_tx
-                    .try_send(ClientEvent::Error(crate::ClientError {
-                        operation: "自动启动内核".into(),
-                        message,
-                    }));
+                let _ = self.event_tx.try_send(ClientEvent::Error(ClientError {
+                    operation: "自动启动内核".into(),
+                    message,
+                }));
             }
             self.snapshot.busy = None;
             self.publish(&shared);
@@ -188,7 +199,7 @@ impl Engine {
             let Some(command) = command else {
                 break;
             };
-            let label = format!("{command:?}");
+            let label = command.label();
             self.snapshot.busy = Some(label.clone());
             let _ = self
                 .event_tx
@@ -203,12 +214,10 @@ impl Engine {
                     let message = error.to_string();
                     self.snapshot.status = format!("{label} 失败: {message}");
                     self.snapshot.push_event(self.snapshot.status.clone());
-                    let _ = self
-                        .event_tx
-                        .try_send(ClientEvent::Error(crate::ClientError {
-                            operation: label,
-                            message,
-                        }));
+                    let _ = self.event_tx.try_send(ClientEvent::Error(ClientError {
+                        operation: label,
+                        message,
+                    }));
                 }
             }
             self.snapshot.busy = None;
@@ -313,7 +322,11 @@ impl Engine {
                 Ok(())
             }
             ClientCommand::UpdateSubscription => self.update_subscription().await,
-            ClientCommand::ImportSubscription(url) => self.import_subscription(url).await,
+            ClientCommand::ImportSubscription { name, url } => {
+                self.import_subscription(name, url).await
+            }
+            ClientCommand::ImportProfileFile(path) => self.import_profile_file(path).await,
+            ClientCommand::SetProfileUrl { name, url } => self.set_profile_url(name, url).await,
             ClientCommand::RemoveProfile(name) => self.remove_profile(&name).await,
             ClientCommand::DownloadCore => {
                 self.snapshot.status = "正在下载 sing-box 内核…".to_owned();
@@ -390,7 +403,11 @@ impl Engine {
             .context("读取订阅缓存失败；先更新订阅")?;
         let adapted = core::adapt_inbounds(&raw, mode, self.settings.mixed_port)?;
         let active = self.dir.join("cache/active-config.json");
-        tokio::fs::write(&active, adapted).await?;
+        // The rewritten configuration is the rules view's source of truth.
+        let (rules, rule_sets) = crate::state::parse_route_rules(&adapted);
+        self.snapshot.rules = rules;
+        self.snapshot.rule_sets = rule_sets;
+        tokio::fs::write(&active, adapted.as_bytes()).await?;
         core::check_config(&core_path, &active)?;
         let handle = core::start(&core_path, &active, &self.dir.join("cache/core.log")).await?;
         self.child = Some(handle);
@@ -403,6 +420,7 @@ impl Engine {
                 self.restart_attempts = 0;
                 self.restart_at = None;
                 self.snapshot.restart_attempts = 0;
+                self.snapshot.core_runtime_version = self.api.version().await.ok();
                 let mut status = "内核已启动".to_owned();
                 if mode == TrafficMode::SystemProxy && self.settings.auto_system_proxy {
                     match system_proxy::enable(&self.dir, self.settings.mixed_port) {
@@ -446,6 +464,9 @@ impl Engine {
         if let Some(mut child) = self.child.take() {
             let _ = child.child.kill().await;
         }
+        self.snapshot.core_runtime_version = None;
+        self.snapshot.memory_used = 0;
+        self.snapshot.traffic_history.clear();
         self.snapshot.proxy_groups.clear();
         self.snapshot.connections = Default::default();
         self.snapshot.active_connections = 0;
@@ -459,6 +480,12 @@ impl Engine {
             self.snapshot.system_proxy_enabled = false;
             self.note("系统代理已关闭");
         } else {
+            if self.snapshot.traffic_mode == TrafficMode::Tun {
+                anyhow::bail!("当前是 TUN 模式，系统代理不适用；切回系统代理模式后再开启");
+            }
+            if !self.snapshot.core_running {
+                anyhow::bail!("内核未运行；先启动内核，再开启系统代理");
+            }
             system_proxy::enable(&self.dir, self.settings.mixed_port)?;
             self.snapshot.system_proxy_enabled = true;
             self.note(format!(
@@ -557,7 +584,7 @@ impl Engine {
         }
     }
 
-    async fn import_subscription(&mut self, url: String) -> Result<()> {
+    async fn import_subscription(&mut self, name: Option<String>, url: String) -> Result<()> {
         let source = url.trim().to_owned();
         if !(source.starts_with("https://") || source.starts_with("http://")) {
             anyhow::bail!("订阅地址必须是有效的 HTTP/HTTPS 链接");
@@ -585,18 +612,26 @@ impl Engine {
             return self.update_subscription().await;
         }
 
-        let mut index = self.profiles.profiles.len() + 1;
-        let name = loop {
-            let candidate = format!("订阅 {index}");
-            if !self
-                .profiles
-                .profiles
-                .iter()
-                .any(|profile| profile.name == candidate)
-            {
-                break candidate;
+        let name = match name {
+            Some(name) if !name.trim().is_empty() => unique_profile_name(
+                name.trim(),
+                self.profiles.profiles.iter().map(|p| p.name.as_str()),
+            ),
+            _ => {
+                let mut index = self.profiles.profiles.len() + 1;
+                loop {
+                    let candidate = format!("订阅 {index}");
+                    if !self
+                        .profiles
+                        .profiles
+                        .iter()
+                        .any(|profile| profile.name == candidate)
+                    {
+                        break candidate;
+                    }
+                    index += 1;
+                }
             }
-            index += 1;
         };
         self.profiles.profiles.push(crate::settings::Profile {
             name: name.clone(),
@@ -613,6 +648,70 @@ impl Engine {
             .map(|profile| ProfileSummary::from_profile(profile, true));
         self.note(format!("已导入 {name}，正在拉取订阅"));
         self.update_subscription().await
+    }
+
+    /// Imports a local sing-box JSON configuration as a profile without a
+    /// subscription URL. The parsed body is cached immediately, so the
+    /// profile is startable without network access.
+    async fn import_profile_file(&mut self, path_text: String) -> Result<()> {
+        let path = PathBuf::from(path_text.trim());
+        if !path.is_file() {
+            anyhow::bail!("本地文件不存在或不可读：{}", path.display());
+        }
+        let body = tokio::fs::read_to_string(&path)
+            .await
+            .context("读取本地订阅文件失败")?;
+        let parsed = subscription::parse(&body)?;
+        let name = unique_profile_name(
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| !stem.is_empty())
+                .unwrap_or("本地订阅"),
+            self.profiles.profiles.iter().map(|p| p.name.as_str()),
+        );
+        let cache = settings::profile_cache_path(&self.dir, &name);
+        tokio::fs::write(&cache, &parsed.raw).await?;
+        self.profiles.profiles.push(crate::settings::Profile {
+            name: name.clone(),
+            url: String::new(),
+            source: format!("file:{}", path.display()),
+            last_updated: now_epoch(),
+        });
+        self.profiles.active = Some(name.clone());
+        self.profiles.save(&self.dir)?;
+        self.snapshot.profiles = profile_summaries(&self.profiles);
+        self.snapshot.active_profile = self
+            .profiles
+            .active_profile()
+            .map(|profile| ProfileSummary::from_profile(profile, true));
+        self.note(format!(
+            "已从文件导入并激活：{name}（{} 个节点）",
+            parsed.nodes.len()
+        ));
+        Ok(())
+    }
+
+    /// Replaces one profile's subscription link with a renormalized one.
+    async fn set_profile_url(&mut self, name: String, url: String) -> Result<()> {
+        let source = url.trim().to_owned();
+        if !(source.starts_with("https://") || source.starts_with("http://")) {
+            anyhow::bail!("订阅地址必须是有效的 HTTP/HTTPS 链接");
+        }
+        let normalized = subscription::normalize_url(&source);
+        let Some(profile) = self
+            .profiles
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.name == name)
+        else {
+            anyhow::bail!("订阅档案不存在: {name}");
+        };
+        profile.url = normalized;
+        profile.source = source;
+        self.profiles.save(&self.dir)?;
+        self.snapshot.profiles = profile_summaries(&self.profiles);
+        self.note(format!("已更新档案 {name} 的订阅链接"));
+        Ok(())
     }
 
     async fn remove_profile(&mut self, name: &str) -> Result<()> {
@@ -662,6 +761,10 @@ impl Engine {
             if now.duration_since(self.last_traffic_at) >= TRAFFIC_EVERY {
                 self.last_traffic_at = now;
                 self.refresh_traffic().await;
+                match self.api.memory().await {
+                    Ok(memory) => self.snapshot.memory_used = memory,
+                    Err(_) => self.snapshot.memory_used = 0,
+                }
             }
             if now.duration_since(self.last_proxies_at) >= PROXIES_EVERY {
                 self.last_proxies_at = now;
@@ -729,11 +832,24 @@ impl Engine {
     }
 
     async fn refresh_proxies(&mut self) -> Result<()> {
-        let (groups, _nodes) = self.api.proxies().await?;
+        let (groups, nodes) = self.api.proxies().await?;
+        // The core reports each node's most recent latency result through its
+        // `/proxies` history; surfacing it means the node list shows usable
+        // delays before the user runs any manual test.
+        self.reported_delays = nodes
+            .iter()
+            .filter_map(|node| {
+                node.history
+                    .last()
+                    .filter(|entry| entry.delay > 0)
+                    .map(|entry| (node.name.clone(), entry.delay))
+            })
+            .collect();
+        let merged = self.merged_delays();
         let mut snapshots: Vec<ProxyGroupSnapshot> =
             groups.into_iter().map(ProxyGroupSnapshot::from).collect();
         for group in &mut snapshots {
-            group.delays = self.delays.clone();
+            group.delays = merged.clone();
             group.failed = self.failed.clone();
         }
         self.snapshot.current_node = snapshots
@@ -746,9 +862,18 @@ impl Engine {
         Ok(())
     }
 
+    /// Node delays as displayed: core-reported history as the baseline with
+    /// this client's own latency tests taking precedence.
+    fn merged_delays(&self) -> HashMap<String, u64> {
+        let mut merged = self.reported_delays.clone();
+        merged.extend(self.delays.clone());
+        merged
+    }
+
     fn apply_delays(&mut self) {
+        let merged = self.merged_delays();
         for group in &mut self.snapshot.proxy_groups {
-            group.delays = self.delays.clone();
+            group.delays = merged.clone();
             group.failed = self.failed.clone();
         }
     }
@@ -775,6 +900,8 @@ impl Engine {
 
     fn schedule_restart(&mut self) {
         self.snapshot.core_running = false;
+        self.snapshot.core_runtime_version = None;
+        self.snapshot.memory_used = 0;
         self.snapshot.proxy_groups.clear();
         self.snapshot.connections = Default::default();
         self.snapshot.active_connections = 0;
@@ -846,6 +973,22 @@ fn profile_summaries(profiles: &Profiles) -> Vec<ProfileSummary> {
             ProfileSummary::from_profile(profile, profiles.active.as_deref() == Some(&profile.name))
         })
         .collect()
+}
+
+/// Returns `base`, or `base 2` / `base 3` … until no existing name collides,
+/// so a user-typed or filename-derived profile label never clobbers another.
+fn unique_profile_name<'a>(base: &str, existing: impl Iterator<Item = &'a str>) -> String {
+    let existing: Vec<String> = existing.map(str::to_owned).collect();
+    if !existing.iter().any(|name| name == base) {
+        return base.to_owned();
+    }
+    for index in 2.. {
+        let candidate = format!("{base} {index}");
+        if !existing.iter().any(|name| name == &candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("an index always frees the name")
 }
 
 fn now_epoch() -> u64 {

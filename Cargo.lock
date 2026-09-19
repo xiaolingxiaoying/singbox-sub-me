@@ -5667,20 +5667,10 @@ dependencies = [
  "clap",
  "client-core",
  "crossterm",
- "dirs",
- "flate2",
  "futures-util",
  "ratatui",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tar",
  "tempfile",
  "tokio",
- "toml 0.8.23",
- "winreg 0.52.0",
- "zip",
 ]
 
 [[package]]

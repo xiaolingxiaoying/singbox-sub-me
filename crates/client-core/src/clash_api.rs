@@ -331,6 +331,40 @@ impl ClashApi {
         Ok(())
     }
 
+    /// Reads one sample from the `/memory` endpoint: the heap bytes the core
+    /// currently uses. sing-box streams this the same way as `/traffic`, so
+    /// only the first complete object is read.
+    pub async fn memory(&self) -> Result<u64> {
+        let mut response = self
+            .client
+            .get(format!("{}/memory", self.base))
+            .send()
+            .await?
+            .error_for_status()
+            .context("clash_api memory request failed")?;
+        let mut buffer: Vec<u8> = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1500);
+        loop {
+            match tokio::time::timeout_at(deadline, response.chunk()).await {
+                Ok(Ok(Some(chunk))) => {
+                    buffer.extend_from_slice(&chunk);
+                    if let Some(value) = first_json_object(&buffer) {
+                        return value
+                            .get("inuse")
+                            .and_then(|v| v.as_u64())
+                            .context("the memory response lacks an inuse value");
+                    }
+                }
+                Ok(Ok(None)) => break,
+                Ok(Err(error)) => return Err(error).context("reading the memory stream"),
+                Err(_) => break,
+            }
+        }
+        first_json_object(&buffer)
+            .and_then(|value| value.get("inuse").and_then(|v| v.as_u64()))
+            .context("the memory stream produced no complete sample")
+    }
+
     /// Reads the first sample from the streaming `/traffic` endpoint. The
     /// endpoint never closes, so only the first complete `{up,down}` object is
     /// read (bounded by a short deadline) instead of awaiting the whole body.
@@ -368,9 +402,9 @@ pub struct TrafficSample {
     pub down: u64,
 }
 
-/// Extracts the first complete JSON object from a partial stream and reads its
-/// `up`/`down` fields. Tolerates leading whitespace and concatenated samples.
-fn first_traffic_sample(buffer: &[u8]) -> Option<TrafficSample> {
+/// Extracts the first complete JSON object from a partial stream.
+/// Tolerates leading whitespace and concatenated samples.
+fn first_json_object(buffer: &[u8]) -> Option<serde_json::Value> {
     let text = std::str::from_utf8(buffer).ok()?;
     let start = text.find('{')?;
     let mut depth = 0usize;
@@ -388,7 +422,13 @@ fn first_traffic_sample(buffer: &[u8]) -> Option<TrafficSample> {
             _ => {}
         }
     }
-    let value: serde_json::Value = serde_json::from_str(&text[start..end?]).ok()?;
+    serde_json::from_str(&text[start..end?]).ok()
+}
+
+/// Extracts the first complete JSON object from a partial stream and reads its
+/// `up`/`down` fields. Tolerates leading whitespace and concatenated samples.
+fn first_traffic_sample(buffer: &[u8]) -> Option<TrafficSample> {
+    let value = first_json_object(buffer)?;
     Some(TrafficSample {
         up: value.get("up").and_then(|v| v.as_u64()).unwrap_or(0),
         down: value.get("down").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -502,6 +542,17 @@ mod tests {
         .await;
         let sample = api(port).traffic().await.expect("traffic");
         assert_eq!(sample, TrafficSample { up: 10, down: 20 });
+    }
+
+    #[tokio::test]
+    async fn memory_reads_the_inuse_bytes_from_the_streamed_endpoint() {
+        let port = spawn_server(vec![(
+            "GET",
+            "/memory",
+            r#"{"inuse":1048576,"oslimit":0}{"inuse":2}"#,
+        )])
+        .await;
+        assert_eq!(api(port).memory().await.expect("memory"), 1_048_576);
     }
 
     #[tokio::test]

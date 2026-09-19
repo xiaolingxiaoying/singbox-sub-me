@@ -24,7 +24,7 @@ use anyhow::Result;
 use client_core::clash_api::{Connection, OutboundMode};
 use client_core::command::SettingsPatch;
 use client_core::settings::{self, Profiles, Settings};
-use client_core::state::{ClientSnapshot, ProxyGroupSnapshot};
+use client_core::state::{ClientSnapshot, ProxyGroupSnapshot, RouteRuleSnapshot};
 use client_core::system_proxy;
 use client_core::system_proxy::TrafficMode;
 use client_core::{ClientCommand, ClientController};
@@ -364,7 +364,10 @@ impl Sbgui {
         if text.is_empty() {
             return;
         }
-        self.send(ClientCommand::ImportSubscription(text.clone()));
+        self.send(ClientCommand::ImportSubscription {
+            name: None,
+            url: text.clone(),
+        });
         // A non-HTTP line stays in the field so it can be fixed; the engine's
         // rejection shows up in the header status line either way.
         if text.starts_with("https://") || text.starts_with("http://") {
@@ -726,7 +729,7 @@ impl Sbgui {
                             Page::Dashboard => ("home", None),
                             Page::Subscriptions => ("subscription", Some(snapshot.profiles.len())),
                             Page::Proxies => ("nodes", Some(snapshot.proxy_groups.len())),
-                            Page::Rules => ("rules", Some(read_rule_rows(&self.data_dir).len())),
+                            Page::Rules => ("rules", Some(snapshot.rules.len())),
                             Page::Connections => ("network", Some(snapshot.active_connections)),
                             Page::Logs => ("logs", None),
                             Page::Settings => ("settings", None),
@@ -1341,6 +1344,20 @@ impl Sbgui {
                             human_bytes(snapshot.total_upload)
                         ),
                         false,
+                    ))
+                    .child(metric_card(
+                        "内核内存",
+                        if snapshot.core_running && snapshot.memory_used > 0 {
+                            human_bytes(snapshot.memory_used)
+                        } else {
+                            "-".to_owned()
+                        },
+                        match snapshot.core_runtime_version.as_deref() {
+                            Some(version) => format!("运行 {version}"),
+                            None if snapshot.core_running => "运行中".to_owned(),
+                            None => "未运行".to_owned(),
+                        },
+                        false,
                     )),
             )
             .child(
@@ -1457,7 +1474,10 @@ impl Sbgui {
                     .read_from_clipboard()
                     .and_then(|item| item.text())
                     .unwrap_or_default();
-                view.send(ClientCommand::ImportSubscription(text));
+                view.send(ClientCommand::ImportSubscription {
+                    name: None,
+                    url: text,
+                });
                 cx.notify();
             }))
             .child("从剪贴板导入");
@@ -1898,12 +1918,52 @@ impl Sbgui {
     // --------------------------------------------------------------- rules
 
     fn rules(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let rules = read_rule_rows(&self.data_dir);
+        let rules = &self.snapshot.rules;
+        let rule_sets = &self.snapshot.rule_sets;
         let count = rules.len();
         let rows: Vec<gpui::AnyElement> = rules
             .iter()
             .enumerate()
             .map(|(index, rule)| rule_row(index, rule))
+            .collect();
+        let rule_set_rows: Vec<gpui::AnyElement> = rule_sets
+            .iter()
+            .map(|set| {
+                div()
+                    .w_full()
+                    .px(px(15.0))
+                    .py(px(10.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(CYAN))
+                            .child(set.tag.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(FAINT))
+                            .child(set.kind.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(11.0))
+                            .text_color(rgb(MUTED))
+                            .truncate()
+                            .child(if set.url.is_empty() {
+                                "（本地规则集）".to_owned()
+                            } else {
+                                set.url.clone()
+                            }),
+                    )
+                    .into_any_element()
+            })
             .collect();
 
         div()
@@ -1939,6 +1999,26 @@ impl Sbgui {
                         ClientCommand::Refresh,
                     )),
             )
+            .children((!rule_set_rows.is_empty()).then(|| {
+                div()
+                    .id("rule-sets-panel")
+                    .w_full()
+                    .rounded(px(RADIUS))
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .px(px(15.0))
+                            .pt(px(10.0))
+                            .pb(px(6.0))
+                            .text_size(px(11.0))
+                            .text_color(rgb(MUTED))
+                            .child(format!("规则集 · {} 个", rule_set_rows.len())),
+                    )
+                    .children(rule_set_rows)
+            }))
             .child(
                 div()
                     .id("rules-panel")
@@ -1952,7 +2032,7 @@ impl Sbgui {
                         vec![
                             empty_state(
                                 "暂无可读规则",
-                                "启动内核或激活订阅后，这里会读取 cache/active-config.json。",
+                                "启动内核或激活订阅后，这里会显示当前配置的路由规则。",
                                 None,
                                 cx,
                             )
@@ -2656,24 +2736,11 @@ fn side_rate(label: &str, value: u64, color: u32) -> impl IntoElement {
 
 /// Renders the engine's `busy` label (a `ClientCommand` variant name, with
 /// any payload arguments attached) as a readable progress line.
+/// The engine labels every command in Chinese (`ClientCommand::label`), so
+/// the busy line only needs the ellipsis; failure statuses reuse the same
+/// wording ("{label} 失败: …") and are colored by the header status.
 fn busy_label(busy: &str) -> String {
-    let name = busy.split('(').next().unwrap_or(busy).trim();
-    let label = match name {
-        "StartCore" | "AutoStart" => "正在启动内核…",
-        "StopCore" => "正在停止内核…",
-        "RestartCore" => "正在重启内核…",
-        "UpdateSubscription" => "正在更新订阅…",
-        "ImportSubscription" => "正在导入订阅…",
-        "RemoveProfile" => "正在删除订阅…",
-        "DownloadCore" => "正在下载内核…",
-        "TestNode" => "正在测试节点延迟…",
-        "TestGroup" => "正在测试整组延迟…",
-        "CloseConnection" => "正在关闭连接…",
-        "CloseAllConnections" => "正在关闭全部连接…",
-        "Refresh" => "正在刷新状态…",
-        other => return format!("正在执行 {other}…"),
-    };
-    label.to_owned()
+    format!("{busy}…")
 }
 
 fn tone_colors(tone: Tone) -> (u32, u32, u32) {
@@ -2883,88 +2950,7 @@ fn rate(label: &str, value: u64, color: u32) -> impl IntoElement {
         )
 }
 
-#[derive(Clone, Debug)]
-struct RuleRow {
-    name: String,
-    matcher: String,
-    outbound: String,
-}
-
-fn read_rule_rows(data_dir: &Path) -> Vec<RuleRow> {
-    let active = data_dir.join("cache/active-config.json");
-    let Ok(text) = std::fs::read_to_string(active) else {
-        return Vec::new();
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return Vec::new();
-    };
-    let Some(route) = value.get("route") else {
-        return Vec::new();
-    };
-    let mut rows = Vec::new();
-    if let Some(rules) = route.get("rules").and_then(|rules| rules.as_array()) {
-        for (index, rule) in rules.iter().enumerate() {
-            let outbound = rule
-                .get("outbound")
-                .or_else(|| rule.get("action"))
-                .and_then(|value| value.as_str())
-                .unwrap_or("未指定")
-                .to_owned();
-            let matcher = rule_matcher(rule);
-            rows.push(RuleRow {
-                name: format!("路由规则 {:02}", index + 1),
-                matcher,
-                outbound,
-            });
-        }
-    }
-    if let Some(final_outbound) = route.get("final").and_then(|value| value.as_str()) {
-        rows.push(RuleRow {
-            name: "兜底规则".to_owned(),
-            matcher: "其他未命中流量".to_owned(),
-            outbound: final_outbound.to_owned(),
-        });
-    }
-    rows
-}
-
-fn rule_matcher(rule: &serde_json::Value) -> String {
-    let list_value = |key: &str| {
-        rule.get(key)
-            .and_then(|value| value.as_array())
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| item.as_str())
-                    .collect::<Vec<_>>()
-                    .join("、")
-            })
-    };
-    if let Some(value) = list_value("domain_suffix") {
-        return format!("域名后缀 · {value}");
-    }
-    if let Some(value) = list_value("domain") {
-        return format!("域名 · {value}");
-    }
-    if let Some(value) = list_value("rule_set") {
-        return format!("规则集 · {value}");
-    }
-    if rule.get("ip_is_private").is_some() {
-        return "私有地址".to_owned();
-    }
-    if let Some(protocol) = rule.get("protocol").and_then(|value| value.as_str()) {
-        return format!("协议 · {protocol}");
-    }
-    if let Some(network) = rule.get("network").and_then(|value| value.as_str()) {
-        return format!("网络 · {network}");
-    }
-    if let Some(port) = rule.get("port").and_then(|value| value.as_str()) {
-        return format!("端口 · {port}");
-    }
-    "其他匹配条件".to_owned()
-}
-
-fn rule_row(index: usize, rule: &RuleRow) -> gpui::AnyElement {
+fn rule_row(index: usize, rule: &RouteRuleSnapshot) -> gpui::AnyElement {
     div()
         .id(format!("rule-row-{index}"))
         .w_full()
@@ -2995,7 +2981,7 @@ fn rule_row(index: usize, rule: &RuleRow) -> gpui::AnyElement {
                     div()
                         .text_size(px(13.0))
                         .text_color(rgb(TEXT))
-                        .child(rule.name.clone()),
+                        .child(format!("路由规则 {:02}", index + 1)),
                 )
                 .child(
                     div()

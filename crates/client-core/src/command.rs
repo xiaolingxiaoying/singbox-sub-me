@@ -51,7 +51,23 @@ pub enum ClientCommand {
     RestartCore,
     UpdateSubscription,
     /// Imports a subscription URL as a new local profile and makes it active.
-    ImportSubscription(String),
+    /// `name` overrides the generated `订阅 N` label; the URL is normalized
+    /// the same way either way.
+    ImportSubscription {
+        name: Option<String>,
+        url: String,
+    },
+    /// Imports a local sing-box JSON configuration file as a new profile and
+    /// makes it active. The profile has no URL, so updating it is a no-op
+    /// until a link is set with [`ClientCommand::SetProfileUrl`].
+    ImportProfileFile(String),
+    /// Replaces one profile's subscription link (renormalized). An empty URL
+    /// is rejected; keep [`ClientCommand::ImportProfileFile`] for file-only
+    /// profiles.
+    SetProfileUrl {
+        name: String,
+        url: String,
+    },
     /// Removes a local subscription profile and its cached configuration.
     RemoveProfile(String),
     DownloadCore,
@@ -73,4 +89,34 @@ pub enum ClientCommand {
     UpdateSettings(SettingsPatch),
     /// Forces an immediate state refresh from the core.
     Refresh,
+}
+
+impl ClientCommand {
+    /// A human-readable name shown while the command executes and in failure
+    /// statuses (`{label} 失败: …`), so both UIs render the same wording
+    /// instead of parsing Debug output.
+    pub fn label(&self) -> String {
+        match self {
+            Self::StartCore => "启动内核".to_owned(),
+            Self::StopCore => "停止内核".to_owned(),
+            Self::RestartCore => "重启内核".to_owned(),
+            Self::UpdateSubscription => "更新订阅".to_owned(),
+            Self::ImportSubscription { .. } => "导入订阅".to_owned(),
+            Self::ImportProfileFile(_) => "导入本地配置".to_owned(),
+            Self::SetProfileUrl { .. } => "更新订阅链接".to_owned(),
+            Self::RemoveProfile(name) => format!("删除档案 {name}"),
+            Self::DownloadCore => "下载内核".to_owned(),
+            Self::SwitchProfile(name) => format!("激活档案 {name}"),
+            Self::SwitchNode { group, node } => format!("{group} → {node}"),
+            Self::TestNode(node) => format!("测试 {node} 延迟"),
+            Self::TestGroup(group) => format!("测试 {group} 组延迟"),
+            Self::ToggleSystemProxy => "切换系统代理".to_owned(),
+            Self::SetTrafficMode(mode) => format!("切换流量模式至{}", mode.label()),
+            Self::SetOutboundMode(mode) => format!("切换出站模式至{}", mode.label()),
+            Self::CloseConnection(_) => "关闭连接".to_owned(),
+            Self::CloseAllConnections => "关闭全部连接".to_owned(),
+            Self::UpdateSettings(_) => "保存设置".to_owned(),
+            Self::Refresh => "刷新状态".to_owned(),
+        }
+    }
 }
