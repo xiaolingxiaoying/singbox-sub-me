@@ -387,6 +387,20 @@ cargo test -p client-core -p sbtui --lib --offline
 cargo fmt --all -- --check
 ```
 
+### 2026-09-19 修订（三）：TUI 收敛到共享控制面 + sing-box 数据展示补全
+
+§2 的「双引擎」结构性问题与 §7 P1#7 就此关闭：
+
+- **TUI 收敛**：`sbtui` 重写为 `ClientController` 之上的纯渲染层（`lib.rs` 2731 → 2228 行，净删约 500 行复制引擎）。`start_core`/`stop_core`/`update_subscription`/`download_core`/`refresh_*`/`tail_core_log`/`watch_core_exit`/`schedule_restart`/`load_rules` 全部删除；`auto_start` 与 GUI 一样由引擎执行。§2.3 的「长耗时操作冻结界面」随之消失（更新订阅、测延迟全部异步交给引擎），§3.2 的「共享控制面接入 ⚠️」与 §4.2 的 TUI 独有功能差异（本地文件导入、改链接、连接过滤排序、日志过滤复制）现在是两个 UI 共有的能力。
+- **引擎新增 sing-box 数据**（§6.1 的 clash_api 子集扩大）：`/memory` 内存、`/version` 运行版本、`/proxies` 节点上报延迟（并入组快照，实测优先）；路由规则与规则集由 `state::parse_route_rules` 统一解析进快照，GUI 规则页与 TUI 规则视图不再各自读 `cache/active-config.json`（§3.2/§4.1 的对应证据行已过期）。
+- **命令面**：`ImportSubscription` 支持命名档案；新增 `ImportProfileFile`、`SetProfileUrl`；`ToggleSystemProxy` 在内核未运行或 TUN 模式下拒绝（防呆）；`ClientCommand::label` 中文标签让两个 UI 的忙碌/失败状态一致可读。
+- **依赖**：sbtui 移除 reqwest/zip/tar/sha2/serde/toml/winreg/dirs/flate2（内核与网络代码只存在于 client-core）。
+- **验证**：`cargo fmt`/`clippy -D warnings`/`cargo test --workspace --lib`（sbctl 157、client-core 31、sbtui 11）通过；`sbtui --print-dir` 冒烟通过。
+
+§9 复核口径更新：第 6 条的期望反转——`grep -n "ClientController" crates/sbtui/src/lib.rs` 现在**应命中多处**（App 字段、send、refresh_snapshot）；原「期望只有 pub use 一行」仅适用于修订（三）之前的基线。
+
+**仍然未完成**：托盘/开机自启执行/服务模式/热切换、GUI 主题与 i18n、IME 输入、连接/日志历史持久化、clash_api `secret` 与可配置端口、组级测延迟端点、`/logs` 流式日志、配置热重载。
+
 ---
 
 ## 附录：审查边界

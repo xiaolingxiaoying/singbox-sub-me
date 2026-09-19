@@ -51,3 +51,20 @@ Windows 真机：导入生产订阅 → 测延迟 → 切节点 → 系统代理
 - 不做 GUI、托盘、主题系统；不做订阅转换（服务端已多格式）。
 - 不自动修改防火墙；TUN/系统代理遵循「提示 + 用户确认」。
 - 首版不支持多订阅聚合（单档案激活）。
+
+## Comments
+
+**2026-09-19 — 架构收敛与显示补全（控制面统一）**
+
+- `sbtui` 已收敛为 `client-core` 共享控制面之上的纯渲染层：原 spec 中「TUI 自己管理
+  内核生命周期」的实现被替换为后台引擎 + 快照渲染；`start_core`/`stop_core`/
+  `update_subscription`/`download_core`/`refresh_*`/日志 tail/崩溃退避等复制代码全部
+  删除，`auto_start` 由引擎承担。TUI 自身只保留视图状态与键盘交互。
+- 引擎新增 sing-box 数据：`/memory` 内存、clash_api `/version` 运行版本、
+  `/proxies` 节点上报延迟（并入组快照，实测优先）、路由规则与规则集快照
+  （`state::parse_route_rules`，TUI `r` 规则视图与 GUI 规则页共用）。
+- 命令面：`ImportSubscription` 支持命名；新增 `ImportProfileFile`（本地文件导入）、
+  `SetProfileUrl`；`ToggleSystemProxy` 在内核未运行或 TUN 模式下拒绝；
+  `ClientCommand::label` 提供统一中文标签。
+- 依赖瘦身：sbtui 移除 reqwest/zip/tar/sha2/serde/toml/winreg/dirs/flate2。
+- 详细记录见 `docs/research/client-review-and-upstream-gap.md` §6。

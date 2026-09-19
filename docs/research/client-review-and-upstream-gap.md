@@ -144,13 +144,16 @@ GPUI 能编译、能开窗。
 - `cargo test --workspace --lib`：`sbctl` 153、`client-core` 27、`sbtui` 8 全部通过。
 - `sbgui` 通过 `cargo check`/`clippy`；GPUI 无法在无头环境做行为测试。
 
-## 5. 遗留与建议
+## 5. 遗留与建议（2026-09-19 复核后更新）
 
-1. **TUI 尚未走 `ClientController`**。`sbtui` 仍保留自己的 `App` 与轮询逻辑，与引擎
-   有重复。建议下一步把 `App` 收敛为「引擎快照 + UI 局部状态」，删除重复的 `start_core`/
-   `refresh_*`，彻底消除双引擎。
-2. **`sbgui` 缺少文本输入**。当前只能激活已有档案，无法在 GUI 内新增/编辑订阅链接、
-   修改镜像或端口。需要一个输入组件（或复用系统剪贴板 + 简单输入框）。
+> 2026-09-19 更新：原始清单的第 1、2 项已完成，详见第 6 节。其余条目仍然有效。
+
+1. ~~**TUI 尚未走 `ClientController`**~~ **已完成**。`sbtui` 已收敛为「引擎快照 + UI 局部
+   状态」的纯渲染层，复制的 `start_core`/`refresh_*`/订阅拉取/日志 tail 全部删除，
+   内核集成（下载、校验、`sing-box check`、启停、崩溃退避重启）只存在于
+   `client-core` 一处。
+2. ~~**`sbgui` 缺少文本输入**~~ **已完成**。单行输入组件已覆盖订阅导入、镜像、
+   端口、延迟地址、内核版本等字段（`7c161dc`）。
 3. **GUI 无托盘与快捷键**，也无「关闭到托盘」。可参考 clash-party/verge 的托盘菜单。
 4. **服务模式**（Windows Service/systemd user unit）缺失，TUN 仍要求管理员权限，
    这是上游最实用的下一项能力。
@@ -159,3 +162,51 @@ GPUI 能编译、能开窗。
    `#[cfg(unix)]` 门控，或提供 Windows 等价假件，让本机也能完整跑 `cargo test --workspace`。
 7. **CI 覆盖 GUI**：当前 workspace 会构建 `sbgui`，但 Linux 上 GPUI 需要额外的图形库；
    建议为 `sbgui` 增加独立的 Windows-only job，或在 CI 中显式跳过非 Windows 的 GUI 构建。
+
+## 6. 2026-09-19：控制面收敛与 sing-box 数据展示补全
+
+这一轮的目标是「客户端按 sing-box 实际暴露的内容完善显示，内核统一集成进
+TUI 与 GUI，界面沿用两个客户端现有的设计」。
+
+### 6.1 引擎新增的 sing-box 数据
+
+- **`/memory`**：`ClashApi::memory` 读取内核堆内存（流式端点取首个完整对象），
+  引擎按 1s 节拍并入快照（`memory_used`），停止/崩溃时清零。
+- **运行版本**：内核健康后经 clash_api `/version` 记录 `core_runtime_version`，
+  与安装的 `core_version`（`sing-box version`）区分展示。
+- **节点上报延迟**：`/proxies` 的节点 `history` 现在被并入组快照的 `delays`
+  （本客户端实测结果优先），节点列表在手动测延迟之前就能显示内核已知的延迟。
+- **路由规则进快照**：`state::parse_route_rules` 统一解析 `route.rules`、
+  `route.rule_set` 与 `final`，启动内核重写配置时与引擎初始化时各解析一次，
+  两个 UI 的规则视图不再各自读 `cache/active-config.json`。
+- **命令集**：`ImportSubscription` 支持自定义档案名；新增 `ImportProfileFile`
+  （本地配置导入）与 `SetProfileUrl`（改档案链接）；`ToggleSystemProxy` 在
+  内核未运行或 TUN 模式下改为显式拒绝（此前 GUI 可能把系统代理指到死端口）。
+- **命令标签**：`ClientCommand::label` 提供中文标签，引擎的忙碌/失败状态
+  （`{label} 失败: …`）对两个 UI 一致可读。
+
+### 6.2 sbtui：收敛为纯渲染层
+
+- `App` 只保留视图状态（Tab、高亮、过滤、输入、确认），其余一切读
+  `ClientSnapshot`；`run()` 里 `ClientController::start` 之后引擎自行处理
+  `auto_start`，与 GUI 的启动路径完全一致。
+- 删除复制的引擎代码：`start_core`/`stop_core`/`update_subscription`
+  /`download_core`/`refresh_*`/`tail_core_log`/`watch_core_exit`/
+  `schedule_restart`/`load_rules` 等（净减约 500 行，文件从 2736 行降至 2228 行）。
+- 保留 TUI 特有的交互：模式切换与退出保留代理的二次确认、OSC 52 复制、
+  连接排序/过滤、日志级别过滤与暂停（暂停改为冻结当前视图）。
+- 依赖随之瘦身：`dirs`/`flate2`/`reqwest`/`serde*`/`sha2`/`tar`/`toml`/`zip`
+  /`winreg` 全部移除，sbtui 不再直接触碰内核与网络。
+
+### 6.3 sbgui
+
+- 概览新增「内核内存」指标卡，副行显示运行版本。
+- 规则页改为渲染快照（`rules` + `rule_sets`），新增规则集区块（tag、类型、
+  来源），侧栏徽标改用快照计数，消除每 400ms 一次的磁盘读取。
+- 忙碌行直接消费引擎的中文命令标签。
+
+### 6.4 验证
+
+- `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -D warnings` 通过。
+- `cargo test --workspace --lib`：sbctl 157、client-core 31、sbtui 11 全部通过。
+- `sbtui --print-dir` 与 `ly --print-dir` 冒烟通过。

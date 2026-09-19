@@ -171,3 +171,7 @@ _Avoid_: Query-parameter override, per-request rewrite
 **Override template**:
 An administrator-maintained server-side file under `etc/sbctl/overrides/` deep-merged into the generated client artifacts at regeneration time; `rules` arrays are prepended, everything else merges or replaces, and the bare sing-box artifact plus URI formats are never overridden.
 _Avoid_: Client-side override, per-request rewrite
+
+**Client control plane**:
+The single engine in `crates/client-core` that owns the local sing-box core, the clash_api channel, subscription handling, OS proxy integration, and persisted settings for both clients. UIs (`sbtui`, `sbgui`) only render the published snapshot and send commands; core management never lives in a UI.
+_Avoid_: Duplicate engine, per-UI core manager

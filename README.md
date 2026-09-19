@@ -309,17 +309,22 @@ sudo sbctl system bbr
 
 > 说明：TUIC 的 QUIC 拥塞控制（`congestion_control=bbr`）属于协议层，客户端与服务端均支持时即生效，与上述内核级 BBR 无关。BBR 需内核支持；若内核过低，`sysctl -w` 会报错并中止，不会改动其他设置。
 
-## 桌面客户端：sbtui（终端 TUI）
+## 客户端：sbtui（终端 TUI）与 sbgui（桌面 GUI）
 
-仓库同时提供一个终端 TUI 代理客户端 [sbtui](crates/sbtui/README.md)，消费 sbctl 的订阅：
+仓库提供两个共享同一控制面（`crates/client-core`）的客户端，消费 sbctl 的订阅：
 
 ```bash
-cargo build --release -p sbtui   # Windows / macOS / Linux
+cargo build --release -p sbtui   # 终端 TUI：Windows / macOS / Linux（另含 ly 短启动名）
+cargo build --release -p sbgui   # Windows 桌面 GUI（GPUI）
 ```
 
-功能：订阅导入与自动归一化、代理组节点切换与延迟测试、系统代理开关、
-TUN 模式、实时速率与连接表、日志与分流规则查看、内核下载与版本管理。
+功能（两个客户端一致）：订阅导入与自动归一化、代理组节点切换与延迟测试
+（含内核上报的节点延迟）、系统代理开关、TUN 模式、实时速率、内核内存与
+运行版本、连接表、日志与分流规则查看、内核下载与版本管理。
 控制通道使用订阅端完整配置自带的 clash_api（127.0.0.1:9090）。
+
+详见 [sbtui 说明](crates/sbtui/README.md) 与 [sbgui 说明](crates/sbgui/README.md)；
+客户端功能全解见 [客户端功能与作用说明](docs/client-description.md)。
 
 ## 安全边界
 
