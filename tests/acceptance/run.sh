@@ -5,6 +5,10 @@ set -eu
 
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 artifact=${SBCTL_ARTIFACT:?set SBCTL_ARTIFACT to the Linux release binary to accept}
+fixture_artifact=${SBCTL_TEST_ARTIFACT:?set SBCTL_TEST_ARTIFACT to a separate test-signing build; never publish it}
+test -f "$fixture_artifact" || exit 2
+fixture_artifact=$(CDPATH= cd -- "$(dirname "$fixture_artifact")" && pwd)/$(basename "$fixture_artifact")
+
 test -f "$artifact" || { echo "SBCTL_ARTIFACT is not a file: $artifact" >&2; exit 2; }
 artifact=$(CDPATH= cd -- "$(dirname "$artifact")" && pwd)/$(basename "$artifact")
 
@@ -15,13 +19,15 @@ for image in debian:12-slim ubuntu:22.04 ubuntu:24.04; do
   cleanup() { MSYS_NO_PATHCONV=1 docker rm -f "$container" >/dev/null 2>&1 || true; }
   trap cleanup EXIT INT TERM
 
+  docker_fixture_artifact=$fixture_artifact
   docker_artifact=$artifact
   if command -v cygpath >/dev/null 2>&1; then
     docker_artifact=$(cygpath -w "$artifact")
+    docker_fixture_artifact=$(cygpath -w "$fixture_artifact")
   fi
   MSYS_NO_PATHCONV=1 docker run -d --name "$container" --privileged --cgroupns=host \
     -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
-    -v "$docker_artifact:/opt/sbctl/sbctl:ro" "$tag" >/dev/null
+    -v "$docker_artifact:/opt/sbctl/sbctl:ro" -v "$docker_fixture_artifact:/opt/sbctl-test/sbctl:ro" "$tag" >/dev/null
 
   ready=false
   for _ in $(seq 1 30); do
@@ -40,9 +46,10 @@ for image in debian:12-slim ubuntu:22.04 ubuntu:24.04; do
   # verify a subsequent fresh install in the same container.
   # The bootstrap verifier temporarily installs a stub at the managed path;
   # replace it so the generated systemd service starts the release artifact.
-  MSYS_NO_PATHCONV=1 docker exec "$container" cp /opt/sbctl/sbctl /usr/local/bin/sbctl
-  MSYS_NO_PATHCONV=1 docker exec "$container" env SBCTL_BIN=/opt/sbctl/sbctl \
+  MSYS_NO_PATHCONV=1 docker exec "$container" cp /opt/sbctl-test/sbctl /usr/local/bin/sbctl
+  MSYS_NO_PATHCONV=1 docker exec "$container" env SBCTL_BIN=/opt/sbctl-test/sbctl \
     /usr/local/lib/sbctl-acceptance/verify.sh
+  MSYS_NO_PATHCONV=1 docker exec "$container" cp /opt/sbctl/sbctl /usr/local/bin/sbctl
   MSYS_NO_PATHCONV=1 docker exec "$container" env SBCTL_BIN=/opt/sbctl/sbctl sbctl-acceptance-real
   cleanup
   trap - EXIT INT TERM

@@ -26,5 +26,13 @@ raw-window-handle = "0.6.2"
 windows = { version = "0.61.3", features = ["Win32_Graphics_Dwm"] }
 tray-icon = "0.21"
 
+# GPUI gates its Linux desktop backends behind features; without an explicit
+# opt-in a Linux build silently falls back to the headless renderer and never
+# opens a window. Enable X11 (which also covers Wayland desktops through
+# XWayland) so the desktop client is usable on Linux.
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui = { git = "https://github.com/zed-industries/zed.git", rev = "739fdbef762f7e514d62e1fa650c1b7cac5bbff4", package = "gpui", default-features = false, features = ["x11"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "739fdbef762f7e514d62e1fa650c1b7cac5bbff4", package = "gpui_platform", default-features = false, features = ["x11"] }
+
 [build-dependencies]
 embed-resource = "3.0.11"

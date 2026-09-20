@@ -1675,7 +1675,9 @@ fn sing_box_server(
 ) -> Result<String, SubscriptionError> {
     let certificate = certificate_tls_config(config, root)?;
     let mut inbounds = Vec::new();
+    let mut tags = Vec::new();
     for node in nodes {
+        tags.push(node.tag());
         inbounds.push(match &node {
             CanonicalNode::VlessReality {
                 port,
@@ -1726,22 +1728,26 @@ fn sing_box_server(
                 "tls": server_tls(tls_server_name, &certificate, &[])}),
         });
     }
-    if ipv4_only_required(config) {
-        for inbound in &mut inbounds {
-            inbound["domain_strategy"] = json!("ipv4_only");
-            if inbound["type"] == "vless" {
-                // Reality dials its camouflage server independently
-                // of the inbound's destination resolver.
-                inbound["tls"]["reality"]["handshake"]["domain_strategy"] = json!("ipv4_only");
-            }
-        }
-    }
-    Ok(serde_json::to_string_pretty(&json!({
+    let mut server = json!({
         // Connection-level debug logging would expose proxied destinations.
         "log": {"level": "info"},
         "inbounds": inbounds
-    }))
-    .expect("JSON values serialize"))
+    });
+    if ipv4_only_required(config) {
+        // The inbound `domain_strategy` field was deprecated in 1.11 and
+        // removed in 1.13, so the destination pin now lives on a route action
+        // (the documented migration). Pinning the default DNS strategy keeps
+        // every other lookup, including the Reality camouflage handshake that
+        // dials its decoy independently of the inbound destination, on IPv4.
+        server["dns"] = json!({"strategy": "ipv4_only"});
+        server["route"] = json!({
+            "rules": tags
+                .iter()
+                .map(|tag| json!({"inbound": tag, "action": "resolve", "strategy": "ipv4_only"}))
+                .collect::<Vec<_>>()
+        });
+    }
+    Ok(serde_json::to_string_pretty(&server).expect("JSON values serialize"))
 }
 
 /// The `proxies:` block plus the two historical groups shared by the current
@@ -3453,7 +3459,7 @@ mod tests {
     }
 
     #[test]
-    fn ipv4_only_survives_persistence_and_reaches_the_reality_handshake() {
+    fn ipv4_only_survives_persistence_and_pins_resolution() {
         let fixture = TempDir::new().unwrap();
         let store = DeploymentStore::new(fixture.path());
         let mut config = vless_config();
@@ -3469,11 +3475,16 @@ mod tests {
                 .1,
         )
         .unwrap();
-        assert_eq!(server["inbounds"][0]["domain_strategy"], "ipv4_only");
-        assert_eq!(
-            server["inbounds"][0]["tls"]["reality"]["handshake"]["domain_strategy"],
-            "ipv4_only"
-        );
+        // The legacy inbound field was removed in sing-box 1.13: resolution is
+        // now pinned through a route action plus the default DNS strategy.
+        assert!(server["inbounds"][0].get("domain_strategy").is_none());
+        assert_eq!(server["dns"]["strategy"], "ipv4_only");
+        let rules = server["route"]["rules"].as_array().unwrap();
+        assert!(rules.iter().any(|rule| {
+            rule["inbound"] == "sbctl-vless-reality"
+                && rule["action"] == "resolve"
+                && rule["strategy"] == "ipv4_only"
+        }));
     }
 
     #[test]

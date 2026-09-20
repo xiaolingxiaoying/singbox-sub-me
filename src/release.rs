@@ -4,8 +4,8 @@
 //! with artifact URL and SHA-256 digest, a sing-box compatibility matrix, and
 //! an Ed25519 signature over the canonical JSON encoding of every field except
 //! `signature`. The signature is verified before any URL or digest is trusted;
-//! the built-in first-release public key is the trust anchor for both the Rust
-//! update logic and the bootstrap install script.
+//! a build-time production public key is the trust anchor for both the Rust
+//! update logic and the separately rendered bootstrap install script.
 
 use std::fs;
 use std::path::Path;
@@ -19,14 +19,33 @@ use thiserror::Error;
 /// The only schema version the current client accepts.
 pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
 
-/// The first-release Ed25519 verification key, hex-encoded. The matching
-/// private key is held by the release maintainer; a development keypair lives
-/// in `scripts/dev-signing-key.hex` and the same public key is embedded in the
-/// bootstrap install script.
-pub const FIRST_RELEASE_PUBLIC_KEY: [u8; 32] = [
+/// Public fixture key. Its seed is public and MUST NOT be a production trust anchor.
+pub const DEVELOPMENT_PUBLIC_KEY: [u8; 32] = [
     0x24, 0x7F, 0x88, 0xE1, 0x63, 0x24, 0x29, 0x86, 0xB7, 0x10, 0x7E, 0xB7, 0x04, 0xA9, 0x83, 0xE1,
     0x21, 0x86, 0xD2, 0x69, 0x7A, 0x39, 0x27, 0xB7, 0xE6, 0xB4, 0x2E, 0xC2, 0xB3, 0x64, 0x27, 0x2B,
 ];
+
+/// Production trust is pinned at build time, never supplied by a downloaded
+/// manifest or by a runtime environment variable. Missing trust fails closed.
+fn production_public_key(configured: Option<&str>) -> Result<[u8; 32], ReleaseError> {
+    let text = configured
+        .filter(|text| !text.trim().is_empty())
+        .ok_or(ReleaseError::MissingTrustAnchor)?;
+    let key = parse_seed_hex(text).map_err(|_| ReleaseError::InvalidTrustAnchor)?;
+    if key == DEVELOPMENT_PUBLIC_KEY {
+        return Err(ReleaseError::InvalidTrustAnchor);
+    }
+    VerifyingKey::from_bytes(&key).map_err(|_| ReleaseError::InvalidTrustAnchor)?;
+    Ok(key)
+}
+
+fn trusted_public_key() -> Result<[u8; 32], ReleaseError> {
+    // Unit-test harnesses and explicitly opted-in fixture builds only.
+    if cfg!(any(test, feature = "test-signing")) {
+        return Ok(DEVELOPMENT_PUBLIC_KEY);
+    }
+    production_public_key(option_env!("SBCTL_RELEASE_PUBLIC_KEY_HEX"))
+}
 
 /// Floating, unsignable version references that must never be trusted.
 const FLOATING_VERSIONS: &[&str] = &["latest", "main", "master"];
@@ -64,6 +83,12 @@ pub struct CompatibilityRange {
 
 #[derive(Debug, Error)]
 pub enum ReleaseError {
+    #[error(
+        "no production release public key was configured at build time (SBCTL_RELEASE_PUBLIC_KEY_HEX)"
+    )]
+    MissingTrustAnchor,
+    #[error("production release public key is invalid or is the publicly known development key")]
+    InvalidTrustAnchor,
     #[error("could not read the pinned release manifest: {0}")]
     ManifestRead(#[from] std::io::Error),
     #[error("could not parse the pinned release manifest: {0}")]
@@ -182,7 +207,7 @@ fn verify_signature(manifest: &ReleaseManifest) -> Result<(), ReleaseError> {
         .map_err(|_| ReleaseError::InvalidSignature)?;
     let signature =
         Signature::from_slice(&signature_bytes).map_err(|_| ReleaseError::InvalidSignature)?;
-    let key = VerifyingKey::from_bytes(&FIRST_RELEASE_PUBLIC_KEY)
+    let key = VerifyingKey::from_bytes(&trusted_public_key()?)
         .map_err(|_| ReleaseError::InvalidSignature)?;
     let canonical = canonical_bytes(manifest)?;
     key.verify_strict(&canonical, &signature)
@@ -291,17 +316,15 @@ pub fn parse_seed_hex(contents: &str) -> Result<[u8; 32], ReleaseError> {
     Ok(seed)
 }
 
-/// Returns the public key bytes for a signing key seed, as the signer-side
-/// mirror of `FIRST_RELEASE_PUBLIC_KEY`.
+/// Returns the public key bytes for a signing key seed.
 pub fn public_key(secret_seed: &[u8; 32]) -> [u8; 32] {
     SigningKey::from_bytes(secret_seed)
         .verifying_key()
         .to_bytes()
 }
 
-/// A new random keypair as (public, secret). `release keygen` prints both so a
-/// maintainer can rotate the embedded key; the development keypair is stored in
-/// `scripts/dev-signing-key.hex`.
+/// A new random keypair as (public, secret). `release keygen` prints only the
+/// public key and writes the private seed to a separate private file.
 pub fn generate_keypair() -> ([u8; 32], [u8; 32]) {
     let mut secret = [0u8; 32];
     getrandom::fill(&mut secret).expect("operating system provides randomness");
@@ -413,6 +436,21 @@ pub fn parse_version(value: &str, name: &'static str) -> Result<[u64; 3], Releas
 mod tests {
     use super::*;
 
+    #[test]
+    fn production_trust_rejects_missing_and_public_fixture_keys() {
+        assert!(matches!(
+            production_public_key(None),
+            Err(ReleaseError::MissingTrustAnchor)
+        ));
+        assert!(production_public_key(Some("not-a-key")).is_err());
+        assert!(production_public_key(Some(&format_hex(&DEVELOPMENT_PUBLIC_KEY))).is_err());
+        let (public, _) = generate_keypair();
+        assert_eq!(
+            production_public_key(Some(&format_hex(&public))).unwrap(),
+            public
+        );
+    }
+
     const SBCTL_VERSION: &str = "0.1.14";
     const SING_BOX_VERSION: &str = "1.12.0";
 
@@ -441,7 +479,7 @@ mod tests {
         manifest.signature = Some(sign_manifest(manifest, secret).expect("signature is produced"));
     }
 
-    // The development signing seed that matches FIRST_RELEASE_PUBLIC_KEY.
+    // Public fixture seed, accepted only by test harnesses/test-signing builds.
     const SECRET: [u8; 32] = [
         0x62, 0xac, 0x3d, 0x58, 0x01, 0xb5, 0x2a, 0x11, 0xda, 0x92, 0x3e, 0xbb, 0xbc, 0xcb, 0x88,
         0xa6, 0x7f, 0x15, 0x4b, 0xde, 0x43, 0x39, 0x59, 0x6f, 0x05, 0x1e, 0xe2, 0x73, 0x2e, 0x9a,

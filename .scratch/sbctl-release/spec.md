@@ -51,7 +51,7 @@ Status: ready-for-agent
 23. 作为单一管理员，我希望用 `sbctl traffic set-used --rx <BYTES> --tx <BYTES>` 修正方向统计，以便精确恢复两个方向的 VPS traffic。
 24. 作为单一管理员，我希望流量修正显示当前账期、实际值、目标值和下一次重置，并在锁内原子提交，以便修正可审计且不会与 reset 竞争。
 25. 作为系统运行时，我希望只有 accounting reset task 和显式修正命令写入 accounting state，以便 traffic/status 读取和订阅请求保持只读。
-26. 作为单一管理员，我希望状态缺失、损坏或 schema 不兼容时得到脱敏 503，而不是 200 占位订阅，以便知道部署不可用且不会收到虚假数据。
+26. 作为单一管理员，我希望订阅工件缺失或不可读时得到脱敏 503，而账期状态缺失、损坏或 schema 不兼容时仍返回真实订阅工件、只省略 `subscription-userinfo` 并写脱敏诊断，以便订阅不因账期故障整体不可用，也不会收到虚假流量数据。
 27. 作为单一管理员，我希望无效路径、query credential 和错误 credential 都统一得到 404，以便认证失败不泄露授权细节。
 28. 作为单一管理员，我希望完整 Subscription credential 不出现在日志、错误和诊断中，以便降低 URL 泄露风险。
 29. 作为单一管理员，我希望 sbctl 和 sing-box 使用不同的无登录服务账户，以便控制面和数据面的权限相互隔离。
@@ -142,7 +142,7 @@ Status: ready-for-agent
 - Natural-month、Anchored-month、UTC/非 UTC、首个 reset 前 pending、1–31 日、短月收敛、DST 不存在/含糊时间拒绝；
 - RX/TX 映射、首次观察、增量、boot ID、counter rollback、重启、状态缺失/损坏/schema mismatch、停机跨月；
 - total-only 与 direction-aware correction、目标大于当前计数器、并发 correction/reset 和原子状态读取；
-- 404 统一失败、503 脱敏存储失败、query credential 拒绝、日志 credential redaction、`subscription-userinfo` 一致性；
+- 404 统一失败、工件缺失的脱敏 503、账期状态故障的降级（200、无 `subscription-userinfo`、脱敏诊断）、query credential 拒绝、日志 credential redaction、`subscription-userinfo` 一致性；
 - socket activation、LISTEN_FDS 端口区分、两个非 root 服务、ACME challenge、证书 SAN/有效期/私钥/SNI、续期后新连接；
 - manifest canonical JSON、Ed25519/Base64 签名、URL/digest 先后信任顺序、兼容矩阵、下载失败、健康检查失败和完整回滚；
 - 安装 ownership marker 时序、Existing deployment 不变、默认卸载备份、`--purge` 仅清理 sbctl 自有资源，且不改 Nginx/Caddy/iptables/NAT/手工 sing-box；

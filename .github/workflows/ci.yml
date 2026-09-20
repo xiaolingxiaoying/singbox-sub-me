@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [master]
+  workflow_call:
   pull_request:
 
 permissions:
@@ -17,9 +18,18 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
+      - name: Install Linux GUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev libfreetype6-dev \
+            libx11-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libvulkan-dev libasound2-dev
       - run: cargo fmt --all -- --check
+      - run: python3 -m unittest discover -s scripts -p 'test_*.py'
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo test --workspace --features sbctl/test-signing
+      - run: cargo test -p sbctl --no-default-features --test release_trust
 
   windows-static:
     runs-on: windows-2022

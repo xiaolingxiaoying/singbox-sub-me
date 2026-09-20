@@ -512,6 +512,13 @@ impl From<CliAccountingPolicy> for sbctl::config::AccountingPolicy {
 }
 
 fn main() -> ExitCode {
+    // Rust ignores SIGPIPE by default, which turns `sbctl ... | head` into a
+    // panic on the broken pipe. Restore the platform default so the process
+    // ends quietly when the reader goes away.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     let root = cli.root.as_deref().unwrap_or_else(|| Path::new("/"));
     let command = match cli.command {
@@ -634,22 +641,30 @@ fn sing_box(root: &Path, command: SingBoxCommand) -> ExitCode {
                                 error.to_string(),
                             )
                         })?;
+                        // Holds the candidate path without an open write handle:
+                        // Linux refuses to execute a file that is still open for
+                        // writing (`Text file busy`, ETXTBSY).
+                        let mut guard = None;
                         let candidate = match artifact {
                             Some(candidate) => {
                                 sbctl::update::verify_sing_box_artifact(&manifest, &candidate)?;
                                 candidate
                             }
                             None => {
-                                let candidate = temporary.path().to_path_buf();
+                                let path = temporary.into_temp_path();
+                                let candidate = path.to_path_buf();
                                 sbctl::update::download_sing_box(&manifest, &candidate)?;
+                                guard = Some(path);
                                 candidate
                             }
                         };
-                        sbctl::update::apply_sing_box(
+                        let result = sbctl::update::apply_sing_box(
                             &sbctl::config::DeploymentStore::new(root),
                             &manifest,
                             &candidate,
-                        )
+                        );
+                        drop(guard);
+                        result
                     })
                     .map(|rollback| {
                         format!("sing-box updated; rollback point: {}", rollback.display())
@@ -685,16 +700,21 @@ fn update_sing_box_official(
     let temporary = tempfile::NamedTempFile::new().map_err(|error| {
         sbctl::update::UpdateError::DownloadFailed("sing-box", error.to_string())
     })?;
+    // Keeps the downloaded candidate on disk until the update finishes, while
+    // holding no open write handle. On Linux a file that is still open for
+    // writing cannot be executed (`Text file busy`, ETXTBSY), and the candidate
+    // is executed for the pre-install `sing-box check`.
+    let mut candidate_guard: Option<tempfile::TempPath> = None;
     let (candidate, version_note) = match artifact {
         Some(path) => (path.to_path_buf(), "本地 sing-box 候选".to_owned()),
         None => {
             let version = sbctl::update::fetch_latest_official_sing_box_version()?;
             println!("官方最新稳定版：sing-box {version}，开始下载并校验…");
             sbctl::update::download_sing_box_official(&version, temporary.path())?;
-            (
-                temporary.path().to_path_buf(),
-                format!("sing-box {version}（官方最新稳定版）"),
-            )
+            let path = temporary.into_temp_path();
+            let candidate = path.to_path_buf();
+            candidate_guard = Some(path);
+            (candidate, format!("sing-box {version}（官方最新稳定版）"))
         }
     };
     // The candidate is verified again here: it must run and pass a
@@ -702,6 +722,7 @@ fn update_sing_box_official(
     // managed binary is replaced.
     let contents = fs::read(&candidate)?;
     let rollback = sbctl::update::install_candidate_sing_box(&store, &candidate, &contents)?;
+    drop(candidate_guard);
     Ok(format!(
         "{version_note} 更新完成，已通过配置检查与服务健康检查；回滚点：{}",
         rollback.display()
@@ -815,18 +836,29 @@ fn update_impl(
     let sing_box_download = tempfile::NamedTempFile::new().map_err(|error| {
         sbctl::update::UpdateError::DownloadFailed("sing-box", error.to_string())
     })?;
+    // Keep both candidates on disk without open write handles: the update runs
+    // them for the pre-install checks, and Linux refuses to execute a file that
+    // is still open for writing (`Text file busy`, ETXTBSY).
+    let mut sbctl_guard = None;
+    let mut sing_box_guard = None;
     let sbctl_artifact = match sbctl_artifact {
         Some(path) => path.to_path_buf(),
         None => {
-            sbctl::update::download_sbctl(&manifest, sbctl_download.path())?;
-            sbctl_download.path().to_path_buf()
+            let path = sbctl_download.into_temp_path();
+            let artifact = path.to_path_buf();
+            sbctl::update::download_sbctl(&manifest, &artifact)?;
+            sbctl_guard = Some(path);
+            artifact
         }
     };
     let sing_box_artifact = match sing_box_artifact {
         Some(path) => path.to_path_buf(),
         None => {
-            sbctl::update::download_sing_box(&manifest, sing_box_download.path())?;
-            sing_box_download.path().to_path_buf()
+            let path = sing_box_download.into_temp_path();
+            let artifact = path.to_path_buf();
+            sbctl::update::download_sing_box(&manifest, &artifact)?;
+            sing_box_guard = Some(path);
+            artifact
         }
     };
     let rollback = sbctl::update::apply(
@@ -835,6 +867,8 @@ fn update_impl(
         &sbctl_artifact,
         &sing_box_artifact,
     )?;
+    drop(sbctl_guard);
+    drop(sing_box_guard);
     Ok(format!(
         "update completed after verified validation and service health checks\nrollback point: {}",
         rollback.display()
@@ -2423,7 +2457,11 @@ fn run_config_override(root: &Path, command: OverrideCommand) -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(error) => {
-                    eprintln!("override 合并后 sing-box check 失败：{error}");
+                    eprintln!(
+                        "override 合并后 sing-box check 失败（内核 {}）：{error}\n\
+                         提示：合并后的 sing-box-full 工件面向最新稳定版内核；若上面报告未知字段，请先升级服务端内核（sbctl sing-box update）。",
+                        binary.display()
+                    );
                     ExitCode::from(2)
                 }
             }

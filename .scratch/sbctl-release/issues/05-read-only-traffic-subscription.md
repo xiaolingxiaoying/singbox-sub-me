@@ -14,7 +14,7 @@ Blocked by: 02, 03, 04
 - subscription handler 只读取完整 artifact 和 accounting state。
 - `subscription-userinfo` 的 RX/TX/total/expire 映射。
 - 无效路径、query credential、错误 credential 的统一 404。
-- 缺失、损坏或 schema 不兼容状态的脱敏 503。
+- 订阅工件缺失或不可读时的脱敏 503；账期状态缺失、损坏或 schema 不兼容时降级为真实工件（200、无 `subscription-userinfo`）并写脱敏诊断。
 - 完整 credential 在日志、错误和诊断中的 redaction。
 
 ## 验收标准
@@ -23,7 +23,7 @@ Blocked by: 02, 03, 04
 - [x] `download=RX`、`upload=TX`、`total=RX+TX` 与当前 period 一致。
 - [x] pending-first-reset 返回零流量和首个 reset，而非 5xx。
 - [x] query 参数 credential 永远不能授权，所有错误 credential/path 均为 404。
-- [x] state/artifact 故障返回脱敏 503，不返回 200 占位订阅。
+- [x] artifact 故障返回脱敏 503；state 故障降级为真实工件（200、无 `subscription-userinfo`、脱敏诊断）。
 - [x] acceptance 日志和错误输出不包含完整 Subscription credential。
 
 ## 相关规格
@@ -38,3 +38,4 @@ Blocked by: 02, 03, 04
 - 2026-09-03：`service_status_entries` 抽成结构化条目，`service_status` 文本视图保持原有格式。
 - 2026-09-03：验证通过 `cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`、63 个库测试、50 个 CLI 测试及全部 acceptance shell 的 `sh -n`；新增 CLI 测试覆盖统一 404、missing/corrupt/schema-mismatch/artifact 四类脱敏 503（诊断不含 credential）、`status --json` 当前 period 与无凭据输出、unmanaged JSON、`redact_secret` 直测与 total-only correction 后 header `total` 的锁定语义；acceptance 新增 `total=RX+TX`、state mtime/content 不变、503 脱敏日志、pending-first-reset 200 与 `status --json` 无凭据检查。
 - 2026-09-03：延后项：`diagnostics` 命令、socket/证书/工件详细 JSON 属 ticket-12（release gates）范围；Direct 模式证书加载失败仍走 `serve_tls` 静默跳过，其脱敏 5xx 与 SNI 校验属后续证书生命周期 ticket。
+- 2026-09-19：修正 92e1d64 的行为变更未同步验收与规格的问题。已认证后 `traffic::report` 失败（StateMissing/StateStale/StateCorrupt/StateSchemaMismatch 等）不再返回 503，而是降级为真实工件（200，不写 `subscription-userinfo`）并保留脱敏 stderr 诊断；仅 artifact 读取失败仍为脱敏 503。`tests/acceptance/verify.sh` 的 missing/corrupt 断言、spec 要求 26 与实现计划已按此对齐。

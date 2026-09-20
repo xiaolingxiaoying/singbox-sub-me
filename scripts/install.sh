@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Replaced by prepare-installer.py in the authenticated release packaging job.
+# A raw checkout is deliberately not an installable production trust anchor.
+SBCTL_PUBLIC_KEY_PEM='@SBCTL_RELEASE_PUBLIC_KEY_PEM@'
+if [[ "$SBCTL_PUBLIC_KEY_PEM" == @* ]]; then
+  echo "此安装脚本尚未配置生产公钥；请使用发布工件 install.sh。" >&2
+  exit 2
+fi
+
 # sbctl bootstrap installer.
 #
-# One-line usage:  bash <(wget -qO- https://raw.githubusercontent.com/xiaolingxiaoying/singbox-sub-me/master/scripts/install.sh)
+# One-line usage:  bash <(wget -qO- https://github.com/xiaolingxiaoying/singbox-sub-me/releases/latest/download/install.sh)
 #
 # The only trust decisions this script makes are the sbctl binary download,
 # which it protects by verifying the Ed25519 signature over the canonical JSON
@@ -52,11 +60,6 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-cer
 # The first-release Ed25519 verification key, identical to the one embedded in
 # src/release.rs. The signature in the manifest covers the canonical JSON of
 # every field except `signature`, produced exactly like `jq -S -c 'del(.signature)'`.
-read -r -d '' SBCTL_PUBLIC_KEY_PEM <<'PEM' || true
------BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAJH+I4WMkKYa3EH63BKmD4SGG0ml6OSe35rQuwrNkJys=
------END PUBLIC KEY-----
-PEM
 
 default_manifest_url='https://github.com/xiaolingxiaoying/singbox-sub-me/releases/latest/download/manifest-{arch}.json'
 manifest_url_template=${SBCTL_MANIFEST_URL:-$default_manifest_url}

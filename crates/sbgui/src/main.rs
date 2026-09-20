@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
-use client_core::clash_api::{Connection, OutboundMode};
+use client_core::clash_api::Connection;
 use client_core::command::SettingsPatch;
 use client_core::settings::{self, Profiles, Settings};
 use client_core::state::{ClientSnapshot, ProxyGroupSnapshot, RouteRuleSnapshot};
@@ -30,7 +30,7 @@ use client_core::system_proxy::TrafficMode;
 use client_core::{ClientCommand, ClientController};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, AppContext as _, AssetSource, Bounds, ClickEvent, Context, FocusHandle,
+    App, AppContext as _, AssetSource, Bounds, ClickEvent, ClipboardItem, Context, FocusHandle,
     InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString,
     StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBounds, WindowControlArea,
     WindowOptions, div, px, rgb, rgba, size, svg,
@@ -39,21 +39,21 @@ use gpui_platform::application;
 
 // Serein's desktop palette: a quiet neutral canvas, white working surfaces,
 // and a cool teal reserved for active state and primary actions.
-const BG: u32 = 0xf5f6f7;
+const BG: u32 = 0xf7f8fa;
 const SURFACE: u32 = 0xffffff;
-const SURFACE_2: u32 = 0xf0f3f4;
-const BORDER: u32 = 0xdfe4e5;
-const TEXT: u32 = 0x182022;
-const MUTED: u32 = 0x697475;
-const FAINT: u32 = 0x8d9899;
-const CYAN: u32 = 0x0a7374;
-const CYAN_DARK: u32 = 0x075b5d;
-const BLUE_2: u32 = 0xe7f3f2;
-const NAV_ACTIVE: u32 = 0xe9f3f2;
-const EDGE: u32 = 0x17393b;
-const MINT: u32 = 0x237c5b;
-const AMBER: u32 = 0x9a640f;
-const DANGER: u32 = 0xc83e49;
+const SURFACE_2: u32 = 0xf2f4f7;
+const BORDER: u32 = 0xe4e7ec;
+const TEXT: u32 = 0x101828;
+const MUTED: u32 = 0x667085;
+const FAINT: u32 = 0x98a2b3;
+const CYAN: u32 = 0x0f766e;
+const CYAN_DARK: u32 = 0x0b5f59;
+const BLUE_2: u32 = 0xecf7f5;
+const NAV_ACTIVE: u32 = 0xe7f3f1;
+const EDGE: u32 = 0x0a514c;
+const MINT: u32 = 0x15803d;
+const AMBER: u32 = 0xb45309;
+const DANGER: u32 = 0xdc2626;
 const RADIUS: f32 = 12.0;
 const WINDOW_RADIUS: f32 = 16.0;
 const CONTENT_PAD: f32 = 24.0;
@@ -149,6 +149,8 @@ enum ExitChoice {
 enum InputField {
     ConnFilter,
     LogQuery,
+    ProxySearch,
+    RuleSearch,
     SubUrl,
     Mirror,
     MixedPort,
@@ -157,9 +159,11 @@ enum InputField {
     CoreVersion,
 }
 
-const INPUT_FIELDS: [InputField; 8] = [
+const INPUT_FIELDS: [InputField; 10] = [
     InputField::ConnFilter,
     InputField::LogQuery,
+    InputField::ProxySearch,
+    InputField::RuleSearch,
     InputField::SubUrl,
     InputField::Mirror,
     InputField::MixedPort,
@@ -192,6 +196,7 @@ struct FieldSpec {
 enum LogLevelFilter {
     #[default]
     All,
+    Debug,
     Info,
     Warn,
     Error,
@@ -201,9 +206,48 @@ impl LogLevelFilter {
     fn label(self) -> &'static str {
         match self {
             Self::All => "全部",
-            Self::Info => "info+",
-            Self::Warn => "warn+",
-            Self::Error => "error",
+            Self::Debug => "Debug",
+            Self::Info => "Info",
+            Self::Warn => "Warn",
+            Self::Error => "Error",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SettingsSection {
+    #[default]
+    General,
+    Network,
+    Core,
+    Tun,
+    Automation,
+    Appearance,
+    Advanced,
+}
+
+impl SettingsSection {
+    fn all() -> [Self; 7] {
+        [
+            Self::General,
+            Self::Network,
+            Self::Core,
+            Self::Tun,
+            Self::Automation,
+            Self::Appearance,
+            Self::Advanced,
+        ]
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::General => "常规",
+            Self::Network => "网络与端口",
+            Self::Core => "内核",
+            Self::Tun => "TUN",
+            Self::Automation => "自动化",
+            Self::Appearance => "外观",
+            Self::Advanced => "高级",
         }
     }
 }
@@ -222,6 +266,56 @@ struct Sbgui {
     inputs: [TextField; INPUT_FIELDS.len()],
     /// The logs-page level filter.
     log_level: LogLevelFilter,
+    settings_section: SettingsSection,
+    show_subscription_import: bool,
+    show_rule_sets: bool,
+    core_menu_open: bool,
+    node_card_view: bool,
+    paused_connections: Option<Vec<Connection>>,
+    selected_connection: Option<String>,
+    hidden_core_logs: usize,
+    hidden_events: usize,
+    log_wrap: bool,
+    log_follow: bool,
+    confirm_close_all: bool,
+}
+
+/// Visual-review seams read once at startup. Ordinary launches never set
+/// them; automated screenshot review uses them instead of synthesized mouse
+/// input, which cannot reach the window on a locked desktop session.
+///
+/// - `SBGUI_PAGE=<dashboard|subscriptions|proxies|rules|connections|logs|settings>`
+///   opens the window directly on that page.
+/// - `SBGUI_SIZE=<width>x<height>` overrides the window size in logical px.
+/// - `SBGUI_SHOW_EXIT_CONFIRM=1` renders the exit-confirmation overlay
+///   without enabling the OS proxy.
+fn env_page() -> Option<Page> {
+    let name = std::env::var("SBGUI_PAGE").ok()?;
+    Some(match name.to_ascii_lowercase().as_str() {
+        "dashboard" | "概览" => Page::Dashboard,
+        "subscriptions" | "订阅" => Page::Subscriptions,
+        "proxies" | "节点" => Page::Proxies,
+        "rules" | "规则" => Page::Rules,
+        "connections" | "连接" => Page::Connections,
+        "logs" | "日志" => Page::Logs,
+        "settings" | "设置" => Page::Settings,
+        _ => return None,
+    })
+}
+
+fn env_window_size() -> (f32, f32) {
+    std::env::var("SBGUI_SIZE")
+        .ok()
+        .and_then(|text| {
+            let (w, h) = text.split_once('x')?;
+            Some((w.trim().parse::<f32>().ok()?, h.trim().parse::<f32>().ok()?))
+        })
+        .filter(|(w, h)| *w >= 400.0 && *h >= 300.0)
+        .unwrap_or((1080.0, 760.0))
+}
+
+fn env_show_exit_confirm() -> bool {
+    std::env::var("SBGUI_SHOW_EXIT_CONFIRM").is_ok_and(|value| value == "1")
 }
 
 impl Sbgui {
@@ -231,15 +325,27 @@ impl Sbgui {
             controller,
             data_dir,
             snapshot,
-            page: Page::Dashboard,
+            page: env_page().unwrap_or(Page::Dashboard),
             group_index: 0,
-            confirm_exit: false,
+            confirm_exit: env_show_exit_confirm(),
             exit_choice: None,
             inputs: INPUT_FIELDS.map(|_| TextField {
                 focus: cx.focus_handle(),
                 text: String::new(),
             }),
             log_level: LogLevelFilter::default(),
+            settings_section: SettingsSection::default(),
+            show_subscription_import: false,
+            show_rule_sets: false,
+            core_menu_open: false,
+            node_card_view: false,
+            paused_connections: None,
+            selected_connection: None,
+            hidden_core_logs: 0,
+            hidden_events: 0,
+            log_wrap: true,
+            log_follow: true,
+            confirm_close_all: false,
         }
     }
 
@@ -307,7 +413,18 @@ impl Sbgui {
             }
         }
         match keystroke.key.as_str() {
-            "enter" => self.commit_field(field, cx),
+            "enter"
+                if matches!(
+                    field,
+                    InputField::ConnFilter
+                        | InputField::LogQuery
+                        | InputField::ProxySearch
+                        | InputField::RuleSearch
+                        | InputField::SubUrl
+                ) =>
+            {
+                self.commit_field(field, cx)
+            }
             "escape" => self.reset_field(field),
             _ => {}
         }
@@ -321,7 +438,10 @@ impl Sbgui {
     fn commit_field(&mut self, field: InputField, cx: &mut Context<Self>) {
         let text = self.field(field).text.trim().to_owned();
         match field {
-            InputField::ConnFilter | InputField::LogQuery => {}
+            InputField::ConnFilter
+            | InputField::LogQuery
+            | InputField::ProxySearch
+            | InputField::RuleSearch => {}
             InputField::SubUrl => self.submit_sub_url(cx),
             InputField::Mirror => self.send(ClientCommand::UpdateSettings(SettingsPatch {
                 mirror: Some(text),
@@ -376,11 +496,28 @@ impl Sbgui {
         cx.notify();
     }
 
+    fn save_settings(&mut self, cx: &mut Context<Self>) {
+        for field in [
+            InputField::Mirror,
+            InputField::MixedPort,
+            InputField::TestUrl,
+            InputField::AutoUpdateMinutes,
+            InputField::CoreVersion,
+        ] {
+            self.commit_field(field, cx);
+        }
+        cx.notify();
+    }
+
     /// Esc: filters and the import field clear; settings fields restore the
     /// persisted value, so a half-typed edit never pretends to be saved.
     fn reset_field(&mut self, field: InputField) {
         let value = match field {
-            InputField::ConnFilter | InputField::LogQuery | InputField::SubUrl => String::new(),
+            InputField::ConnFilter
+            | InputField::LogQuery
+            | InputField::ProxySearch
+            | InputField::RuleSearch
+            | InputField::SubUrl => String::new(),
             InputField::Mirror => self.snapshot.settings.mirror.clone(),
             InputField::MixedPort => self.snapshot.settings.mixed_port.to_string(),
             InputField::TestUrl => self.snapshot.settings.test_url.clone(),
@@ -437,7 +574,7 @@ impl Render for Sbgui {
             .overflow_hidden()
             .border_1()
             .border_color(rgb(BORDER))
-            .font_family("Microsoft YaHei UI")
+            .font_family("Segoe UI Variable, Microsoft YaHei UI, Noto Sans SC")
             .text_color(rgb(TEXT))
             .bg(rgb(BG))
             .flex()
@@ -459,6 +596,7 @@ impl Render for Sbgui {
                             .flex()
                             .flex_col()
                             .child(self.header(page, cx))
+                            .child(self.global_controls(cx))
                             .child(
                                 div()
                                     .id("page-scroll")
@@ -466,7 +604,13 @@ impl Render for Sbgui {
                                     .overflow_y_scroll()
                                     .px(px(CONTENT_PAD))
                                     .pb(px(CONTENT_PAD))
-                                    .child(self.content(window, cx)),
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .max_w(px(1320.0))
+                                            .mx_auto()
+                                            .child(self.content(window, cx)),
+                                    ),
                             ),
                     ),
             )
@@ -502,34 +646,30 @@ impl Sbgui {
                     .gap(px(10.0))
                     .child(
                         div()
-                            .text_size(px(15.0))
+                            .text_size(px(18.0))
                             .text_color(rgb(TEXT))
-                            .child("退出前确认"),
+                            .child("退出 Serein？"),
                     )
-                    .child(div().text_size(px(12.0)).text_color(rgb(MUTED)).child(
-                        "系统代理仍指向本机 sing-box。退出后内核将随进程停止，\
-                                 若不恢复代理设置，依赖系统代理的应用可能无法联网。",
-                    ))
                     .child(
                         div()
-                            .mt(px(6.0))
+                            .text_size(px(12.0))
+                            .text_color(rgb(MUTED))
+                            .child("退出会停止 sing-box。若保留系统代理，其他应用可能无法联网。"),
+                    )
+                    .child(
+                        div()
+                            .mt(px(2.0))
+                            .text_size(px(11.0))
+                            .text_color(rgb(DANGER))
+                            .child("选择「仅退出」后，系统代理设置将保留。"),
+                    )
+                    .child(
+                        div()
+                            .mt(px(10.0))
                             .flex()
                             .items_center()
+                            .justify_end()
                             .gap(px(8.0))
-                            .child(self.exit_button(
-                                "exit-restore",
-                                "恢复代理并退出",
-                                Tone::Accent,
-                                cx,
-                                ExitChoice::Restore,
-                            ))
-                            .child(self.exit_button(
-                                "exit-keep",
-                                "保留代理设置",
-                                Tone::Neutral,
-                                cx,
-                                ExitChoice::Keep,
-                            ))
                             .child(
                                 div()
                                     .id("exit-cancel")
@@ -539,13 +679,27 @@ impl Sbgui {
                                     .text_size(px(12.0))
                                     .text_color(rgb(MUTED))
                                     .cursor_pointer()
-                                    .hover(|style| style.text_color(rgb(TEXT)))
+                                    .hover(|style| style.bg(rgb(SURFACE_2)).text_color(rgb(TEXT)))
                                     .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
                                         view.confirm_exit = false;
                                         cx.notify();
                                     }))
                                     .child("取消"),
-                            ),
+                            )
+                            .child(self.exit_button(
+                                "exit-keep",
+                                "仅退出",
+                                Tone::Neutral,
+                                cx,
+                                ExitChoice::Keep,
+                            ))
+                            .child(self.exit_button(
+                                "exit-restore",
+                                "关闭系统代理并退出",
+                                Tone::Accent,
+                                cx,
+                                ExitChoice::Restore,
+                            )),
                     ),
             )
     }
@@ -594,7 +748,7 @@ impl Sbgui {
             "maximize"
         };
         div()
-            .h(px(48.0))
+            .h(px(54.0))
             .w_full()
             .flex()
             .items_center()
@@ -676,7 +830,7 @@ impl Sbgui {
         div()
             .id(button_id)
             .w(px(42.0))
-            .h(px(48.0))
+            .h(px(54.0))
             .flex()
             .items_center()
             .justify_center()
@@ -695,11 +849,6 @@ impl Sbgui {
 
     fn sidebar(&self, page: Page, cx: &mut Context<Self>) -> impl IntoElement {
         let snapshot = &self.snapshot;
-        let profile = snapshot
-            .active_profile
-            .as_ref()
-            .map(|p| p.name.as_str())
-            .unwrap_or("添加订阅");
         let side_samples: Vec<(u64, u64)> = snapshot
             .traffic_history
             .iter()
@@ -707,14 +856,15 @@ impl Sbgui {
             .collect();
         div()
             .id("sidebar-scroll")
-            .w(px(232.0))
+            .w(px(224.0))
             .flex_shrink_0()
             .h_full()
             .flex()
             .flex_col()
-            .gap(px(9.0))
-            .p(px(10.0))
-            .bg(rgb(SURFACE_2))
+            .gap(px(6.0))
+            .px(px(12.0))
+            .py(px(16.0))
+            .bg(rgb(SURFACE))
             .border_r_1()
             .border_color(rgb(BORDER))
             .overflow_y_scroll()
@@ -722,7 +872,7 @@ impl Sbgui {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(7.0))
+                    .gap(px(4.0))
                     .children(Page::all().into_iter().map(|item| {
                         let active = item == page;
                         let (glyph, count) = match item {
@@ -737,15 +887,14 @@ impl Sbgui {
                         div()
                             .id(format!("nav-{}", item.title()))
                             .w_full()
-                            .h(px(40.0))
-                            .px(px(10.0))
-                            .rounded(px(9.0))
+                            .h(px(42.0))
+                            .px(px(12.0))
+                            .rounded(px(8.0))
                             .flex()
                             .items_center()
-                            .gap(px(9.0))
+                            .gap(px(11.0))
                             .bg(rgb(if active { NAV_ACTIVE } else { SURFACE }))
-                            .border_1()
-                            .border_color(rgb(if active { 0xb9d4d2 } else { BORDER }))
+                            .when(active, |style| style.border_l_2().border_color(rgb(CYAN)))
                             .cursor_pointer()
                             .hover(move |style| {
                                 style.bg(rgb(if active { NAV_ACTIVE } else { SURFACE_2 }))
@@ -756,20 +905,18 @@ impl Sbgui {
                             }))
                             .child(
                                 div()
-                                    .w(px(22.0))
-                                    .h(px(22.0))
-                                    .rounded(px(6.0))
+                                    .w(px(20.0))
+                                    .h(px(20.0))
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .bg(rgb(if active { CYAN } else { SURFACE_2 }))
-                                    .child(icon(glyph, if active { SURFACE } else { MUTED }, 14.0)),
+                                    .child(icon(glyph, if active { CYAN } else { MUTED }, 16.0)),
                             )
                             .child(
                                 div()
                                     .flex_1()
-                                    .text_size(px(13.0))
-                                    .text_color(rgb(if active { TEXT } else { MUTED }))
+                                    .text_size(px(14.0))
+                                    .text_color(rgb(if active { CYAN } else { TEXT }))
                                     .child(item.title()),
                             )
                             .children(count.map(|value| {
@@ -780,293 +927,42 @@ impl Sbgui {
                             }))
                     })),
             )
-            .child(self.mode_selector(cx))
             .child(
-                div()
-                    .p(px(11.0))
-                    .rounded(px(10.0))
-                    .bg(rgb(SURFACE))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .child(self.sidebar_switch(
-                        "side-system",
-                        "系统代理",
-                        "globe",
-                        snapshot.system_proxy_enabled,
-                        ClientCommand::ToggleSystemProxy,
-                        cx,
-                    ))
-                    .child(
-                        div()
-                            .mt(px(8.0))
-                            .pt(px(8.0))
-                            .border_t_1()
-                            .border_color(rgb(BORDER))
-                            .child(self.sidebar_switch(
-                                "side-tun",
-                                "TUN 模式",
-                                "network",
-                                snapshot.traffic_mode == TrafficMode::Tun,
-                                ClientCommand::UpdateSettings(SettingsPatch {
-                                    traffic_mode: Some(
-                                        if snapshot.traffic_mode == TrafficMode::Tun {
-                                            TrafficMode::SystemProxy
-                                        } else {
-                                            TrafficMode::Tun
-                                        },
-                                    ),
-                                    ..Default::default()
-                                }),
-                                cx,
-                            )),
-                    ),
-            )
-            .child(
-                div()
-                    .id("active-subscription")
-                    .p(px(12.0))
-                    .rounded(px(10.0))
-                    .bg(rgb(SURFACE))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgb(BLUE_2)))
-                    .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
-                        view.page = Page::Subscriptions;
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(icon("subscription", MUTED, 16.0))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .text_size(px(13.0))
-                                    .text_color(rgb(TEXT))
-                                    .truncate()
-                                    .child(profile.to_owned()),
-                            )
-                            .child(icon("chevron", MUTED, 14.0)),
-                    )
-                    .child(
-                        div()
-                            .mt(px(8.0))
-                            .text_size(px(11.0))
-                            .text_color(rgb(MUTED))
-                            .child(usage_label(snapshot.subscription_usage.as_ref())),
-                    ),
-            )
-            .child(
-                div().mt_auto().pt(px(2.0)).child(
+                div().mt_auto().pt(px(16.0)).child(
                     div()
-                        .p(px(12.0))
-                        .rounded(px(10.0))
-                        .bg(rgb(SURFACE))
-                        .border_1()
+                        .pt(px(14.0))
+                        .border_t_1()
                         .border_color(rgb(BORDER))
                         .child(side_rate("下载", snapshot.download_speed, CYAN))
-                        .child(side_rate("上传", snapshot.upload_speed, MUTED))
+                        .child(side_rate("上传", snapshot.upload_speed, AMBER))
                         .child(
                             div()
                                 .mt(px(8.0))
-                                .h(px(30.0))
+                                .h(px(34.0))
                                 .w_full()
                                 .child(traffic_chart(side_samples, snapshot.traffic_peak().max(1))),
                         ),
                 ),
             )
-            .child(
-                div()
-                    .p(px(11.0))
-                    .rounded(px(10.0))
-                    .bg(rgb(SURFACE))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(7.0))
-                            .child(status_dot(if snapshot.core_running { MINT } else { FAINT }))
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(TEXT))
-                                    .child("sing-box 内核"),
-                            )
-                            .child(div().flex_1())
-                            .child(switch_track(snapshot.core_running)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(rgb(MUTED))
-                            .child(format!(
-                                "{} · {}",
-                                snapshot.core_version.as_deref().unwrap_or("未安装"),
-                                if snapshot.starting {
-                                    "启动中"
-                                } else if snapshot.core_running {
-                                    "运行中"
-                                } else {
-                                    "未运行"
-                                }
-                            )),
-                    ),
-            )
-    }
-
-    fn mode_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .p(px(10.0))
-            .rounded(px(10.0))
-            .bg(rgb(SURFACE))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .child(
-                div()
-                    .text_size(px(10.0))
-                    .text_color(rgb(MUTED))
-                    .child("出站模式"),
-            )
-            .child(
-                div()
-                    .mt(px(7.0))
-                    .flex()
-                    .p(px(3.0))
-                    .gap(px(2.0))
-                    .rounded(px(8.0))
-                    .bg(rgb(SURFACE_2))
-                    .children(
-                        [
-                            OutboundMode::Rule,
-                            OutboundMode::Global,
-                            OutboundMode::Direct,
-                        ]
-                        .into_iter()
-                        .map(|mode| {
-                            let active = self.snapshot.outbound_mode == mode;
-                            div()
-                                .id(format!("outbound-{}", mode.as_str()))
-                                .flex_1()
-                                .py(px(7.0))
-                                .rounded(px(6.0))
-                                .flex()
-                                .justify_center()
-                                .text_size(px(11.0))
-                                .cursor_pointer()
-                                .bg(rgb(if active { SURFACE } else { SURFACE_2 }))
-                                .text_color(rgb(if active { TEXT } else { MUTED }))
-                                .when(active, |style| style.border_1().border_color(rgb(BORDER)))
-                                .hover(move |s| s.bg(rgb(if active { SURFACE } else { BLUE_2 })))
-                                .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
-                                    view.send(ClientCommand::SetOutboundMode(mode));
-                                    cx.notify();
-                                }))
-                                .child(mode.label())
-                        }),
-                    ),
-            )
-            .child(
-                div()
-                    .mt(px(7.0))
-                    .text_size(px(10.0))
-                    .text_color(rgb(MUTED))
-                    .child(match self.snapshot.outbound_mode {
-                        OutboundMode::Rule => "按配置路由规则分流",
-                        OutboundMode::Global => "所有流量通过当前节点",
-                        OutboundMode::Direct => "所有流量直连网络",
-                    }),
-            )
-    }
-
-    fn sidebar_switch(
-        &self,
-        id: &'static str,
-        label: &'static str,
-        glyph: &'static str,
-        on: bool,
-        command: ClientCommand,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let locked = label == "TUN 模式" && (self.snapshot.core_running || self.snapshot.starting);
-        div()
-            .id(id)
-            .p(px(2.0))
-            .rounded(px(8.0))
-            .when(!locked, |s| s.cursor_pointer().hover(|s| s.bg(rgb(BLUE_2))))
-            .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
-                if locked {
-                    return;
-                }
-                view.send(command.clone());
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(icon(glyph, TEXT, 17.0))
-                    .child(switch_track(on)),
-            )
-            .child(
-                div()
-                    .mt(px(10.0))
-                    .text_size(px(12.0))
-                    .text_color(rgb(TEXT))
-                    .child(label),
-            )
-            .child(
-                div()
-                    .mt(px(3.0))
-                    .text_size(px(10.0))
-                    .text_color(rgb(MUTED))
-                    .child(if locked {
-                        "停核后切换"
-                    } else if label == "TUN 模式" {
-                        if on { "已选择" } else { "未选择" }
-                    } else if on {
-                        "已开启"
-                    } else {
-                        "已关闭"
-                    }),
-            )
     }
 
     fn header(&self, page: Page, cx: &mut Context<Self>) -> impl IntoElement {
-        let running = self.snapshot.core_running;
+        let _ = cx;
         div()
             .px(px(CONTENT_PAD))
-            .pt(px(18.0))
-            .pb(px(14.0))
+            .pt(px(14.0))
+            .pb(px(10.0))
             .flex()
-            .items_end()
+            .items_center()
             .gap(px(12.0))
             .flex_shrink_0()
-            .border_b_1()
-            .border_color(rgb(BORDER))
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
                     .child(
                         div()
-                            .text_size(px(10.0))
-                            .text_color(rgb(MUTED))
-                            .child(format!("SEREIN  /  {}", page.title().to_uppercase())),
-                    )
-                    .child(
-                        div()
-                            .mt(px(8.0))
-                            .text_size(px(26.0))
+                            .text_size(px(28.0))
                             .text_color(rgb(TEXT))
                             .child(page.title()),
                     )
@@ -1076,71 +972,263 @@ impl Sbgui {
                             .text_size(px(12.0))
                             .text_color(rgb(MUTED))
                             .child(page.subtitle()),
-                    )
-                    .child(self.header_status()),
+                    ),
             )
+    }
+
+    fn global_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let snapshot = &self.snapshot;
+        let running = snapshot.core_running;
+        let tun_on = snapshot.traffic_mode == TrafficMode::Tun;
+        let current = clean_proxy_label(snapshot.current_node.as_deref().unwrap_or("未选择节点"));
+        let delay = self.selected_group().and_then(|group| {
+            group
+                .delays
+                .get(snapshot.current_node.as_deref().unwrap_or(""))
+                .copied()
+        });
+        let current_detail = delay
+            .map(|value| format!("{current} · {value} ms"))
+            .unwrap_or(current);
+        let status_text = snapshot
+            .busy
+            .as_deref()
+            .map(|busy| format!("{busy}…"))
+            .unwrap_or_else(|| snapshot.status.clone());
+        let status_color = if status_text.contains("失败") || status_text.contains("错误") {
+            DANGER
+        } else if snapshot.busy.is_some() {
+            CYAN
+        } else {
+            MUTED
+        };
+
+        div()
+            .mx(px(CONTENT_PAD))
+            .mb(px(4.0))
+            .min_h(px(62.0))
+            .px(px(14.0))
+            .py(px(9.0))
+            .rounded(px(10.0))
+            .bg(rgb(SURFACE))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(6.0))
+            .child(Self::global_control_item(
+                "global-core",
+                "内核",
+                if snapshot.busy.is_some() {
+                    if running {
+                        "停止并取消"
+                    } else {
+                        "取消操作"
+                    }
+                } else if snapshot.starting {
+                    "启动中"
+                } else if running {
+                    "运行中"
+                } else {
+                    "未运行"
+                },
+                "nodes",
+                if running { MINT } else { FAINT },
+                cx,
+                if snapshot.busy.is_some() || snapshot.starting {
+                    Some(ClientCommand::StopCore)
+                } else {
+                    (!running).then_some(ClientCommand::StartCore)
+                },
+            ))
+            .child(Self::global_control_item(
+                "global-mode",
+                "出站模式",
+                snapshot.outbound_mode.label(),
+                "rules",
+                CYAN,
+                cx,
+                Some(ClientCommand::SetOutboundMode(
+                    snapshot.outbound_mode.next(),
+                )),
+            ))
+            .child(
+                div()
+                    .id("global-node")
+                    .w(px(190.0))
+                    .flex_shrink_0()
+                    .px(px(12.0))
+                    .py(px(7.0))
+                    .rounded(px(7.0))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(SURFACE_2)))
+                    .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                        view.page = Page::Proxies;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(icon("globe", CYAN, 17.0))
+                            .child(
+                                div()
+                                    .min_w(px(0.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(10.0))
+                                            .text_color(rgb(MUTED))
+                                            .child("当前节点"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(12.0))
+                                            .text_color(rgb(TEXT))
+                                            .truncate()
+                                            .child(current_detail),
+                                    ),
+                            ),
+                    ),
+            )
+            .child(Self::global_control_item(
+                "global-system-proxy",
+                "系统代理",
+                if snapshot.system_proxy_enabled {
+                    "已开启"
+                } else {
+                    "已关闭"
+                },
+                "network",
+                if snapshot.system_proxy_enabled {
+                    MINT
+                } else {
+                    MUTED
+                },
+                cx,
+                Some(ClientCommand::ToggleSystemProxy),
+            ))
+            .child(Self::global_control_item(
+                "global-tun",
+                "TUN",
+                if tun_on { "已开启" } else { "已关闭" },
+                "network",
+                if tun_on { MINT } else { MUTED },
+                cx,
+                (!running && !snapshot.starting).then_some(ClientCommand::UpdateSettings(
+                    SettingsPatch {
+                        traffic_mode: Some(if tun_on {
+                            TrafficMode::SystemProxy
+                        } else {
+                            TrafficMode::Tun
+                        }),
+                        ..Default::default()
+                    },
+                )),
+            ))
+            .child(
+                div()
+                    .id("global-core-menu")
+                    .size(px(36.0))
+                    .flex_shrink_0()
+                    .rounded(px(7.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(18.0))
+                    .text_color(rgb(MUTED))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(SURFACE_2)).text_color(rgb(TEXT)))
+                    .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                        view.core_menu_open = !view.core_menu_open;
+                        cx.notify();
+                    }))
+                    .child("···"),
+            )
+            .children((self.core_menu_open && running).then(|| {
+                div()
+                    .w_full()
+                    .pt(px(8.0))
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(self.action(
+                        "global-restart",
+                        "重启内核",
+                        Tone::Neutral,
+                        cx,
+                        ClientCommand::RestartCore,
+                    ))
+                    .child(self.action(
+                        "global-stop",
+                        "停止内核",
+                        Tone::Warning,
+                        cx,
+                        ClientCommand::StopCore,
+                    ))
+            }))
+            .children((!status_text.is_empty()).then(|| {
+                div()
+                    .w_full()
+                    .text_size(px(11.0))
+                    .text_color(rgb(status_color))
+                    .child(status_text)
+            }))
+    }
+
+    fn global_control_item(
+        id: &'static str,
+        label: &'static str,
+        value: impl Into<String>,
+        glyph: &'static str,
+        color: u32,
+        cx: &mut Context<Self>,
+        command: Option<ClientCommand>,
+    ) -> impl IntoElement {
+        let value = value.into();
+        let clickable = command.is_some();
+        div()
+            .id(id)
+            .w(px(126.0))
+            .flex_shrink_0()
+            .px(px(12.0))
+            .py(px(7.0))
+            .rounded(px(7.0))
+            .when(clickable, |s| {
+                s.cursor_pointer().hover(|s| s.bg(rgb(SURFACE_2)))
+            })
+            .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                if let Some(command) = command.clone() {
+                    view.send(command);
+                    cx.notify();
+                }
+            }))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .children((page == Page::Dashboard).then(|| {
-                        self.action(
-                            "header-restart",
-                            "重启内核",
-                            Tone::Neutral,
-                            cx,
-                            ClientCommand::RestartCore,
-                        )
-                    }))
-                    .child(self.action(
-                        "header-core",
-                        if self.snapshot.starting {
-                            "启动中…"
-                        } else if running {
-                            "停止内核"
-                        } else {
-                            "启动内核"
-                        },
-                        Tone::Accent,
-                        cx,
-                        if running {
-                            ClientCommand::StopCore
-                        } else {
-                            ClientCommand::StartCore
-                        },
-                    )),
+                    .child(icon(glyph, color, 17.0))
+                    .child(
+                        div()
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(MUTED))
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(color))
+                                    .child(value),
+                            ),
+                    ),
             )
-    }
-
-    /// The engine's own status line, shown under every page title: what is
-    /// executing right now, whether a crash restart is pending, and the last
-    /// operation's outcome. The engine writes these strings; the UI only
-    /// renders them, so failures are visible no matter which page is open.
-    fn header_status(&self) -> impl IntoElement {
-        let (label, color) = if let Some(busy) = self.snapshot.busy.as_deref() {
-            (busy_label(busy), CYAN)
-        } else if self.snapshot.restart_attempts > 0 {
-            (
-                format!(
-                    "内核异常退出，第 {} 次自动重启等待中…",
-                    self.snapshot.restart_attempts
-                ),
-                AMBER,
-            )
-        } else {
-            let color = if self.snapshot.status.contains("失败") {
-                DANGER
-            } else {
-                MUTED
-            };
-            (self.snapshot.status.clone(), color)
-        };
-        div()
-            .mt(px(6.0))
-            .text_size(px(12.0))
-            .text_color(rgb(color))
-            .child(label)
     }
 
     /// One header/row action button. The command is built at click time so the
@@ -1188,8 +1276,8 @@ impl Sbgui {
         match self.page {
             Page::Dashboard => self.dashboard(cx),
             Page::Subscriptions => self.subscriptions(window, cx),
-            Page::Proxies => self.proxies(cx),
-            Page::Rules => self.rules(cx),
+            Page::Proxies => self.proxies(window, cx),
+            Page::Rules => self.rules(window, cx),
             Page::Connections => self.connections(window, cx),
             Page::Logs => self.logs(window, cx),
             Page::Settings => self.settings(window, cx),
@@ -1265,33 +1353,21 @@ impl Sbgui {
 
     // ------------------------------------------------------------ dashboard
 
-    fn dashboard(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn dashboard(&self, _cx: &mut Context<Self>) -> gpui::Div {
         let snapshot = &self.snapshot;
-        let current = snapshot.current_node.as_deref().unwrap_or("尚未选择节点");
+        let current = clean_proxy_label(snapshot.current_node.as_deref().unwrap_or("尚未选择节点"));
         let upload_peak = snapshot
             .traffic_history
             .iter()
             .map(|point| point.up)
             .max()
             .unwrap_or(0);
-        let group = self.selected_group();
-        let group_detail = group
-            .as_ref()
-            .map(|group| {
-                format!(
-                    "节点选择 · {} · {}",
-                    if group.is_auto() {
-                        "自动选择组"
-                    } else {
-                        "手动选择组"
-                    },
-                    group.kind
-                )
-            })
-            .unwrap_or_else(|| "导入订阅并启动内核后选择节点".to_owned());
-        let current_delay = group
-            .as_ref()
-            .and_then(|group| group.delays.get(current).copied());
+        let current_delay = self.selected_group().as_ref().and_then(|group| {
+            group
+                .delays
+                .get(snapshot.current_node.as_deref().unwrap_or(""))
+                .copied()
+        });
         let tcp_count = snapshot
             .connections
             .connections
@@ -1299,32 +1375,140 @@ impl Sbgui {
             .filter(|connection| connection.metadata.network.eq_ignore_ascii_case("tcp"))
             .count();
         let udp_count = snapshot.active_connections.saturating_sub(tcp_count);
-        let node_test = (!current.is_empty() && current != "尚未选择节点").then(|| {
-            self.action(
-                "overview-test-node",
-                "测试延迟",
-                Tone::Neutral,
-                cx,
-                ClientCommand::TestNode(current.to_owned()),
-            )
-        });
+        let profile = snapshot
+            .active_profile
+            .as_ref()
+            .map(|profile| profile.name.clone())
+            .unwrap_or_else(|| "尚未添加订阅".to_owned());
+        let connected = snapshot.core_running;
         div()
             .flex()
             .flex_col()
             .gap(px(SECTION_GAP))
+            .children(snapshot.profiles.is_empty().then(|| {
+                div()
+                    .p(px(16.0))
+                    .rounded(px(RADIUS))
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(rgb(TEXT))
+                            .child("完成首次连接"),
+                    )
+                    .child(
+                        div()
+                            .mt(px(10.0))
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(8.0))
+                            .children(
+                                ["添加订阅", "选择节点", "启动内核", "开启系统代理"]
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(index, step)| {
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(8.0))
+                                            .child(
+                                                div()
+                                                    .size(px(24.0))
+                                                    .rounded(px(12.0))
+                                                    .bg(rgb(BLUE_2))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .text_size(px(11.0))
+                                                    .text_color(rgb(CYAN))
+                                                    .child((index + 1).to_string()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.0))
+                                                    .text_color(rgb(MUTED))
+                                                    .child(step),
+                                            )
+                                            .children(
+                                                (index < 3).then(|| icon("chevron", FAINT, 13.0)),
+                                            )
+                                    }),
+                            ),
+                    )
+            }))
+            .child(
+                div()
+                    .id("overview-connection")
+                    .min_h(px(76.0))
+                    .px(px(18.0))
+                    .py(px(14.0))
+                    .rounded(px(RADIUS))
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child(
+                        div()
+                            .size(px(38.0))
+                            .rounded(px(19.0))
+                            .bg(rgb(if connected { 0xeaf7ee } else { SURFACE_2 }))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon(
+                                if connected { "check" } else { "network" },
+                                if connected { MINT } else { MUTED },
+                                20.0,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .child(div().text_size(px(15.0)).text_color(rgb(TEXT)).child(
+                                if connected {
+                                    "内核已连接"
+                                } else {
+                                    "内核未连接"
+                                },
+                            ))
+                            .child(
+                                div()
+                                    .mt(px(3.0))
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(MUTED))
+                                    .truncate()
+                                    .child(format!("{profile} · {current}")),
+                            ),
+                    )
+                    .children(
+                        current_delay.map(|delay| pill(format!("{delay} ms"), delay_color(delay))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(MUTED))
+                            .child(snapshot.outbound_mode.label()),
+                    ),
+            )
             .child(
                 div()
                     .flex()
                     .flex_wrap()
                     .gap(px(12.0))
                     .child(metric_card(
-                        "实时下载",
+                        "下载",
                         format!("{} /s", human_bytes(snapshot.download_speed)),
                         format!("5 分钟峰值  {} /s", human_bytes(snapshot.traffic_peak())),
-                        true,
+                        false,
                     ))
                     .child(metric_card(
-                        "实时上传",
+                        "上传",
                         format!("{} /s", human_bytes(snapshot.upload_speed)),
                         format!("5 分钟峰值  {} /s", human_bytes(upload_peak)),
                         false,
@@ -1344,115 +1528,57 @@ impl Sbgui {
                             human_bytes(snapshot.total_upload)
                         ),
                         false,
-                    ))
-                    .child(metric_card(
-                        "内核内存",
-                        if snapshot.core_running && snapshot.memory_used > 0 {
-                            human_bytes(snapshot.memory_used)
-                        } else {
-                            "-".to_owned()
-                        },
-                        match snapshot.core_runtime_version.as_deref() {
-                            Some(version) => format!("运行 {version}"),
-                            None if snapshot.core_running => "运行中".to_owned(),
-                            None => "未运行".to_owned(),
-                        },
-                        false,
                     )),
             )
+            .child(div().min_h(px(270.0)).child(traffic_panel(snapshot)))
             .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(14.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(420.0))
-                            .child(traffic_panel(snapshot)),
-                    )
-                    .child(
-                        div()
-                            .w(px(320.0))
-                            .flex_grow(1.0)
-                            .flex_shrink_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(14.0))
-                            .child(
-                                panel("当前节点")
-                                    .child(
-                                        div()
-                                            .mt(px(14.0))
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(10.0))
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w(px(0.0))
-                                                    .text_size(px(18.0))
-                                                    .text_color(rgb(TEXT))
-                                                    .truncate()
-                                                    .child(current.to_owned()),
-                                            )
-                                            .children(node_test)
-                                            .children(current_delay.map(|delay| {
-                                                div()
-                                                    .text_size(px(18.0))
-                                                    .text_color(rgb(MINT))
-                                                    .child(format!("{} ms", delay))
-                                            })),
-                                    )
-                                    .child(
-                                        div()
-                                            .mt(px(5.0))
-                                            .text_size(px(11.0))
-                                            .text_color(rgb(MUTED))
-                                            .child(group_detail),
-                                    )
-                                    .child(setting_line("出站模式", snapshot.outbound_mode.label()))
-                                    .child(setting_line(
-                                        "内核版本",
-                                        snapshot.core_version.as_deref().unwrap_or("未安装"),
-                                    ))
-                                    .child(setting_line(
-                                        "自动重启",
-                                        &format!("已触发 {} 次", snapshot.restart_attempts),
-                                    )),
-                            )
-                            .child(panel("客户端事件").children(if snapshot.events.is_empty() {
-                                vec![
-                                    div()
-                                        .mt(px(10.0))
-                                        .text_size(px(11.0))
-                                        .text_color(rgb(FAINT))
-                                        .child("等待客户端事件……"),
-                                ]
-                            } else {
+                panel("运行状态").child(
+                    div().mt(px(12.0)).flex().flex_wrap().children(
+                        [
+                            (
+                                "内存占用",
+                                if snapshot.core_running && snapshot.memory_used > 0 {
+                                    human_bytes(snapshot.memory_used)
+                                } else {
+                                    "—".to_owned()
+                                },
+                            ),
+                            (
+                                "内核版本",
                                 snapshot
-                                    .events
-                                    .iter()
-                                    .rev()
-                                    .take(4)
-                                    .map(|event| {
-                                        div()
-                                            .mt(px(9.0))
-                                            .flex()
-                                            .items_start()
-                                            .gap(px(8.0))
-                                            .child(status_dot(level_color(event)))
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .text_size(px(11.0))
-                                                    .text_color(rgb(MUTED))
-                                                    .child(event.clone()),
-                                            )
-                                    })
-                                    .collect()
-                            })),
+                                    .core_runtime_version
+                                    .clone()
+                                    .or_else(|| snapshot.core_version.clone())
+                                    .unwrap_or_else(|| "未安装".to_owned()),
+                            ),
+                            ("自动重启", format!("{} 次", snapshot.restart_attempts)),
+                            ("连接协议", format!("TCP {tcp_count} · UDP {udp_count}")),
+                        ]
+                        .into_iter()
+                        .map(|(label, value)| {
+                            div()
+                                .w(px(210.0))
+                                .flex_grow(1.0)
+                                .py(px(8.0))
+                                .px(px(12.0))
+                                .border_r_1()
+                                .border_color(rgb(BORDER))
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .text_color(rgb(MUTED))
+                                        .child(label),
+                                )
+                                .child(
+                                    div()
+                                        .mt(px(4.0))
+                                        .text_size(px(14.0))
+                                        .text_color(rgb(TEXT))
+                                        .child(value),
+                                )
+                        }),
                     ),
+                ),
             )
     }
 
@@ -1460,105 +1586,162 @@ impl Sbgui {
 
     fn subscriptions(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let profiles = self.snapshot.profiles.clone();
-        let import = div()
-            .id("import-from-clipboard")
-            .px(px(16.0))
-            .py(px(11.0))
-            .rounded(px(13.0))
-            .bg(rgb(CYAN))
-            .text_size(px(12.0))
-            .text_color(rgb(0xffffff))
-            .hover(|style| style.bg(rgb(CYAN_DARK)))
-            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
-                let text = cx
-                    .read_from_clipboard()
-                    .and_then(|item| item.text())
-                    .unwrap_or_default();
-                view.send(ClientCommand::ImportSubscription {
-                    name: None,
-                    url: text,
-                });
-                cx.notify();
-            }))
-            .child("从剪贴板导入");
-
-        let manual_import = div()
-            .id("import-manual")
-            .px(px(16.0))
-            .py(px(11.0))
-            .rounded(px(13.0))
-            .bg(rgb(SURFACE))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .text_size(px(12.0))
-            .text_color(rgb(TEXT))
-            .cursor_pointer()
-            .hover(|style| style.border_color(rgb(CYAN)).text_color(rgb(CYAN)))
-            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
-                view.submit_sub_url(cx);
-            }))
-            .child("导入");
-
-        let manual_row = div()
-            .mt(px(12.0))
-            .w_full()
-            .flex()
-            .items_center()
-            .gap(px(10.0))
-            .child(self.text_field(
-                FieldSpec {
-                    field: InputField::SubUrl,
-                    id: "sub-url",
-                    placeholder: "https://… 直接输入或粘贴订阅地址，回车导入",
-                    width: 420.0,
-                },
-                window,
-                cx,
-            ))
-            .child(manual_import);
-
         let mut root = div().flex().flex_col().gap(px(SECTION_GAP)).child(
             div()
-                .p(px(16.0))
-                .rounded(px(RADIUS))
-                .bg(rgb(SURFACE_2))
                 .flex()
                 .items_center()
-                .gap(px(14.0))
+                .flex_wrap()
+                .gap(px(8.0))
                 .child(
                     div()
-                        .flex_1()
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .text_color(rgb(TEXT))
-                                .child("导入订阅地址"),
-                        )
-                        .child(
-                            div()
-                                .mt(px(4.0))
-                                .text_size(px(11.0))
-                                .text_color(rgb(MUTED))
-                                .child(
-                                    "支持 HTTP/HTTPS 的 sing-box JSON 或完整订阅地址；\
-                                         sbctl 的 qr / index / clash.yaml 后缀会自动归一化。",
-                                ),
-                        )
-                        .child(manual_row),
+                        .id("add-subscription")
+                        .px(px(14.0))
+                        .py(px(8.0))
+                        .rounded(px(7.0))
+                        .bg(rgb(CYAN))
+                        .text_size(px(12.0))
+                        .text_color(rgb(SURFACE))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(CYAN_DARK)))
+                        .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                            view.show_subscription_import = true;
+                            cx.notify();
+                        }))
+                        .child("+ 添加订阅"),
                 )
-                .child(import),
+                .child(
+                    div()
+                        .id("import-from-clipboard")
+                        .px(px(14.0))
+                        .py(px(8.0))
+                        .rounded(px(7.0))
+                        .bg(rgb(SURFACE))
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .text_size(px(12.0))
+                        .text_color(rgb(TEXT))
+                        .cursor_pointer()
+                        .hover(|style| style.border_color(rgb(CYAN)).text_color(rgb(CYAN)))
+                        .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                            let text = cx
+                                .read_from_clipboard()
+                                .and_then(|item| item.text())
+                                .unwrap_or_default();
+                            if !text.trim().is_empty() {
+                                view.send(ClientCommand::ImportSubscription {
+                                    name: None,
+                                    url: text,
+                                });
+                            }
+                            cx.notify();
+                        }))
+                        .child("从剪贴板导入"),
+                )
+                .child(self.action(
+                    "update-all-subscriptions",
+                    "全部更新",
+                    Tone::Neutral,
+                    cx,
+                    ClientCommand::UpdateSubscription,
+                ))
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(MUTED))
+                        .child(format!("{} 个订阅档案", profiles.len())),
+                ),
         );
+
+        if self.show_subscription_import {
+            root = root.child(
+                div()
+                    .p(px(16.0))
+                    .rounded(px(RADIUS))
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(CYAN))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(14.0))
+                                    .text_color(rgb(TEXT))
+                                    .child("添加订阅"),
+                            )
+                            .child(
+                                div()
+                                    .id("close-subscription-import")
+                                    .size(px(36.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(SURFACE_2)))
+                                    .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                                        view.show_subscription_import = false;
+                                        cx.notify();
+                                    }))
+                                    .child(icon("close", MUTED, 14.0)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .mt(px(4.0))
+                            .text_size(px(11.0))
+                            .text_color(rgb(MUTED))
+                            .child("粘贴 HTTP/HTTPS 订阅地址或 sing-box JSON 地址。"),
+                    )
+                    .child(
+                        div()
+                            .mt(px(12.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .child(self.text_field(
+                                FieldSpec {
+                                    field: InputField::SubUrl,
+                                    id: "sub-url",
+                                    placeholder: "https://…",
+                                    width: 520.0,
+                                },
+                                window,
+                                cx,
+                            ))
+                            .child(
+                                div()
+                                    .id("import-manual")
+                                    .px(px(14.0))
+                                    .py(px(8.0))
+                                    .rounded(px(7.0))
+                                    .bg(rgb(CYAN))
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(SURFACE))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(CYAN_DARK)))
+                                    .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                                        view.submit_sub_url(cx);
+                                        view.show_subscription_import = false;
+                                    }))
+                                    .child("添加"),
+                            ),
+                    ),
+            );
+        }
 
         if profiles.is_empty() {
             return root.child(empty_state(
                 "还没有订阅",
-                "在上方输入地址回车，或复制订阅链接后点击「从剪贴板导入」。",
+                "点击「添加订阅」，或从剪贴板导入订阅链接。",
                 None,
                 cx,
             ));
         }
 
-        let cards = profiles.into_iter().enumerate().map(|(index, profile)| {
+        let rows = profiles.into_iter().enumerate().map(|(index, profile)| {
             let active = profile.active;
             let name_for_activate = profile.name.clone();
             let name_for_remove = profile.name.clone();
@@ -1566,51 +1749,80 @@ impl Sbgui {
             let usage = if active {
                 usage_label(self.snapshot.subscription_usage.as_ref())
             } else {
-                format!("更新于 {updated}")
+                "用量信息仅在当前订阅可用".to_owned()
             };
             div()
-                .id(format!("subscription-card-{index}"))
-                .w(px(320.0))
-                .flex_grow(1.0)
-                .min_w(px(300.0))
-                .min_h(px(168.0))
-                .p(px(16.0))
-                .rounded(px(RADIUS))
+                .id(format!("subscription-row-{index}"))
+                .w_full()
+                .min_h(px(68.0))
+                .px(px(14.0))
+                .py(px(10.0))
                 .bg(if active { rgb(BLUE_2) } else { rgb(SURFACE) })
-                .border_1()
-                .border_color(rgb(if active { CYAN } else { BORDER }))
+                .border_b_1()
+                .border_color(rgb(BORDER))
+                .flex()
+                .items_center()
+                .gap(px(12.0))
                 .text_color(rgb(TEXT))
+                .child(div().w(px(22.0)).child(if active {
+                    icon("check", CYAN, 17.0).into_any_element()
+                } else {
+                    status_dot(FAINT).into_any_element()
+                }))
                 .child(
                     div()
-                        .flex()
-                        .items_center()
+                        .w(px(250.0))
+                        .min_w(px(160.0))
                         .child(
                             div()
-                                .flex_1()
-                                .text_size(px(14.0))
+                                .text_size(px(13.0))
+                                .text_color(rgb(TEXT))
+                                .truncate()
                                 .child(profile.name.clone()),
                         )
-                        .child(pill(
-                            if active {
-                                "当前使用"
-                            } else {
-                                "本地档案"
-                            },
-                            CYAN,
-                        )),
+                        .child(
+                            div()
+                                .mt(px(3.0))
+                                .text_size(px(10.0))
+                                .text_color(rgb(MUTED))
+                                .truncate()
+                                .child(if active { "当前" } else { "可用" }),
+                        ),
                 )
                 .child(
                     div()
-                        .mt(px(12.0))
+                        .w(px(250.0))
+                        .flex_grow(1.0)
                         .text_size(px(11.0))
                         .text_color(rgb(MUTED))
                         .truncate()
-                        .child(profile.url.clone()),
+                        .child(usage),
                 )
-                .child(div().mt(px(10.0)).text_size(px(12.0)).child(usage))
                 .child(
                     div()
-                        .mt(px(14.0))
+                        .w(px(100.0))
+                        .text_size(px(11.0))
+                        .text_color(rgb(MUTED))
+                        .child(updated),
+                )
+                .child(
+                    div()
+                        .w(px(72.0))
+                        .text_size(px(11.0))
+                        .text_color(rgb(MUTED))
+                        .child(if active {
+                            self.snapshot
+                                .proxy_groups
+                                .iter()
+                                .map(|group| group.members.len())
+                                .sum::<usize>()
+                                .to_string()
+                        } else {
+                            "—".to_owned()
+                        }),
+                )
+                .child(
+                    div()
                         .flex()
                         .gap(px(8.0))
                         .children((!active).then(|| {
@@ -1618,8 +1830,8 @@ impl Sbgui {
                                 .id(format!("activate-{index}"))
                                 .px(px(12.0))
                                 .py(px(7.0))
-                                .rounded(px(11.0))
-                                .bg(rgb(if active { 0xffffff } else { BLUE_2 }))
+                                .rounded(px(7.0))
+                                .bg(rgb(BLUE_2))
                                 .text_size(px(11.0))
                                 .text_color(rgb(CYAN))
                                 .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
@@ -1631,21 +1843,19 @@ impl Sbgui {
                                 .child("设为当前")
                         }))
                         .children(active.then(|| {
-                            self.action(
-                                "refresh-active-profile",
-                                "立即更新",
-                                Tone::Neutral,
+                            self.mini_action(
+                                index + 100_000,
+                                "更新",
                                 cx,
                                 ClientCommand::UpdateSubscription,
                             )
                         }))
-                        .child(div().flex_1())
                         .child(
                             div()
                                 .id(format!("remove-{index}"))
                                 .px(px(10.0))
                                 .py(px(7.0))
-                                .rounded(px(11.0))
+                                .rounded(px(7.0))
                                 .text_size(px(11.0))
                                 .text_color(rgb(DANGER))
                                 .hover(|style| style.bg(rgb(0xffecee)))
@@ -1659,33 +1869,36 @@ impl Sbgui {
                         ),
                 )
         });
-        root = root.child(div().flex().flex_wrap().gap(px(14.0)).children(cards));
         root.child(
             div()
-                .p(px(15.0))
                 .rounded(px(RADIUS))
                 .bg(rgb(SURFACE))
                 .border_1()
                 .border_color(rgb(BORDER))
                 .child(
                     div()
+                        .min_h(px(38.0))
+                        .px(px(14.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(12.0))
+                        .bg(rgb(SURFACE_2))
                         .text_size(px(10.0))
                         .text_color(rgb(MUTED))
-                        .child("地址归一化"),
+                        .child(div().w(px(22.0)).child(""))
+                        .child(div().w(px(250.0)).min_w(px(160.0)).child("订阅名称"))
+                        .child(div().w(px(250.0)).flex_grow(1.0).child("用量"))
+                        .child(div().w(px(100.0)).child("上次更新"))
+                        .child(div().w(px(72.0)).child("节点"))
+                        .child(div().w(px(126.0)).child("操作")),
                 )
-                .child(
-                    div()
-                        .mt(px(7.0))
-                        .text_size(px(11.0))
-                        .text_color(rgb(MUTED))
-                        .child("订阅地址会自动归一化为完整 sing-box 配置，确保入站、路由、代理组与 Clash API 一起可用。"),
-                ),
+                .children(rows),
         )
     }
 
     // -------------------------------------------------------------- proxies
 
-    fn proxies(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn proxies(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let groups = &self.snapshot.proxy_groups;
         let Some(group) = self.selected_group() else {
             return div().child(empty_state(
@@ -1700,10 +1913,17 @@ impl Sbgui {
             ));
         };
         let automatic = group.is_auto();
+        let query = self
+            .field(InputField::ProxySearch)
+            .text
+            .trim()
+            .to_lowercase();
+        let card_view = self.node_card_view;
         let members = group
             .members
             .iter()
             .enumerate()
+            .filter(|(_, member)| query.is_empty() || member.to_lowercase().contains(&query))
             .map(|(index, member)| {
                 let selected = member == &group.current;
                 let failed = group.failed.contains(member);
@@ -1723,16 +1943,25 @@ impl Sbgui {
                 let group_name = group.name.clone();
                 let node_name = member.clone();
                 let test_name = member.clone();
+                let display_name = clean_proxy_label(member);
                 div()
                     .id(format!("node-{index}"))
-                    .w(px(238.0))
-                    .flex_grow(1.0)
+                    .w(if card_view { px(238.0) } else { px(720.0) })
+                    .when(card_view, |row| row.flex_grow(1.0))
                     .min_w(px(0.0))
-                    .p(px(12.0))
-                    .rounded(px(9.0))
+                    .min_h(px(52.0))
+                    .px(px(14.0))
+                    .py(px(10.0))
+                    .rounded(px(if card_view { 9.0 } else { 0.0 }))
                     .bg(rgb(if selected { BLUE_2 } else { SURFACE }))
-                    .border_1()
-                    .border_color(rgb(if selected { 0xb8c4fb } else { BORDER }))
+                    .when(card_view, |row| {
+                        row.border_1()
+                            .border_color(rgb(if selected { CYAN } else { BORDER }))
+                    })
+                    .when(!card_view, |row| row.border_b_1().border_color(rgb(BORDER)))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
                     .when(!automatic, |row| {
                         row.cursor_pointer().hover(|s| s.bg(rgb(BLUE_2)))
                     })
@@ -1745,54 +1974,52 @@ impl Sbgui {
                             cx.notify();
                         }
                     }))
+                    .child(if selected {
+                        icon("check", CYAN, 16.0).into_any_element()
+                    } else {
+                        status_dot(FAINT).into_any_element()
+                    })
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(status_dot(if selected { CYAN } else { 0xc4c8d3 }))
+                            .flex_1()
+                            .min_w(px(0.0))
                             .child(
                                 div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
                                     .text_size(px(12.0))
                                     .text_color(rgb(TEXT))
                                     .truncate()
-                                    .child(member.clone()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .mt(px(8.0))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(div().text_size(px(10.0)).text_color(rgb(MUTED)).child(
-                                if selected {
-                                    "当前使用"
-                                } else if automatic {
-                                    "自动选择"
-                                } else {
-                                    "点击切换"
-                                },
-                            ))
+                                    .child(display_name),
+                            )
                             .child(
                                 div()
-                                    .id(format!("delay-{index}"))
-                                    .px(px(7.0))
-                                    .py(px(3.0))
-                                    .rounded(px(5.0))
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(color))
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(SURFACE_2)))
-                                    .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
-                                        cx.stop_propagation();
-                                        view.send(ClientCommand::TestNode(test_name.clone()));
-                                        cx.notify();
-                                    }))
-                                    .child(label),
+                                    .mt(px(3.0))
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(MUTED))
+                                    .child(if automatic {
+                                        "自动选择组"
+                                    } else {
+                                        "手动选择"
+                                    }),
                             ),
+                    )
+                    .children(selected.then(|| pill("当前", CYAN)))
+                    .child(
+                        div()
+                            .id(format!("delay-{index}"))
+                            .min_w(px(68.0))
+                            .px(px(8.0))
+                            .py(px(5.0))
+                            .rounded(px(6.0))
+                            .text_size(px(11.0))
+                            .text_color(rgb(color))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(SURFACE_2)))
+                            .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                view.send(ClientCommand::TestNode(test_name.clone()));
+                                cx.notify();
+                            }))
+                            .child(label),
                     )
             })
             .collect::<Vec<_>>();
@@ -1822,25 +2049,58 @@ impl Sbgui {
                             .flex()
                             .items_center()
                             .gap(px(8.0))
+                            .child(self.text_field(
+                                FieldSpec {
+                                    field: InputField::ProxySearch,
+                                    id: "proxy-search",
+                                    placeholder: "搜索节点…",
+                                    width: 210.0,
+                                },
+                                window,
+                                cx,
+                            ))
+                            .child(self.action(
+                                "test-group-toolbar",
+                                "全部测速",
+                                Tone::Neutral,
+                                cx,
+                                ClientCommand::TestGroup(group.name.clone()),
+                            ))
                             .child(
                                 div()
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(MUTED))
-                                    .child("测试地址"),
-                            )
-                            .child(
-                                div()
-                                    .max_w(px(320.0))
+                                    .id("node-list-view")
                                     .px(px(10.0))
-                                    .py(px(7.0))
-                                    .rounded(px(8.0))
-                                    .bg(rgb(SURFACE))
+                                    .py(px(8.0))
+                                    .rounded(px(7.0))
+                                    .bg(rgb(if !card_view { BLUE_2 } else { SURFACE }))
                                     .border_1()
                                     .border_color(rgb(BORDER))
                                     .text_size(px(11.0))
-                                    .text_color(rgb(MUTED))
-                                    .truncate()
-                                    .child(self.snapshot.settings.test_url.clone()),
+                                    .text_color(rgb(if !card_view { CYAN } else { MUTED }))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                                        view.node_card_view = false;
+                                        cx.notify();
+                                    }))
+                                    .child("列表"),
+                            )
+                            .child(
+                                div()
+                                    .id("node-card-view")
+                                    .px(px(10.0))
+                                    .py(px(8.0))
+                                    .rounded(px(7.0))
+                                    .bg(rgb(if card_view { BLUE_2 } else { SURFACE }))
+                                    .border_1()
+                                    .border_color(rgb(BORDER))
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(if card_view { CYAN } else { MUTED }))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                                        view.node_card_view = true;
+                                        cx.notify();
+                                    }))
+                                    .child("卡片"),
                             ),
                     ),
             )
@@ -1865,7 +2125,7 @@ impl Sbgui {
                                 view.group_index = index;
                                 cx.notify();
                             }))
-                            .child(item.name.clone())
+                            .child(clean_proxy_label(&item.name))
                     })),
             )
             .child(
@@ -1886,7 +2146,7 @@ impl Sbgui {
                                     .text_size(px(13.0))
                                     .text_color(rgb(TEXT))
                                     .truncate()
-                                    .child(group.name.clone()),
+                                    .child(clean_proxy_label(&group.name)),
                             )
                             .child(
                                 div()
@@ -1912,18 +2172,39 @@ impl Sbgui {
                         ClientCommand::TestGroup(group.name.clone()),
                     )),
             )
-            .child(div().flex().flex_wrap().gap(px(8.0)).children(members))
+            .child(
+                div()
+                    .rounded(px(RADIUS))
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .overflow_hidden()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(if card_view { 8.0 } else { 0.0 }))
+                    .children(members),
+            )
     }
 
     // --------------------------------------------------------------- rules
 
-    fn rules(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn rules(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let rules = &self.snapshot.rules;
         let rule_sets = &self.snapshot.rule_sets;
         let count = rules.len();
+        let query = self
+            .field(InputField::RuleSearch)
+            .text
+            .trim()
+            .to_lowercase();
         let rows: Vec<gpui::AnyElement> = rules
             .iter()
             .enumerate()
+            .filter(|(_, rule)| {
+                query.is_empty()
+                    || rule.matcher.to_lowercase().contains(&query)
+                    || rule.outbound.to_lowercase().contains(&query)
+            })
             .map(|(index, rule)| rule_row(index, rule))
             .collect();
         let rule_set_rows: Vec<gpui::AnyElement> = rule_sets
@@ -1979,6 +2260,7 @@ impl Sbgui {
                     .flex_wrap()
                     .child(
                         div()
+                            .flex_1()
                             .flex()
                             .items_center()
                             .gap(px(8.0))
@@ -1991,6 +2273,16 @@ impl Sbgui {
                                 },
                             )),
                     )
+                    .child(self.text_field(
+                        FieldSpec {
+                            field: InputField::RuleSearch,
+                            id: "rule-search",
+                            placeholder: "搜索匹配条件或出站…",
+                            width: 240.0,
+                        },
+                        window,
+                        cx,
+                    ))
                     .child(self.action(
                         "refresh-rules",
                         "刷新状态",
@@ -2010,14 +2302,37 @@ impl Sbgui {
                     .overflow_hidden()
                     .child(
                         div()
+                            .id("rule-sets-toggle")
                             .px(px(15.0))
-                            .pt(px(10.0))
-                            .pb(px(6.0))
-                            .text_size(px(11.0))
-                            .text_color(rgb(MUTED))
-                            .child(format!("规则集 · {} 个", rule_set_rows.len())),
+                            .py(px(11.0))
+                            .flex()
+                            .items_center()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(SURFACE_2)))
+                            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                                view.show_rule_sets = !view.show_rule_sets;
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(TEXT))
+                                    .child(format!("规则集 · {} 个", rule_set_rows.len())),
+                            )
+                            .child(div().text_size(px(11.0)).text_color(rgb(MUTED)).child(
+                                if self.show_rule_sets {
+                                    "收起"
+                                } else {
+                                    "展开"
+                                },
+                            )),
                     )
-                    .children(rule_set_rows)
+                    .children(if self.show_rule_sets {
+                        rule_set_rows
+                    } else {
+                        Vec::new()
+                    })
             }))
             .child(
                 div()
@@ -2028,6 +2343,21 @@ impl Sbgui {
                     .border_1()
                     .border_color(rgb(BORDER))
                     .overflow_hidden()
+                    .child(
+                        div()
+                            .px(px(15.0))
+                            .py(px(9.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(14.0))
+                            .bg(rgb(SURFACE_2))
+                            .text_size(px(10.0))
+                            .text_color(rgb(MUTED))
+                            .child(div().w(px(58.0)).child("优先级"))
+                            .child(div().flex_1().child("匹配条件"))
+                            .child(div().w(px(180.0)).child("出站"))
+                            .child(div().w(px(72.0)).child("状态")),
+                    )
                     .children(if rows.is_empty() {
                         vec![
                             empty_state(
@@ -2069,11 +2399,41 @@ impl Sbgui {
             .child(label)
     }
 
+    fn utility_toggle(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        active: bool,
+        cx: &mut Context<Self>,
+        toggle: impl Fn(&mut Sbgui) + 'static,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .px(px(10.0))
+            .py(px(7.0))
+            .rounded(px(7.0))
+            .bg(rgb(if active { BLUE_2 } else { SURFACE }))
+            .border_1()
+            .border_color(rgb(if active { CYAN } else { BORDER }))
+            .text_size(px(11.0))
+            .text_color(rgb(if active { CYAN } else { TEXT }))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(SURFACE_2)))
+            .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                toggle(view);
+                cx.notify();
+            }))
+            .child(label)
+    }
+
     // ---------------------------------------------------------- connections
 
     fn connections(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let query = self.field(InputField::ConnFilter).text.trim().to_owned();
-        let mut connections = self.snapshot.connections.connections.clone();
+        let mut connections = self
+            .paused_connections
+            .clone()
+            .unwrap_or_else(|| self.snapshot.connections.connections.clone());
         // The header advertises download-first ordering, so the rows must
         // actually follow it: the biggest current bandwidth users lead.
         connections.sort_by_key(|connection| std::cmp::Reverse(connection.download));
@@ -2127,26 +2487,145 @@ impl Sbgui {
                         window,
                         cx,
                     ))
-                    .child(self.action(
-                        "close-all",
-                        "关闭全部",
-                        Tone::Warning,
-                        cx,
-                        ClientCommand::CloseAllConnections,
-                    )),
-            )
-            .child(
-                div()
-                    .id("connections-horizontal")
-                    .w_full()
-                    .overflow_x_scroll()
                     .child(
                         div()
-                            .min_w(px(1040.0))
-                            .child(connection_header())
-                            .child(div().flex().flex_col().gap(px(4.0)).children(rows)),
+                            .id("pause-connections")
+                            .px(px(12.0))
+                            .py(px(8.0))
+                            .rounded(px(7.0))
+                            .bg(rgb(if self.paused_connections.is_some() {
+                                BLUE_2
+                            } else {
+                                SURFACE
+                            }))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .text_size(px(12.0))
+                            .text_color(rgb(if self.paused_connections.is_some() {
+                                CYAN
+                            } else {
+                                TEXT
+                            }))
+                            .cursor_pointer()
+                            .hover(|s| s.border_color(rgb(CYAN)))
+                            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                                view.paused_connections = if view.paused_connections.is_some() {
+                                    None
+                                } else {
+                                    Some(view.snapshot.connections.connections.clone())
+                                };
+                                cx.notify();
+                            }))
+                            .child(if self.paused_connections.is_some() {
+                                "继续刷新"
+                            } else {
+                                "暂停刷新"
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("close-all")
+                            .px(px(12.0))
+                            .py(px(8.0))
+                            .rounded(px(7.0))
+                            .bg(rgb(SURFACE))
+                            .border_1()
+                            .border_color(rgb(DANGER))
+                            .text_size(px(12.0))
+                            .text_color(rgb(DANGER))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0xfff1f1)))
+                            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                                if view.confirm_close_all {
+                                    view.send(ClientCommand::CloseAllConnections);
+                                    view.confirm_close_all = false;
+                                } else {
+                                    view.confirm_close_all = true;
+                                }
+                                cx.notify();
+                            }))
+                            .child(if self.confirm_close_all {
+                                "再次点击确认"
+                            } else {
+                                "关闭全部"
+                            }),
                     ),
             )
+            .child(
+                // Same white bordered container as the log list, so the table
+                // does not float on the canvas next to the empty-state card.
+                div()
+                    .id("connections-panel")
+                    .w_full()
+                    .rounded(px(RADIUS))
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .id("connections-horizontal")
+                            .w_full()
+                            .overflow_x_scroll()
+                            .child(
+                                div()
+                                    .min_w(px(1080.0))
+                                    .child(connection_header())
+                                    .child(div().flex().flex_col().gap(px(4.0)).children(rows)),
+                            ),
+                    ),
+            )
+            .children(self.selected_connection.as_ref().and_then(|selected| {
+                connections
+                    .iter()
+                    .find(|connection| &connection.id == selected)
+                    .map(|connection| {
+                        div()
+                            .p(px(16.0))
+                            .rounded(px(RADIUS))
+                            .bg(rgb(SURFACE))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_size(px(14.0))
+                                            .text_color(rgb(TEXT))
+                                            .child("连接详情"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("close-connection-detail")
+                                            .size(px(36.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(rgb(SURFACE_2)))
+                                            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                                                view.selected_connection = None;
+                                                cx.notify();
+                                            }))
+                                            .child(icon("close", MUTED, 14.0)),
+                                    ),
+                            )
+                            .child(setting_line("远程目标", &connection_target(connection)))
+                            .child(setting_line(
+                                "命中规则",
+                                if connection.rule.is_empty() {
+                                    "未匹配"
+                                } else {
+                                    &connection.rule
+                                },
+                            ))
+                            .child(setting_line("使用节点", &connection_chain(connection)))
+                            .child(setting_line("协议", &connection.metadata.network))
+                    })
+            }))
             .children(if total == 0 {
                 Some(empty_state(
                     "暂无活动连接",
@@ -2181,15 +2660,17 @@ impl Sbgui {
             }
             match level {
                 LogLevelFilter::All => true,
-                LogLevelFilter::Info => log_level_rank(line) >= 1,
-                LogLevelFilter::Warn => log_level_rank(line) >= 2,
-                LogLevelFilter::Error => log_level_rank(line) >= 3,
+                LogLevelFilter::Debug => log_level_rank(line) == 0,
+                LogLevelFilter::Info => log_level_rank(line) == 1,
+                LogLevelFilter::Warn => log_level_rank(line) == 2,
+                LogLevelFilter::Error => log_level_rank(line) == 3,
             }
         };
         let kernel: Vec<String> = self
             .snapshot
             .core_logs
             .iter()
+            .skip(self.hidden_core_logs.min(self.snapshot.core_logs.len()))
             .filter(|line| keep(line))
             .cloned()
             .collect();
@@ -2197,6 +2678,7 @@ impl Sbgui {
             .snapshot
             .events
             .iter()
+            .skip(self.hidden_events.min(self.snapshot.events.len()))
             .filter(|line| keep(line))
             .cloned()
             .collect();
@@ -2208,9 +2690,16 @@ impl Sbgui {
         for (index, line) in events.iter().rev().take(60).rev().enumerate() {
             rows.push(log_row(event_offset + index, "客户端", line));
         }
+        let copy_text = kernel
+            .iter()
+            .map(|line| format!("[sing-box] {line}"))
+            .chain(events.iter().map(|line| format!("[客户端] {line}")))
+            .collect::<Vec<_>>()
+            .join("\n");
         let mut level_chips: Vec<gpui::AnyElement> = Vec::new();
         for candidate in [
             LogLevelFilter::All,
+            LogLevelFilter::Debug,
             LogLevelFilter::Info,
             LogLevelFilter::Warn,
             LogLevelFilter::Error,
@@ -2258,7 +2747,7 @@ impl Sbgui {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(12.0))
+                            .gap(px(8.0))
                             .child(self.text_field(
                                 FieldSpec {
                                     field: InputField::LogQuery,
@@ -2275,6 +2764,106 @@ impl Sbgui {
                                     .text_color(rgb(MUTED))
                                     .child(format!("{} 行", rows.len())),
                             ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(self.utility_toggle(
+                        "log-follow",
+                        if self.log_follow {
+                            "自动滚动：开"
+                        } else {
+                            "自动滚动：关"
+                        },
+                        self.log_follow,
+                        cx,
+                        |view| view.log_follow = !view.log_follow,
+                    ))
+                    .child(self.utility_toggle(
+                        "log-wrap",
+                        if self.log_wrap {
+                            "自动换行：开"
+                        } else {
+                            "自动换行：关"
+                        },
+                        self.log_wrap,
+                        cx,
+                        |view| view.log_wrap = !view.log_wrap,
+                    ))
+                    .child(
+                        div()
+                            .id("copy-logs")
+                            .px(px(10.0))
+                            .py(px(7.0))
+                            .rounded(px(7.0))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .text_size(px(11.0))
+                            .text_color(rgb(TEXT))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(SURFACE_2)))
+                            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
+                            }))
+                            .child("复制"),
+                    )
+                    .child(
+                        div()
+                            .id("clear-logs")
+                            .px(px(10.0))
+                            .py(px(7.0))
+                            .rounded(px(7.0))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .text_size(px(11.0))
+                            .text_color(rgb(TEXT))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(SURFACE_2)))
+                            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                                view.hidden_core_logs = view.snapshot.core_logs.len();
+                                view.hidden_events = view.snapshot.events.len();
+                                cx.notify();
+                            }))
+                            .child("清空"),
+                    )
+                    .child(
+                        div()
+                            .id("export-logs")
+                            .px(px(10.0))
+                            .py(px(7.0))
+                            .rounded(px(7.0))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .text_size(px(11.0))
+                            .text_color(rgb(TEXT))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(SURFACE_2)))
+                            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                                let text = view
+                                    .snapshot
+                                    .core_logs
+                                    .iter()
+                                    .map(|line| format!("[sing-box] {line}"))
+                                    .chain(
+                                        view.snapshot
+                                            .events
+                                            .iter()
+                                            .map(|line| format!("[客户端] {line}")),
+                                    )
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                let path = view.data_dir.join("serein-logs.txt");
+                                view.snapshot.status = match std::fs::write(&path, text) {
+                                    Ok(()) => format!("日志已导出到 {}", path.display()),
+                                    Err(error) => format!("导出日志失败：{error}"),
+                                };
+                                cx.notify();
+                            }))
+                            .child("导出"),
                     ),
             )
             .child(
@@ -2376,279 +2965,292 @@ impl Sbgui {
                             .text_color(rgb(MUTED))
                             .child(age_label(profile.last_updated)),
                     )
-                    .child(self.mini_action(
-                        index + 200_000,
-                        "激活",
-                        cx,
-                        ClientCommand::SwitchProfile(name),
-                    ))
+                    .child(if active {
+                        // The active archive is already in use; a second
+                        // "激活" button here would be a no-op.
+                        div()
+                            .px(px(8.0))
+                            .text_size(px(11.0))
+                            .text_color(rgb(FAINT))
+                            .child("使用中")
+                            .into_any_element()
+                    } else {
+                        self.mini_action(
+                            index + 200_000,
+                            "激活",
+                            cx,
+                            ClientCommand::SwitchProfile(name),
+                        )
+                        .into_any_element()
+                    })
                     .into_any_element()
             })
             .collect();
 
-        let settings_panel =
-            |title: &'static str| panel(title).w(px(360.0)).min_w(px(320.0)).flex_grow(1.0);
         let tun_on = snapshot.traffic_mode == TrafficMode::Tun;
+        let dirty_count = [
+            self.field(InputField::Mirror).text != snapshot.settings.mirror,
+            self.field(InputField::MixedPort).text != snapshot.settings.mixed_port.to_string(),
+            self.field(InputField::TestUrl).text != snapshot.settings.test_url,
+            self.field(InputField::AutoUpdateMinutes).text
+                != snapshot.settings.auto_update_minutes.to_string(),
+            self.field(InputField::CoreVersion).text != snapshot.settings.core_version,
+        ]
+        .into_iter()
+        .filter(|dirty| *dirty)
+        .count();
+
+        let content = match self.settings_section {
+            SettingsSection::General => panel("订阅档案")
+                .w_full()
+                .child(
+                    div()
+                        .mt(px(6.0))
+                        .text_size(px(11.0))
+                        .text_color(rgb(MUTED))
+                        .child("当前订阅与本地配置档案。订阅的添加、更新和删除请前往订阅页。"),
+                )
+                .child(
+                    div()
+                        .mt(px(12.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .children(profile_rows),
+                )
+                .children(profiles.is_empty().then(|| {
+                    div()
+                        .mt(px(12.0))
+                        .text_size(px(12.0))
+                        .text_color(rgb(MUTED))
+                        .child("尚未导入订阅。")
+                })),
+            SettingsSection::Network => panel("网络与端口")
+                .w_full()
+                .child(setting_row_intro(
+                    "流量模式",
+                    "选择系统代理或 TUN 接管方式。",
+                ))
+                .child(setting_line("当前模式", snapshot.traffic_mode.label()))
+                .child(self.edit_line(
+                    "混合端口",
+                    FieldSpec {
+                        field: InputField::MixedPort,
+                        id: "mixed-port-field",
+                        placeholder: "2080",
+                        width: 180.0,
+                    },
+                    window,
+                    cx,
+                ))
+                .child(self.edit_line(
+                    "延迟测试地址",
+                    FieldSpec {
+                        field: InputField::TestUrl,
+                        id: "test-url-field",
+                        placeholder: "https://…",
+                        width: 320.0,
+                    },
+                    window,
+                    cx,
+                ))
+                .child(setting_line("出站模式", snapshot.outbound_mode.label())),
+            SettingsSection::Core => panel("sing-box 内核")
+                .w_full()
+                .child(setting_line(
+                    "安装版本",
+                    snapshot.core_version.as_deref().unwrap_or("未安装"),
+                ))
+                .child(setting_line(
+                    "运行状态",
+                    if snapshot.core_running {
+                        "运行中"
+                    } else if snapshot.starting {
+                        "启动中"
+                    } else {
+                        "未运行"
+                    },
+                ))
+                .child(self.edit_line(
+                    "固定版本",
+                    FieldSpec {
+                        field: InputField::CoreVersion,
+                        id: "core-version-field",
+                        placeholder: "留空跟随最新",
+                        width: 220.0,
+                    },
+                    window,
+                    cx,
+                ))
+                .child(self.edit_line(
+                    "镜像前缀",
+                    FieldSpec {
+                        field: InputField::Mirror,
+                        id: "mirror-field",
+                        placeholder: "直连",
+                        width: 320.0,
+                    },
+                    window,
+                    cx,
+                ))
+                .child(div().mt(px(14.0)).child(self.action(
+                    "download-core",
+                    "检查并更新内核",
+                    Tone::Neutral,
+                    cx,
+                    ClientCommand::DownloadCore,
+                ))),
+            SettingsSection::Tun => panel("TUN")
+                .w_full()
+                .child(toggle_line(
+                    "启用 TUN 模式",
+                    tun_on,
+                    "toggle-tun-settings",
+                    cx,
+                    SettingsPatch {
+                        traffic_mode: Some(if tun_on {
+                            TrafficMode::SystemProxy
+                        } else {
+                            TrafficMode::Tun
+                        }),
+                        ..Default::default()
+                    },
+                ))
+                .child(setting_row_intro(
+                    "需要重启",
+                    "Windows 需要管理员权限与 wintun.dll；修改后请重启内核使配置生效。",
+                ))
+                .child(setting_line(
+                    "当前说明",
+                    if tun_on {
+                        "虚拟网卡接管流量"
+                    } else {
+                        "使用系统代理端口"
+                    },
+                )),
+            SettingsSection::Automation => panel("自动化")
+                .w_full()
+                .child(toggle_line(
+                    "启动时自动启动内核",
+                    snapshot.settings.auto_start,
+                    "toggle-autostart",
+                    cx,
+                    SettingsPatch {
+                        auto_start: Some(!snapshot.settings.auto_start),
+                        ..Default::default()
+                    },
+                ))
+                .child(toggle_line(
+                    "内核就绪后自动开启系统代理",
+                    snapshot.settings.auto_system_proxy,
+                    "toggle-autoproxy",
+                    cx,
+                    SettingsPatch {
+                        auto_system_proxy: Some(!snapshot.settings.auto_system_proxy),
+                        ..Default::default()
+                    },
+                ))
+                .child(self.edit_line(
+                    "自动更新间隔（分钟）",
+                    FieldSpec {
+                        field: InputField::AutoUpdateMinutes,
+                        id: "auto-update-field",
+                        placeholder: "0 = 关闭",
+                        width: 180.0,
+                    },
+                    window,
+                    cx,
+                )),
+            SettingsSection::Appearance => panel("外观")
+                .w_full()
+                .child(setting_row_intro(
+                    "界面主题",
+                    "浅灰工作区、白色工作面与冷青强调色。",
+                ))
+                .child(setting_line("当前主题", "亮色"))
+                .child(setting_line(
+                    "字体",
+                    "Segoe UI Variable / Microsoft YaHei UI",
+                )),
+            SettingsSection::Advanced => panel("高级")
+                .w_full()
+                .child(setting_row_intro(
+                    "配置目录",
+                    "GUI 与终端客户端共用同一套设置模型。",
+                ))
+                .child(setting_line(
+                    "数据目录",
+                    &self.data_dir.display().to_string(),
+                ))
+                .child(setting_line(
+                    "设置文件",
+                    &format!("{}\\settings.toml", DATA_DIR),
+                ))
+                .child(
+                    div()
+                        .mt(px(12.0))
+                        .text_size(px(11.0))
+                        .text_color(rgb(AMBER))
+                        .child("修改高级配置前请停止内核，并保留可恢复的配置副本。"),
+                ),
+        };
 
         div()
             .flex()
             .flex_col()
             .gap(px(SECTION_GAP))
-            .child(
-                settings_panel("外观")
-                    .w_full()
-                    .child(
-                        div()
-                            .mt(px(10.0))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap(px(16.0))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .child(
-                                        div()
-                                            .text_size(px(12.0))
-                                            .text_color(rgb(TEXT))
-                                            .child("界面主题"),
-                                    )
-                                    .child(
-                                        div()
-                                            .mt(px(3.0))
-                                            .text_size(px(11.0))
-                                            .text_color(rgb(MUTED))
-                                            .child("浅灰工作区、白色工作面与冷青强调色"),
-                                    ),
-                            )
-                            .child(pill("亮色", CYAN)),
-                    ),
-            )
-            .child(
+            .child(div().flex().flex_wrap().gap(px(4.0)).children(
+                SettingsSection::all().into_iter().map(|section| {
+                    let active = section == self.settings_section;
+                    div()
+                        .id(format!("settings-{:?}", section))
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .rounded(px(7.0))
+                        .bg(rgb(if active { BLUE_2 } else { SURFACE }))
+                        .border_1()
+                        .border_color(rgb(if active { CYAN } else { BORDER }))
+                        .text_size(px(12.0))
+                        .text_color(rgb(if active { CYAN } else { MUTED }))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(SURFACE_2)))
+                        .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                            view.settings_section = section;
+                            cx.notify();
+                        }))
+                        .child(section.label())
+                }),
+            ))
+            .child(content)
+            .children((dirty_count > 0).then(|| {
                 div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(SECTION_GAP))
-                    .child(
-                        settings_panel("订阅档案")
-                            .child(
-                                div()
-                                    .mt(px(12.0))
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(6.0))
-                                    .children(profile_rows),
-                            )
-                            .children(if profiles.is_empty() {
-                                Some(
-                                    div()
-                                        .mt(px(10.0))
-                                        .text_size(px(11.0))
-                                        .text_color(rgb(MUTED))
-                                        .child("尚未导入订阅。前往「订阅」页，从剪贴板导入地址。"),
-                                )
-                            } else {
-                                None
-                            }),
-                    )
-                    .child(
-                        settings_panel("sing-box 内核")
-                            .child(setting_line(
-                                "版本",
-                                snapshot.core_version.as_deref().unwrap_or("未安装"),
-                            ))
-                            .child(setting_line(
-                                "状态",
-                                if snapshot.core_installed {
-                                    "已安装"
-                                } else {
-                                    "缺失"
-                                },
-                            ))
-                            .child(self.edit_line(
-                                "固定版本",
-                                FieldSpec {
-                                    field: InputField::CoreVersion,
-                                    id: "core-version-field",
-                                    placeholder: "留空跟随最新",
-                                    width: 150.0,
-                                },
-                                window,
-                                cx,
-                            ))
-                            .child(self.edit_line(
-                                "镜像前缀",
-                                FieldSpec {
-                                    field: InputField::Mirror,
-                                    id: "mirror-field",
-                                    placeholder: "直连",
-                                    width: 150.0,
-                                },
-                                window,
-                                cx,
-                            ))
-                            .child(
-                                div()
-                                    .mt(px(6.0))
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(FAINT))
-                                    .child("输入后按 Enter 保存，Esc 还原。"),
-                            )
-                            .child(div().mt(px(12.0)).child(self.action(
-                                "download-core",
-                                "检查并更新内核",
-                                Tone::Accent,
-                                cx,
-                                ClientCommand::DownloadCore,
-                            ))),
-                    ),
-            )
+                    .px(px(14.0))
+                    .py(px(10.0))
+                    .rounded(px(8.0))
+                    .bg(rgb(0xfff7ed))
+                    .border_1()
+                    .border_color(rgb(0xfed7aa))
+                    .text_size(px(11.0))
+                    .text_color(rgb(AMBER))
+                    .child(format!(
+                        "有 {dirty_count} 项更改尚未保存；端口或内核配置可能需要重启后生效。"
+                    ))
+            }))
             .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(SECTION_GAP))
-                    .child(
-                        settings_panel("端口与出站")
-                            .child(setting_line("流量模式", snapshot.traffic_mode.label()))
-                            .child(self.edit_line(
-                                "混合端口",
-                                FieldSpec {
-                                    field: InputField::MixedPort,
-                                    id: "mixed-port-field",
-                                    placeholder: "2080",
-                                    width: 110.0,
-                                },
-                                window,
-                                cx,
-                            ))
-                            .child(self.edit_line(
-                                "延迟地址",
-                                FieldSpec {
-                                    field: InputField::TestUrl,
-                                    id: "test-url-field",
-                                    placeholder: "https://…",
-                                    width: 110.0,
-                                },
-                                window,
-                                cx,
-                            ))
-                            .child(setting_line("出站模式", snapshot.outbound_mode.label()))
-                            .child(
-                                div()
-                                    .mt(px(12.0))
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap(px(8.0))
-                                    .child(self.action(
-                                        "toggle-mode",
-                                        "切换流量模式",
-                                        Tone::Neutral,
-                                        cx,
-                                        ClientCommand::UpdateSettings(SettingsPatch {
-                                            traffic_mode: Some(match snapshot.traffic_mode {
-                                                TrafficMode::SystemProxy => TrafficMode::Tun,
-                                                TrafficMode::Tun => TrafficMode::SystemProxy,
-                                            }),
-                                            ..Default::default()
-                                        }),
-                                    ))
-                                    .child(self.action(
-                                        "cycle-outbound",
-                                        "循环出站模式",
-                                        Tone::Neutral,
-                                        cx,
-                                        ClientCommand::SetOutboundMode(snapshot.outbound_mode.next()),
-                                    )),
-                            ),
-                    )
-                    .child(
-                        settings_panel("TUN 模式")
-                            .child(toggle_line(
-                                "当前 TUN 状态",
-                                tun_on,
-                                "toggle-tun-settings",
-                                cx,
-                                SettingsPatch {
-                                    traffic_mode: Some(if tun_on {
-                                        TrafficMode::SystemProxy
-                                    } else {
-                                        TrafficMode::Tun
-                                    }),
-                                    ..Default::default()
-                                },
-                            ))
-                            .child(
-                                div()
-                                    .mt(px(10.0))
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(MUTED))
-                                    .child("Windows 需要管理员权限与 wintun.dll；切换模式后通常需要重启内核。"),
-                            )
-                            .child(setting_line(
-                                "当前说明",
-                                if tun_on { "虚拟网卡接管流量" } else { "使用系统代理端口" },
-                            )),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(SECTION_GAP))
-                    .child(
-                        settings_panel("自动化与更新")
-                            .child(toggle_line(
-                                "启动时自动启动内核",
-                                snapshot.settings.auto_start,
-                                "toggle-autostart",
-                                cx,
-                                SettingsPatch {
-                                    auto_start: Some(!snapshot.settings.auto_start),
-                                    ..Default::default()
-                                },
-                            ))
-                            .child(toggle_line(
-                                "内核就绪后自动开启系统代理",
-                                snapshot.settings.auto_system_proxy,
-                                "toggle-autoproxy",
-                                cx,
-                                SettingsPatch {
-                                    auto_system_proxy: Some(!snapshot.settings.auto_system_proxy),
-                                    ..Default::default()
-                                },
-                            ))
-                            .child(self.edit_line(
-                                "自动更新间隔（分钟）",
-                                FieldSpec {
-                                    field: InputField::AutoUpdateMinutes,
-                                    id: "auto-update-field",
-                                    placeholder: "0 = 关闭",
-                                    width: 110.0,
-                                },
-                                window,
-                                cx,
-                            ))
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(FAINT))
-                                    .child(format!(
-                                        "当前每 {} 分钟自动更新；0 为关闭。输入后按 Enter 保存。",
-                                        snapshot.settings.auto_update_minutes
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(10.0))
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(FAINT))
-                                    .child(format!(
-                                        "配置写入 {}\\settings.toml，与终端客户端共用同一套模型。",
-                                        DATA_DIR
-                                    )),
-                            ),
-                    ),
+                div().flex().justify_end().child(
+                    div()
+                        .id("save-settings")
+                        .px(px(16.0))
+                        .py(px(9.0))
+                        .rounded(px(7.0))
+                        .bg(rgb(CYAN))
+                        .text_size(px(12.0))
+                        .text_color(rgb(SURFACE))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(CYAN_DARK)))
+                        .on_click(cx.listener(|view, _: &ClickEvent, _, cx| view.save_settings(cx)))
+                        .child("保存更改"),
+                ),
             )
     }
 }
@@ -2680,6 +3282,10 @@ fn icon(name: &str, color: u32, size: f32) -> impl IntoElement {
             "<circle cx='12' cy='12' r='9'/><ellipse cx='12' cy='12' rx='4' ry='9'/><path d='M3 12h18'/>"
         }
         "chevron" => "<path d='m9 5 7 7-7 7'/>",
+        "check" => "<path d='m5 12 4 4L19 6'/>",
+        "clock" => "<circle cx='12' cy='12' r='9'/><path d='M12 7v5l3 2'/>",
+        "download" => "<path d='M12 3v12m-5-5 5 5 5-5M5 21h14'/>",
+        "upload" => "<path d='M12 21V9m-5 5 5-5 5 5M5 3h14'/>",
         _ => "<circle cx='12' cy='12' r='8'/>",
     };
     let data = format!(
@@ -2701,19 +3307,6 @@ fn status_dot(color: u32) -> impl IntoElement {
         .bg(rgb(color))
 }
 
-fn switch_track(on: bool) -> impl IntoElement {
-    div()
-        .w(px(30.0))
-        .h(px(18.0))
-        .p(px(3.0))
-        .rounded(px(9.0))
-        .flex()
-        .items_center()
-        .when(on, |s| s.justify_end())
-        .bg(rgb(if on { CYAN } else { 0xd6d9e2 }))
-        .child(div().size(px(12.0)).rounded(px(6.0)).bg(rgb(SURFACE)))
-}
-
 fn side_rate(label: &str, value: u64, color: u32) -> impl IntoElement {
     div()
         .py(px(3.0))
@@ -2732,15 +3325,6 @@ fn side_rate(label: &str, value: u64, color: u32) -> impl IntoElement {
                 .text_color(rgb(color))
                 .child(format!("{}/s", human_bytes(value))),
         )
-}
-
-/// Renders the engine's `busy` label (a `ClientCommand` variant name, with
-/// any payload arguments attached) as a readable progress line.
-/// The engine labels every command in Chinese (`ClientCommand::label`), so
-/// the busy line only needs the ellipsis; failure statuses reuse the same
-/// wording ("{label} 失败: …") and are colored by the header status.
-fn busy_label(busy: &str) -> String {
-    format!("{busy}…")
 }
 
 fn tone_colors(tone: Tone) -> (u32, u32, u32) {
@@ -2767,7 +3351,7 @@ fn usage_label(usage: Option<&client_core::subscription::SubscriptionUserinfo>) 
     }
 }
 
-fn pill(label: &str, color: u32) -> impl IntoElement {
+fn pill(label: impl Into<String>, color: u32) -> impl IntoElement {
     div()
         .px(px(8.0))
         .py(px(4.0))
@@ -2775,39 +3359,38 @@ fn pill(label: &str, color: u32) -> impl IntoElement {
         .bg(rgb(BLUE_2))
         .text_size(px(12.0))
         .text_color(rgb(color))
-        .child(label.to_owned())
+        .child(label.into())
 }
 
-fn metric_card(label: &str, value: String, detail: String, accent: bool) -> impl IntoElement {
+fn metric_card(label: &str, value: String, detail: String, _accent: bool) -> impl IntoElement {
     div()
-        .w(px(270.0))
+        .w(px(190.0))
         .flex_grow(1.0)
-        .min_w(px(260.0))
-        .min_h(px(112.0))
-        .p(px(14.0))
-        .rounded(px(12.0))
-        .bg(rgb(if accent { CYAN } else { SURFACE }))
+        .min_w(px(170.0))
+        .min_h(px(118.0))
+        .p(px(16.0))
+        .rounded(px(RADIUS))
+        .bg(rgb(SURFACE))
         .border_1()
-        .border_color(rgb(if accent { EDGE } else { BORDER }))
-        .when(accent, |style| style.border_b_1().border_color(rgb(EDGE)))
+        .border_color(rgb(BORDER))
         .child(
             div()
-                .text_size(px(11.0))
-                .text_color(rgb(if accent { SURFACE } else { MUTED }))
+                .text_size(px(12.0))
+                .text_color(rgb(MUTED))
                 .child(label.to_owned()),
         )
         .child(
             div()
-                .mt(px(10.0))
-                .text_size(px(25.0))
-                .text_color(rgb(if accent { SURFACE } else { TEXT }))
+                .mt(px(9.0))
+                .text_size(px(28.0))
+                .text_color(rgb(TEXT))
                 .child(value),
         )
         .child(
             div()
-                .mt(px(7.0))
-                .text_size(px(10.0))
-                .text_color(rgb(if accent { 0xd4eeee } else { MUTED }))
+                .mt(px(6.0))
+                .text_size(px(11.0))
+                .text_color(rgb(MUTED))
                 .child(detail),
         )
 }
@@ -2837,13 +3420,23 @@ fn traffic_panel(snapshot: &ClientSnapshot) -> impl IntoElement {
         .map(|p| (p.up, p.down))
         .collect();
     let peak = snapshot.traffic_peak();
-    panel("本机 sing-box 流量")
+    panel("流量趋势")
         .child(
             div()
-                .mt(px(3.0))
-                .text_size(px(10.0))
-                .text_color(rgb(MUTED))
-                .child("最近 5 分钟 · 每 1 秒采样 · 非 VPS 网卡流量"),
+                .mt(px(8.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(10.0))
+                        .text_color(rgb(MUTED))
+                        .child("本机 sing-box · 最近 5 分钟实时采样"),
+                )
+                .child(range_chip("5 分钟", true))
+                .child(range_chip("1 小时", false))
+                .child(range_chip("24 小时", false)),
         )
         .child(
             div()
@@ -2955,7 +3548,7 @@ fn rule_row(index: usize, rule: &RouteRuleSnapshot) -> gpui::AnyElement {
         .id(format!("rule-row-{index}"))
         .w_full()
         .px(px(15.0))
-        .py(px(12.0))
+        .py(px(11.0))
         .flex()
         .items_center()
         .gap(px(14.0))
@@ -2964,7 +3557,7 @@ fn rule_row(index: usize, rule: &RouteRuleSnapshot) -> gpui::AnyElement {
         .hover(|style| style.bg(rgb(BLUE_2)))
         .child(
             div()
-                .w(px(24.0))
+                .w(px(58.0))
                 .flex_shrink_0()
                 .text_size(px(11.0))
                 .text_color(rgb(MUTED))
@@ -2972,25 +3565,19 @@ fn rule_row(index: usize, rule: &RouteRuleSnapshot) -> gpui::AnyElement {
         )
         .child(
             div()
-                .flex()
-                .flex_col()
-                .gap(px(7.0))
                 .flex_1()
                 .min_w(px(0.0))
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .text_color(rgb(TEXT))
-                        .child(format!("路由规则 {:02}", index + 1)),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(6.0))
-                        .child(pill(&rule.matcher, MUTED))
-                        .child(pill(&format!("→ {}", rule.outbound), CYAN)),
-                ),
+                .text_size(px(12.0))
+                .text_color(rgb(TEXT))
+                .child(rule.matcher.clone()),
+        )
+        .child(
+            div()
+                .w(px(180.0))
+                .truncate()
+                .text_size(px(12.0))
+                .text_color(rgb(CYAN))
+                .child(rule.outbound.clone()),
         )
         .child(
             div()
@@ -3023,13 +3610,13 @@ fn log_table_header() -> impl IntoElement {
 fn log_row(index: usize, source: &str, line: &str) -> gpui::AnyElement {
     let color = level_color(line);
     let level = if color == DANGER {
-        "error"
+        "Error"
     } else if color == AMBER {
-        "warn"
+        "Warn"
     } else if color == FAINT {
-        "debug"
+        "Debug"
     } else {
-        "info"
+        "Info"
     };
     div()
         .id(format!("log-row-{index}"))
@@ -3068,24 +3655,33 @@ fn log_row(index: usize, source: &str, line: &str) -> gpui::AnyElement {
 
 fn connection_header() -> impl IntoElement {
     div()
-        .min_w(px(1040.0))
+        .min_w(px(1080.0))
         .px(px(12.0))
         .py(px(8.0))
         .flex()
         .gap(px(10.0))
         .text_size(px(11.0))
-        .text_color(rgb(CYAN))
+        .text_color(rgb(MUTED))
         .child(div().w(px(62.0)).child("状态"))
-        .child(div().w(px(100.0)).child("建立时间"))
-        .child(div().w(px(54.0)).child("类型"))
-        .child(div().w(px(180.0)).child("主机"))
-        .child(div().w(px(140.0)).child("规则"))
-        .child(div().w(px(160.0)).child("代理链"))
-        .child(div().w(px(124.0)).child("来源 IP"))
-        .child(div().w(px(150.0)).child("远程目标"))
-        .child(div().w(px(82.0)).child("上传"))
-        .child(div().w(px(82.0)).child("下载"))
+        .child(div().w(px(140.0)).child("应用 / 入口"))
+        .child(div().w(px(230.0)).child("远程目标"))
+        .child(div().w(px(72.0)).child("协议"))
+        .child(div().w(px(150.0)).child("命中规则"))
+        .child(div().w(px(160.0)).child("使用节点"))
+        .child(div().w(px(140.0)).child("累计流量"))
+        .child(div().w(px(120.0)).child("建立时间"))
         .child(div().w(px(48.0)).child(""))
+}
+
+fn range_chip(label: &'static str, active: bool) -> impl IntoElement {
+    div()
+        .px(px(9.0))
+        .py(px(5.0))
+        .rounded(px(6.0))
+        .bg(rgb(if active { CYAN } else { SURFACE_2 }))
+        .text_size(px(10.0))
+        .text_color(rgb(if active { SURFACE } else { FAINT }))
+        .child(label)
 }
 
 fn connection_row(
@@ -3094,9 +3690,17 @@ fn connection_row(
     cx: &mut Context<Sbgui>,
 ) -> gpui::AnyElement {
     let id = connection.id.clone();
+    let detail_id = connection.id.clone();
+    let application = if !connection.metadata.process.is_empty() {
+        connection.metadata.process.clone()
+    } else if !connection.metadata.process_path.is_empty() {
+        connection.metadata.process_path.clone()
+    } else {
+        "系统代理".to_owned()
+    };
     div()
         .id(index)
-        .min_w(px(1040.0))
+        .min_w(px(1080.0))
         .px(px(12.0))
         .py(px(9.0))
         .flex()
@@ -3105,9 +3709,15 @@ fn connection_row(
         .bg(rgb(SURFACE))
         .border_b_1()
         .border_color(rgb(BORDER))
+        .font_family("Cascadia Mono, Consolas")
         .text_size(px(11.0))
         .text_color(rgb(TEXT))
+        .cursor_pointer()
         .hover(|style| style.bg(rgb(BLUE_2)))
+        .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+            view.selected_connection = Some(detail_id.clone());
+            cx.notify();
+        }))
         .child(
             div()
                 .w(px(62.0))
@@ -3117,64 +3727,51 @@ fn connection_row(
                 .child(status_dot(MINT))
                 .child("活动"),
         )
-        .child(div().w(px(100.0)).truncate().text_color(rgb(MUTED)).child(
-            if connection.start.is_empty() {
-                "刚刚".to_owned()
-            } else {
-                connection.start.clone()
-            },
-        ))
-        .child(div().w(px(54.0)).child(connection.metadata.network.clone()))
-        .child(div().w(px(180.0)).truncate().text_color(rgb(TEXT)).child(
-            if connection.metadata.destination_host.is_empty() {
-                connection.metadata.destination_ip.clone()
-            } else {
-                connection.metadata.destination_host.clone()
-            },
-        ))
-        .child(div().w(px(140.0)).truncate().text_color(rgb(MUTED)).child(
+        .child(
+            div()
+                .w(px(140.0))
+                .truncate()
+                .text_color(rgb(TEXT))
+                .child(application),
+        )
+        .child(
+            div()
+                .w(px(230.0))
+                .truncate()
+                .text_color(rgb(TEXT))
+                .child(connection_target(connection)),
+        )
+        .child(
+            div()
+                .w(px(72.0))
+                .child(connection.metadata.network.to_uppercase()),
+        )
+        .child(div().w(px(150.0)).truncate().text_color(rgb(MUTED)).child(
             if connection.rule.is_empty() {
                 "未匹配".to_owned()
             } else {
                 connection.rule.clone()
             },
         ))
-        .child(div().w(px(160.0)).truncate().text_color(rgb(MUTED)).child(
-            if connection.chains.is_empty() {
-                "直连".to_owned()
-            } else {
-                connection.chains.join(" → ")
-            },
-        ))
-        .child(div().w(px(124.0)).truncate().text_color(rgb(MUTED)).child(
-            if connection.metadata.inbound_ip.is_empty() {
-                "-".to_owned()
-            } else {
-                connection.metadata.inbound_ip.clone()
-            },
-        ))
         .child(
             div()
-                .w(px(150.0))
+                .w(px(160.0))
                 .truncate()
                 .text_color(rgb(MUTED))
-                .child(format!(
-                    "{}:{}",
-                    connection.metadata.destination_ip, connection.metadata.destination_port
-                )),
+                .child(connection_chain(connection)),
         )
-        .child(
-            div()
-                .w(px(82.0))
-                .text_color(rgb(MINT))
-                .child(human_bytes(connection.upload)),
-        )
-        .child(
-            div()
-                .w(px(82.0))
-                .text_color(rgb(CYAN))
-                .child(human_bytes(connection.download)),
-        )
+        .child(div().w(px(140.0)).text_color(rgb(CYAN)).child(format!(
+            "↓ {}  ↑ {}",
+            human_bytes(connection.download),
+            human_bytes(connection.upload)
+        )))
+        .child(div().w(px(120.0)).truncate().text_color(rgb(MUTED)).child(
+            if connection.start.is_empty() {
+                "刚刚".to_owned()
+            } else {
+                connection.start.clone()
+            },
+        ))
         .child(
             div()
                 .id(index + 300_000)
@@ -3182,6 +3779,7 @@ fn connection_row(
                 .text_color(rgb(DANGER))
                 .hover(|style| style.text_color(rgb(0xffb0ab)))
                 .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
                     view.send(ClientCommand::CloseConnection(id.clone()));
                     cx.notify();
                 }))
@@ -3214,6 +3812,28 @@ fn setting_line(label: &str, value: &str) -> impl IntoElement {
                 .text_color(rgb(MUTED))
                 .truncate()
                 .child(value.to_owned()),
+        )
+}
+
+fn setting_row_intro(label: &str, detail: &str) -> impl IntoElement {
+    div()
+        .mt(px(10.0))
+        .px(px(12.0))
+        .py(px(10.0))
+        .border_b_1()
+        .border_color(rgb(BORDER))
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(rgb(TEXT))
+                .child(label.to_owned()),
+        )
+        .child(
+            div()
+                .mt(px(3.0))
+                .text_size(px(11.0))
+                .text_color(rgb(MUTED))
+                .child(detail.to_owned()),
         )
 }
 
@@ -3348,6 +3968,43 @@ fn delay_color(delay: u64) -> u32 {
     }
 }
 
+fn clean_proxy_label(value: &str) -> String {
+    value
+        .trim_start_matches(|character: char| {
+            !character.is_ascii_alphanumeric() && !('\u{4e00}'..='\u{9fff}').contains(&character)
+        })
+        .trim()
+        .to_owned()
+}
+
+fn connection_target(connection: &Connection) -> String {
+    let host = if connection.metadata.destination_host.is_empty() {
+        connection.metadata.destination_ip.as_str()
+    } else {
+        connection.metadata.destination_host.as_str()
+    };
+    if host.is_empty() {
+        "—".to_owned()
+    } else if connection.metadata.destination_port.is_empty() {
+        host.to_owned()
+    } else {
+        format!("{host}:{}", connection.metadata.destination_port)
+    }
+}
+
+fn connection_chain(connection: &Connection) -> String {
+    if connection.chains.is_empty() {
+        "直连".to_owned()
+    } else {
+        connection
+            .chains
+            .iter()
+            .map(|value| clean_proxy_label(value))
+            .collect::<Vec<_>>()
+            .join(" → ")
+    }
+}
+
 fn human_bytes(value: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = value as f64;
@@ -3388,10 +4045,17 @@ fn load_settings(dir: &Path) -> Settings {
 }
 
 fn main() {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
+    // The engine (controller task, tokio::fs, reqwest) runs on this runtime for
+    // the whole process lifetime. It is leaked on purpose: moved into the GPUI
+    // launch closure it would be dropped the moment that closure returns, the
+    // runtime would shut down, and every engine await — starting with the
+    // auto-start subscription read — would fail with "background task failed".
+    let runtime: &'static tokio::runtime::Runtime = Box::leak(Box::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime"),
+    ));
     let dir = settings::data_dir_for(DATA_DIR).expect("data directory");
     let _ = load_settings(&dir);
     let _ = Profiles::load_or_create(&dir);
@@ -3404,8 +4068,8 @@ fn main() {
     application()
         .with_assets(SereinAssets)
         .run(move |cx: &mut App| {
-            let bounds = Bounds::centered(None, size(px(1080.0), px(760.0)), cx);
-            let _runtime = runtime;
+            let (win_w, win_h) = env_window_size();
+            let bounds = Bounds::centered(None, size(px(win_w), px(win_h)), cx);
             cx.open_window(
                 WindowOptions {
                     // The operating-system titlebar is intentionally transparent/hidden.

@@ -1,5 +1,7 @@
 /target/
 /target-linux*/
+/target-fixtures/
+__pycache__/
 /.tmp-sing-box-yg-research/
 /.reference-*/
 /.scratch/research/

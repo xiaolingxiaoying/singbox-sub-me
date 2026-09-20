@@ -76,7 +76,7 @@ target/release/sbctl
 二进制，再以中文菜单引导选择订阅模式、域名/IP、网卡和协议：
 
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/xiaolingxiaoying/singbox-sub-me/master/scripts/install.sh)
+bash <(wget -qO- https://github.com/xiaolingxiaoying/singbox-sub-me/releases/latest/download/install.sh)
 ```
 
 脚本默认从最新 GitHub Release 取得与系统架构匹配的 manifest；可通过
@@ -315,13 +315,18 @@ sudo sbctl system bbr
 
 ```bash
 cargo build --release -p sbtui   # 终端 TUI：Windows / macOS / Linux（另含 ly 短启动名）
-cargo build --release -p sbgui   # Windows 桌面 GUI（GPUI）
+cargo build --release -p sbgui   # 桌面 GUI：Windows；Linux 需 X11 开发库（见下）
 ```
+
+Linux 上构建 `sbgui` 会启用 GPUI 的 X11 后端（Wayland 桌面经 XWayland 也可运行），需要
+`libfontconfig1-dev`、`libfreetype6-dev`、`libx11-dev`、`libxcb1-dev`、`libxkbcommon-dev`、
+`libxkbcommon-x11-dev`、`libgl1-mesa-dev`、`libegl1-mesa-dev`、`libvulkan-dev`、`libasound2-dev`。
+只构建服务端（`-p sbctl`）或终端客户端（`-p sbtui`）不需要这些库。
 
 功能（两个客户端一致）：订阅导入与自动归一化、代理组节点切换与延迟测试
 （含内核上报的节点延迟）、系统代理开关、TUN 模式、实时速率、内核内存与
 运行版本、连接表、日志与分流规则查看、内核下载与版本管理。
-控制通道使用订阅端完整配置自带的 clash_api（127.0.0.1:9090）。
+控制通道在每次启动时改写为独立的本机 clash_api 端口和随机认证秘密，避免控制其他代理实例。
 
 详见 [sbtui 说明](crates/sbtui/README.md) 与 [sbgui 说明](crates/sbgui/README.md)；
 客户端功能全解见 [客户端功能与作用说明](docs/client-description.md)。
@@ -342,8 +347,9 @@ cargo build --release -p sbgui   # Windows 桌面 GUI（GPUI）
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --features sbctl/test-signing
+cargo test -p sbctl --no-default-features --test release_trust
 ```
 
 Debian/Ubuntu 黑盒验收脚本位于 [`tests/acceptance/run.sh`](tests/acceptance/run.sh)，需要
@@ -351,7 +357,8 @@ Docker daemon 和 Linux 发布二进制。脚本会分别启动 Debian 12、Ubun
 systemd 容器，因此 Docker 运行环境必须允许 `--privileged` 和 cgroup 挂载：
 
 ```bash
-SBCTL_ARTIFACT=/path/to/sbctl-linux-amd64 tests/acceptance/run.sh
+cargo build --release -p sbctl --features test-signing --target-dir target-fixtures
+SBCTL_ARTIFACT=/path/to/sbctl-linux-amd64 SBCTL_TEST_ARTIFACT=./target-fixtures/release/sbctl tests/acceptance/run.sh
 ```
 
 验收 fixture 的边界和可复用 helper 见 [`tests/acceptance/README.md`](tests/acceptance/README.md)。
@@ -375,6 +382,8 @@ docker compose -f docker-compose.acceptance.yml down
 路径建议使用 WSL 路径执行。生产部署仍应使用 Debian/Ubuntu VPS 上的 systemd。
 
 ## 发布与更新
+
+首次发布前必须完成[生产密钥配置与旧版本迁移](docs/release-signing.md)。公开开发密钥已从普通构建的信任根移除；缺少生产密钥时不会发布。
 
 推送 `v*` 标签会触发 GitHub Actions 发布流程，为 `amd64` 和 `arm64` 构建 sbctl，运行 Debian/Ubuntu systemd 验收，并上传 sing-box 工件和按架构区分的签名 manifest。安装器和运行时都会先验证 Ed25519 manifest 签名，再验证每个二进制的 SHA-256；不会信任 manifest 中的未固定 URL 或摘要。
 

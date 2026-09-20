@@ -88,7 +88,7 @@ cargo build --release -p sbtui
   与 Clash API，转换结果可直接启动内核）；
 - 兼容旧版 sbctl：若完整客户端配置端点不存在，且原始链接是 `sing-box.json`，
   客户端会回退到该裸节点端点，并在本地补齐选择器、入站与 Clash API；
-- 订阅缓存按档案存放在 `cache/`，更新失败时保留上次缓存；
+- 订阅缓存按档案名称的 SHA-256 标识存放在 `cache/profiles/`，更新失败时保留上次缓存；
 - 内核从 sing-box 官方 Release 下载，归档 SHA-256 按版本记录（TOFU）：
   官方不发布校验文件，首次下载仅记录哈希，同版本再次下载不一致会拒绝
   安装；Windows 的 TUN 模式另需将 `wintun.dll` 放在内核同目录；
@@ -123,5 +123,6 @@ cargo build --release -p sbtui
 ## 与 sbctl 的关系
 
 sbtui 是客户端；服务端用 [sbctl](../../README.md) 部署。服务端的
-`sing-box-full.json` 订阅自带 `clash_api`（127.0.0.1:9090）与 `cache_file`，
-sbtui 通过它完成组选择、延迟测试与流量统计。
+`sing-box-full.json` 订阅自带 `clash_api` 与 `cache_file`。启动时客户端为
+clash_api 分配独立本机端口和随机认证秘密，完成组选择、延迟测试与流量统计。
+长操作期间按 `s` 可取消操作并停止内核；崩溃重试计数仅在连续稳定运行 60 秒后清零，最多重试 5 次。

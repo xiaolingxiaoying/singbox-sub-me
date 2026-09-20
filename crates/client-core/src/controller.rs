@@ -28,6 +28,24 @@ const CONNECTIONS_EVERY: Duration = Duration::from_secs(2);
 /// Maximum number of undelivered push events. UIs poll, so this only needs to
 /// absorb a short burst for consumers that use `recv()`.
 const EVENT_BACKLOG: usize = 32;
+/// Automatic crash restarts stop after this many consecutive failures; a
+/// persistent cause (bad config, port conflict) needs an administrator.
+const MAX_AUTO_RESTARTS: u32 = 5;
+const STABLE_RUN: Duration = Duration::from_secs(60);
+
+type Completion = Box<dyn FnOnce(&mut Engine) -> Result<()> + Send>;
+
+struct PendingOperation {
+    task: tokio::task::JoinHandle<Result<Completion>>,
+    label: String,
+    restarting: bool,
+}
+
+impl Drop for PendingOperation {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
 
 /// Owns the long-lived client state and presents a small command/seam to UIs.
 pub struct ClientController {
@@ -103,6 +121,8 @@ struct Engine {
     restart_at: Option<Instant>,
     restart_attempts: u32,
     event_tx: mpsc::Sender<ClientEvent>,
+    pending: Option<PendingOperation>,
+    healthy_since: Option<Instant>,
 }
 
 impl Engine {
@@ -154,6 +174,8 @@ impl Engine {
             restart_at: None,
             restart_attempts: 0,
             event_tx,
+            pending: None,
+            healthy_since: None,
         }
     }
 
@@ -162,26 +184,17 @@ impl Engine {
         mut command_rx: mpsc::UnboundedReceiver<ClientCommand>,
         shared: Arc<Mutex<ClientSnapshot>>,
     ) {
-        // Mirror the TUI's `auto_start` behavior: bring the core up on
-        // launch so the GUI toggle does something instead of only persisting.
         if self.settings.auto_start
             && self.snapshot.core_installed
             && self.profiles.active_profile().is_some()
         {
-            self.snapshot.busy = Some("自动启动内核".to_owned());
-            let _ = self
-                .event_tx
-                .try_send(ClientEvent::OperationStarted("自动启动内核".into()));
+            self.snapshot.busy = Some("自动启动内核".into());
             if let Err(error) = self.start_core().await {
-                let message = error.to_string();
-                self.snapshot.status = format!("自动启动失败: {message}");
-                self.snapshot.push_event(self.snapshot.status.clone());
-                let _ = self.event_tx.try_send(ClientEvent::Error(ClientError {
-                    operation: "自动启动内核".into(),
-                    message,
-                }));
+                self.note(format!("自动启动失败: {error}"));
             }
-            self.snapshot.busy = None;
+            if self.pending.is_none() {
+                self.snapshot.busy = None;
+            }
             self.publish(&shared);
         }
         let mut tick = tokio::time::interval(TICK);
@@ -190,38 +203,117 @@ impl Engine {
             let command = tokio::select! {
                 command = command_rx.recv() => command,
                 _ = tick.tick() => {
-                    self.poll().await;
+                    self.finish_operation().await;
                     self.publish(&shared);
-                    continue;
+                    // Telemetry requests are read-only and cancellation-safe.
+                    // A stop/exit must never wait for a stalled API request.
+                    tokio::select! {
+                        command = command_rx.recv() => command,
+                        _ = self.poll() => { self.publish(&shared); continue; }
+                    }
                 }
             };
-            // Every sender was dropped: the UI is gone, so stop the engine.
             let Some(command) = command else {
                 break;
             };
+            if self.pending.is_some()
+                && !matches!(
+                    command,
+                    ClientCommand::StopCore | ClientCommand::RestartCore
+                )
+            {
+                self.note("操作正在进行，请等待完成或停止内核以取消");
+                self.publish(&shared);
+                continue;
+            }
             let label = command.label();
             self.snapshot.busy = Some(label.clone());
             let _ = self
                 .event_tx
                 .try_send(ClientEvent::OperationStarted(label.clone()));
-            match self.apply(command).await {
-                Ok(()) => {
-                    let _ = self
-                        .event_tx
-                        .try_send(ClientEvent::OperationFinished(label));
-                }
-                Err(error) => {
-                    let message = error.to_string();
-                    self.snapshot.status = format!("{label} 失败: {message}");
-                    self.snapshot.push_event(self.snapshot.status.clone());
-                    let _ = self.event_tx.try_send(ClientEvent::Error(ClientError {
-                        operation: label,
-                        message,
-                    }));
-                }
-            }
-            self.snapshot.busy = None;
             self.publish(&shared);
+            if let Err(error) = self.apply(command).await {
+                self.operation_error(&label, error);
+            } else if self.pending.is_none() {
+                let _ = self
+                    .event_tx
+                    .try_send(ClientEvent::OperationFinished(label));
+            }
+            if self.pending.is_none() {
+                self.snapshot.busy = None;
+            }
+            self.publish(&shared);
+        }
+        // Child handles and pending jobs are owned by this engine. Preserve
+        // the UI's explicit OS-proxy exit choice, but always reap its child.
+        self.cancel_operation().await;
+        if let Some(mut child) = self.child.take() {
+            let _ = child.child.kill().await;
+        }
+    }
+
+    fn operation_error(&mut self, label: &str, error: anyhow::Error) {
+        let message = error.to_string();
+        self.note(format!("{label} 失败: {message}"));
+        let _ = self.event_tx.try_send(ClientEvent::Error(ClientError {
+            operation: label.into(),
+            message,
+        }));
+    }
+
+    fn spawn_operation(
+        &mut self,
+        future: impl std::future::Future<Output = Result<Completion>> + Send + 'static,
+    ) {
+        let label = self
+            .snapshot
+            .busy
+            .clone()
+            .unwrap_or_else(|| "后台操作".into());
+        self.snapshot.busy = Some(label.clone());
+        self.pending = Some(PendingOperation {
+            task: tokio::spawn(future),
+            label,
+            restarting: self.restart_attempts > 0 && self.snapshot.starting,
+        });
+    }
+
+    async fn cancel_operation(&mut self) {
+        if let Some(mut pending) = self.pending.take() {
+            pending.task.abort();
+            // If startup completed concurrently, dropping the returned closure
+            // also drops its child handle (kill_on_drop).
+            let _ = (&mut pending.task).await;
+        }
+        self.snapshot.starting = false;
+        self.snapshot.busy = None;
+    }
+
+    async fn finish_operation(&mut self) {
+        if !self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.task.is_finished())
+        {
+            return;
+        }
+        let mut pending = self.pending.take().unwrap();
+        let result = match (&mut pending.task).await {
+            Ok(Ok(complete)) => complete(self),
+            Ok(Err(error)) => Err(error),
+            Err(error) => Err(error.into()),
+        };
+        self.snapshot.starting = false;
+        self.snapshot.busy = None;
+        if let Err(error) = result {
+            self.operation_error(&pending.label, error);
+            if pending.restarting {
+                self.schedule_restart();
+            }
+        } else {
+            let _ = self
+                .event_tx
+                .try_send(ClientEvent::OperationFinished(pending.label.clone()));
         }
     }
 
@@ -241,8 +333,26 @@ impl Engine {
     }
 
     async fn apply(&mut self, command: ClientCommand) -> Result<()> {
+        if !self.snapshot.core_running
+            && matches!(
+                command,
+                ClientCommand::SwitchNode { .. }
+                    | ClientCommand::TestNode(_)
+                    | ClientCommand::TestGroup(_)
+                    | ClientCommand::CloseConnection(_)
+                    | ClientCommand::CloseAllConnections
+            )
+        {
+            anyhow::bail!("内核未运行；请先启动本客户端的内核");
+        }
         match command {
-            ClientCommand::StartCore => self.start_core().await,
+            ClientCommand::StartCore => {
+                if !self.snapshot.core_running && !self.snapshot.starting {
+                    self.restart_attempts = 0;
+                    self.snapshot.restart_attempts = 0;
+                }
+                self.start_core().await
+            }
             ClientCommand::StopCore => {
                 self.stop_core().await;
                 Ok(())
@@ -265,10 +375,19 @@ impl Engine {
             }
             ClientCommand::SetOutboundMode(mode) => {
                 if self.snapshot.core_running {
-                    self.api.set_mode(mode).await?;
+                    let api = self.api.clone();
+                    self.spawn_operation(async move {
+                        api.set_mode(mode).await?;
+                        Ok(Box::new(move |engine: &mut Engine| {
+                            engine.snapshot.outbound_mode = mode;
+                            engine.note(format!("出站模式: {}", mode.label()));
+                            Ok(())
+                        }) as Completion)
+                    });
+                } else {
+                    self.snapshot.outbound_mode = mode;
+                    self.note(format!("出站模式: {}", mode.label()));
                 }
-                self.snapshot.outbound_mode = mode;
-                self.note(format!("出站模式: {}", mode.label()));
                 Ok(())
             }
             ClientCommand::SwitchProfile(name) => {
@@ -285,40 +404,58 @@ impl Engine {
                 Ok(())
             }
             ClientCommand::SwitchNode { group, node } => {
-                self.api.select(&group, &node).await?;
-                for snapshot in &mut self.snapshot.proxy_groups {
-                    if snapshot.name == group {
-                        snapshot.current = node.clone();
-                    }
-                }
-                self.snapshot.current_node = Some(node.clone());
-                self.note(format!("{group} → {node}"));
+                let api = self.api.clone();
+                self.spawn_operation(async move {
+                    api.select(&group, &node).await?;
+                    Ok(Box::new(move |engine: &mut Engine| {
+                        for snapshot in &mut engine.snapshot.proxy_groups {
+                            if snapshot.name == group {
+                                snapshot.current = node.clone();
+                            }
+                        }
+                        engine.snapshot.current_node = Some(node.clone());
+                        engine.note(format!("{group} → {node}"));
+                        Ok(())
+                    }) as Completion)
+                });
                 Ok(())
             }
-            ClientCommand::TestNode(node) => {
-                let url = self.settings.test_url.clone();
-                let delay = self.api.delay_with(&node, &url).await?;
-                self.delays.insert(node.clone(), delay);
-                self.failed.retain(|failed| failed != &node);
-                self.apply_delays();
-                self.note(format!("{node} 延迟 {delay} ms"));
-                Ok(())
+            ClientCommand::TestNode(node) => self.test_nodes(vec![node]),
+            ClientCommand::TestGroup(group) => {
+                let group = self
+                    .snapshot
+                    .proxy_groups
+                    .iter()
+                    .find(|candidate| candidate.name == group)
+                    .context("代理组不存在")?;
+                self.test_nodes(group.members.clone())
             }
-            ClientCommand::TestGroup(group) => self.test_group(&group).await,
             ClientCommand::CloseConnection(id) => {
-                self.api.close_connection(&id).await?;
-                self.note("已关闭连接");
+                let api = self.api.clone();
+                self.spawn_operation(async move {
+                    api.close_connection(&id).await?;
+                    Ok(Box::new(|engine: &mut Engine| {
+                        engine.note("已关闭连接");
+                        Ok(())
+                    }) as Completion)
+                });
                 Ok(())
             }
             ClientCommand::CloseAllConnections => {
-                let current = self.api.connections().await?;
-                let mut closed = 0;
-                for connection in &current.connections {
-                    if self.api.close_connection(&connection.id).await.is_ok() {
-                        closed += 1;
+                let api = self.api.clone();
+                self.spawn_operation(async move {
+                    let current = api.connections().await?;
+                    let mut closed = 0;
+                    for connection in current.connections {
+                        if api.close_connection(&connection.id).await.is_ok() {
+                            closed += 1;
+                        }
                     }
-                }
-                self.note(format!("已关闭 {closed} 条连接"));
+                    Ok(Box::new(move |engine: &mut Engine| {
+                        engine.note(format!("已关闭 {closed} 条连接"));
+                        Ok(())
+                    }) as Completion)
+                });
                 Ok(())
             }
             ClientCommand::UpdateSubscription => self.update_subscription().await,
@@ -329,18 +466,21 @@ impl Engine {
             ClientCommand::SetProfileUrl { name, url } => self.set_profile_url(name, url).await,
             ClientCommand::RemoveProfile(name) => self.remove_profile(&name).await,
             ClientCommand::DownloadCore => {
-                self.snapshot.status = "正在下载 sing-box 内核…".to_owned();
+                if self.snapshot.core_running {
+                    anyhow::bail!("下载内核前请先停止内核");
+                }
                 let version = self.settings.core_version.clone();
                 let mirror = self.settings.mirror.clone();
-                let download =
-                    core::download_core(&self.dir.join("core"), &version, &mirror).await?;
-                self.snapshot.core_installed = true;
-                self.snapshot.core_version = core::detect_version(&download.path).ok();
-                self.note(format!(
-                    "内核已安装: {}（SHA-256 {}…）",
-                    self.snapshot.core_version.clone().unwrap_or_default(),
-                    &download.sha256[..download.sha256.len().min(16)]
-                ));
+                let target = self.dir.join("core");
+                self.spawn_operation(async move {
+                    let download = core::download_core(&target, &version, &mirror).await?;
+                    Ok(Box::new(move |engine: &mut Engine| {
+                        engine.snapshot.core_installed = true;
+                        engine.snapshot.core_version = core::detect_version(&download.path).ok();
+                        engine.note("内核已安装");
+                        Ok(())
+                    }) as Completion)
+                });
                 Ok(())
             }
             ClientCommand::UpdateSettings(patch) => {
@@ -357,7 +497,9 @@ impl Engine {
                 Ok(())
             }
             ClientCommand::Refresh => {
-                self.poll().await;
+                self.last_traffic_at = Instant::now() - TRAFFIC_EVERY;
+                self.last_proxies_at = Instant::now() - PROXIES_EVERY;
+                self.last_connections_at = Instant::now() - CONNECTIONS_EVERY;
                 Ok(())
             }
         }
@@ -367,25 +509,13 @@ impl Engine {
         if self.snapshot.core_running || self.snapshot.starting {
             return Ok(());
         }
-        self.snapshot.starting = true;
-        let result = self.start_core_inner().await;
-        self.snapshot.starting = false;
-        result
-    }
-
-    async fn start_core_inner(&mut self) -> Result<()> {
         let mode = self.settings.traffic_mode;
         if mode == TrafficMode::Tun {
             if !system_proxy::can_use_tun() {
-                anyhow::bail!(
-                    "TUN 模式需要管理员/root 权限；请以管理员身份运行，或切回系统代理模式"
-                );
+                anyhow::bail!("TUN 模式需要管理员/root 权限");
             }
             if cfg!(windows) && !settings::wintun_path(&self.dir).is_file() {
-                anyhow::bail!(
-                    "TUN 模式需要 wintun.dll：请将该文件放入 {}",
-                    settings::wintun_path(&self.dir).display()
-                );
+                anyhow::bail!("TUN 模式需要 wintun.dll");
             }
         }
         let profile = self
@@ -393,65 +523,49 @@ impl Engine {
             .active_profile()
             .context("没有激活的订阅档案；先导入订阅")?
             .clone();
-        let core_path = settings::core_path(&self.dir);
-        if !core_path.is_file() {
+        if !settings::core_path(&self.dir).is_file() {
             anyhow::bail!("没有 sing-box 内核；先下载内核");
         }
         let cache = settings::profile_cache_path(&self.dir, &profile.name);
-        let raw = tokio::fs::read_to_string(&cache)
-            .await
-            .context("读取订阅缓存失败；先更新订阅")?;
-        let adapted = core::adapt_inbounds(&raw, mode, self.settings.mixed_port)?;
-        let active = self.dir.join("cache/active-config.json");
-        // The rewritten configuration is the rules view's source of truth.
-        let (rules, rule_sets) = crate::state::parse_route_rules(&adapted);
-        self.snapshot.rules = rules;
-        self.snapshot.rule_sets = rule_sets;
-        tokio::fs::write(&active, adapted.as_bytes()).await?;
-        core::check_config(&core_path, &active)?;
-        let handle = core::start(&core_path, &active, &self.dir.join("cache/core.log")).await?;
-        self.child = Some(handle);
-        self.log_offset = 0;
-        self.snapshot.core_logs.clear();
-
-        for _ in 0..20 {
-            if self.api.alive().await {
-                self.snapshot.core_running = true;
-                self.restart_attempts = 0;
-                self.restart_at = None;
-                self.snapshot.restart_attempts = 0;
-                self.snapshot.core_runtime_version = self.api.version().await.ok();
-                let mut status = "内核已启动".to_owned();
-                if mode == TrafficMode::SystemProxy && self.settings.auto_system_proxy {
-                    match system_proxy::enable(&self.dir, self.settings.mixed_port) {
+        let dir = self.dir.clone();
+        let port = self.settings.mixed_port;
+        self.snapshot.starting = true;
+        self.spawn_operation(async move {
+            let raw = tokio::fs::read_to_string(cache).await.context(
+                "读取订阅缓存失败；请更新或重新导入订阅（旧缓存名称冲突时不会自动迁移）",
+            )?;
+            let started = core::start_managed(&dir, &raw, mode, port).await?;
+            Ok(Box::new(move |engine: &mut Engine| {
+                engine.child = Some(started.handle);
+                engine.api = started.api;
+                engine.snapshot.core_runtime_version = Some(started.version);
+                (engine.snapshot.rules, engine.snapshot.rule_sets) =
+                    crate::state::parse_route_rules(&started.config);
+                engine.snapshot.core_running = true;
+                engine.healthy_since = Some(Instant::now());
+                engine.restart_at = None;
+                engine.log_offset = 0;
+                engine.snapshot.core_logs.clear();
+                engine.note("内核已启动");
+                if mode == TrafficMode::SystemProxy && engine.settings.auto_system_proxy {
+                    match system_proxy::enable(&engine.dir, port) {
                         Ok(()) => {
-                            self.snapshot.system_proxy_enabled = true;
-                            status = format!(
-                                "内核已启动；系统代理 → 127.0.0.1:{}",
-                                self.settings.mixed_port
-                            );
+                            engine.snapshot.system_proxy_enabled = true;
+                            engine.note(format!("内核已启动；系统代理 → 127.0.0.1:{port}"));
                         }
-                        Err(error) => {
-                            status = format!("内核已启动；系统代理设置失败: {error}");
-                        }
+                        Err(error) => engine.note(format!("内核已启动；系统代理设置失败: {error}")),
                     }
-                } else if mode == TrafficMode::Tun {
-                    status = "内核已启动（TUN 模式）".to_owned();
                 }
-                self.snapshot.status = status.clone();
-                self.snapshot.push_event(status);
-                self.refresh_proxies().await?;
-                return Ok(());
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-        if let Some(mut child) = self.child.take() {
-            let _ = child.child.kill().await;
-        }
-        anyhow::bail!("内核已启动但 clash_api 未响应；确认订阅配置包含 clash_api")
+                Ok(())
+            }) as Completion)
+        });
+        Ok(())
     }
 
     async fn stop_core(&mut self) {
+        self.cancel_operation().await;
+        self.healthy_since = None;
+        self.last_totals = None;
         self.snapshot.core_running = false;
         self.snapshot.starting = false;
         self.restart_at = None;
@@ -496,40 +610,39 @@ impl Engine {
         Ok(())
     }
 
-    async fn test_group(&mut self, group: &str) -> Result<()> {
-        let Some(snapshot) = self
-            .snapshot
-            .proxy_groups
-            .iter()
-            .find(|candidate| candidate.name == group)
-            .cloned()
-        else {
-            anyhow::bail!("代理组不存在: {group}");
-        };
-        self.note(format!("正在测试 {} 组延迟…", group));
+    fn test_nodes(&mut self, members: Vec<String>) -> Result<()> {
+        let api = self.api.clone();
         let url = self.settings.test_url.clone();
-        let api = &self.api;
-        let results = futures_util::future::join_all(snapshot.members.iter().map(|member| {
-            let url = url.clone();
-            async move { (member.clone(), api.delay_with(member, &url).await) }
-        }))
-        .await;
-        for (member, result) in results {
-            match result {
-                Ok(delay) => {
-                    self.delays.insert(member.clone(), delay);
-                    self.failed.retain(|failed| failed != &member);
+        self.spawn_operation(async move {
+            let results = futures_util::future::join_all(members.into_iter().map(|member| {
+                let api = api.clone();
+                let url = url.clone();
+                async move {
+                    let result = api.delay_with(&member, &url).await;
+                    (member, result)
                 }
-                Err(_) => {
-                    self.delays.remove(&member);
-                    if !self.failed.contains(&member) {
-                        self.failed.push(member.clone());
+            }))
+            .await;
+            Ok(Box::new(move |engine: &mut Engine| {
+                for (member, result) in results {
+                    match result {
+                        Ok(delay) => {
+                            engine.delays.insert(member.clone(), delay);
+                            engine.failed.retain(|failed| failed != &member);
+                        }
+                        Err(_) => {
+                            engine.delays.remove(&member);
+                            if !engine.failed.contains(&member) {
+                                engine.failed.push(member);
+                            }
+                        }
                     }
                 }
-            }
-        }
-        self.apply_delays();
-        self.note(format!("{} 组延迟测试完成", group));
+                engine.apply_delays();
+                engine.note("延迟测试完成");
+                Ok(())
+            }) as Completion)
+        });
         Ok(())
     }
 
@@ -539,49 +652,50 @@ impl Engine {
             .active_profile()
             .context("没有激活的订阅档案")?
             .clone();
-        self.snapshot.status = format!("正在更新订阅 {}…", profile.name);
-        let fetched = match self.fetch_with_compat(&profile.url).await {
-            Ok(fetched) => fetched,
-            Err(error) => {
-                let cache = settings::profile_cache_path(&self.dir, &profile.name);
-                if tokio::fs::try_exists(&cache).await.unwrap_or(false) {
-                    self.note(format!("订阅更新失败（{error}）；继续使用上次缓存"));
-                    return Ok(());
+        if profile.url.is_empty() {
+            self.note("本地档案无需更新");
+            return Ok(());
+        }
+        let mirror = self.settings.mirror.clone();
+        self.spawn_operation(async move {
+            let fetched = match subscription::fetch(&profile.url, &mirror).await {
+                Ok(fetched) => Ok(fetched),
+                Err(error) => match subscription::bare_sing_box_fallback_url(&profile.url) {
+                    Some(fallback) if fallback != profile.url => {
+                        subscription::fetch(&fallback, &mirror).await
+                    }
+                    _ => Err(error),
+                },
+            };
+            Ok(Box::new(move |engine: &mut Engine| {
+                let cache = settings::profile_cache_path(&engine.dir, &profile.name);
+                let fetched = match fetched {
+                    Ok(fetched) => fetched,
+                    Err(error) if cache.is_file() => {
+                        engine.note(format!("订阅更新失败（{error}）；继续使用上次缓存"));
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                };
+                let parsed = subscription::parse(&fetched.body)?;
+                std::fs::write(cache, &parsed.raw)?;
+                for stored in &mut engine.profiles.profiles {
+                    if stored.name == profile.name {
+                        stored.last_updated = now_epoch();
+                    }
                 }
-                return Err(error);
-            }
-        };
-        self.snapshot.subscription_usage = fetched.userinfo;
-        let parsed = subscription::parse(&fetched.body)?;
-        let cache = settings::profile_cache_path(&self.dir, &profile.name);
-        tokio::fs::write(&cache, &parsed.raw).await?;
-        for stored in &mut self.profiles.profiles {
-            if stored.name == profile.name {
-                stored.last_updated = now_epoch();
-            }
-        }
-        self.profiles.save(&self.dir)?;
-        self.snapshot.profiles = profile_summaries(&self.profiles);
-        self.snapshot.active_profile = self
-            .profiles
-            .active_profile()
-            .map(|profile| ProfileSummary::from_profile(profile, true));
-        self.note(format!("订阅已更新（{} 个节点）", parsed.nodes.len()));
+                engine.profiles.save(&engine.dir)?;
+                engine.snapshot.subscription_usage = fetched.userinfo;
+                engine.snapshot.profiles = profile_summaries(&engine.profiles);
+                engine.snapshot.active_profile = engine
+                    .profiles
+                    .active_profile()
+                    .map(|p| ProfileSummary::from_profile(p, true));
+                engine.note(format!("订阅已更新（{} 个节点）", parsed.nodes.len()));
+                Ok(())
+            }) as Completion)
+        });
         Ok(())
-    }
-
-    /// Fetches the profile URL, retrying the old bare `sing-box.json`
-    /// endpoint when the normalized full-profile link fails on an older
-    /// sbctl server. `parse` wraps that bare node list into a runnable
-    /// client configuration, so the caller needs no special casing.
-    async fn fetch_with_compat(&self, url: &str) -> Result<subscription::Fetched> {
-        match subscription::fetch(url, &self.settings.mirror).await {
-            Ok(fetched) => Ok(fetched),
-            Err(error) => match subscription::bare_sing_box_fallback_url(url) {
-                Some(fallback) => subscription::fetch(&fallback, &self.settings.mirror).await,
-                None => Err(error),
-            },
-        }
     }
 
     async fn import_subscription(&mut self, name: Option<String>, url: String) -> Result<()> {
@@ -748,11 +862,15 @@ impl Engine {
     }
 
     async fn poll(&mut self) {
+        // Tail even while stopped, so a failed startup leaves its sing-box
+        // diagnostics visible in the log view.
+        self.tail_core_log();
         if self.snapshot.core_running {
             if self.watch_core_exit() {
+                self.cancel_operation().await;
                 return;
             }
-            self.tail_core_log();
+            self.reset_restarts_after_stable_run();
             let now = Instant::now();
             if now.duration_since(self.last_connections_at) >= CONNECTIONS_EVERY {
                 self.last_connections_at = now;
@@ -772,7 +890,8 @@ impl Engine {
                     self.note(format!("刷新代理组失败: {error}"));
                 }
             }
-            if self.auto_update_due()
+            if self.pending.is_none()
+                && self.auto_update_due()
                 && let Err(error) = self.update_subscription().await
             {
                 self.note(format!("自动更新订阅失败: {error}"));
@@ -782,7 +901,8 @@ impl Engine {
             if !self.snapshot.proxy_groups.is_empty() {
                 self.snapshot.proxy_groups.clear();
             }
-            if let Some(at) = self.restart_at
+            if self.pending.is_none()
+                && let Some(at) = self.restart_at
                 && Instant::now() >= at
             {
                 self.restart_at = None;
@@ -898,7 +1018,19 @@ impl Engine {
         }
     }
 
+    fn reset_restarts_after_stable_run(&mut self) {
+        if self
+            .healthy_since
+            .is_some_and(|since| since.elapsed() >= STABLE_RUN)
+        {
+            self.restart_attempts = 0;
+            self.snapshot.restart_attempts = 0;
+        }
+    }
+
     fn schedule_restart(&mut self) {
+        self.healthy_since = None;
+        self.restart_at = None;
         self.snapshot.core_running = false;
         self.snapshot.core_runtime_version = None;
         self.snapshot.memory_used = 0;
@@ -910,6 +1042,17 @@ impl Engine {
             self.snapshot.system_proxy_enabled = false;
         }
         let attempt = self.restart_attempts;
+        if attempt >= MAX_AUTO_RESTARTS {
+            // Endless retrying would hide a persistent failure (a stale core
+            // still bound to the clash API port, for example). Stop and put
+            // the decision back with the administrator.
+            self.note(format!(
+                "内核连续异常退出 {attempt} 次，已停止自动重启；请排查内核或 \
+                 {} 端口占用后手动启动",
+                crate::clash_api::DEFAULT_CONTROLLER
+            ));
+            return;
+        }
         self.restart_attempts = attempt.saturating_add(1);
         self.snapshot.restart_attempts = self.restart_attempts;
         let delay = core::restart_backoff(attempt);
@@ -922,24 +1065,46 @@ impl Engine {
     }
 
     fn tail_core_log(&mut self) {
+        use std::io::{Read, Seek, SeekFrom};
         let path = self.dir.join("cache/core.log");
-        let Ok(meta) = std::fs::metadata(&path) else {
+        let Ok(mut file) = std::fs::File::open(&path) else {
+            return;
+        };
+        let Ok(meta) = file.metadata() else {
             return;
         };
         let size = meta.len();
-        if size <= self.log_offset {
+        // Each launch truncates the log. A shorter file means the offset points
+        // past the end, so start over instead of stalling forever.
+        if size < self.log_offset {
+            self.log_offset = 0;
+        }
+        if size == self.log_offset {
             return;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        if file.seek(SeekFrom::Start(self.log_offset)).is_err() {
+            self.log_offset = 0;
             return;
-        };
-        let start = usize::try_from(self.log_offset.min(text.len() as u64)).unwrap_or(0);
-        for line in text[start..].lines() {
-            if !line.is_empty() {
-                self.snapshot.push_log(line);
+        }
+        let mut bytes = Vec::new();
+        if file.read_to_end(&mut bytes).is_err() {
+            return;
+        }
+        // Consume only complete lines: a partial trailing line is retried on
+        // the next poll, and the offset always lands on a character boundary.
+        let text = String::from_utf8_lossy(&bytes);
+        let mut consumed = 0usize;
+        for line in text.split_inclusive('\n') {
+            if !line.ends_with('\n') {
+                break;
+            }
+            consumed += line.len();
+            let trimmed = line.trim_end_matches(['\n', '\r']);
+            if !trimmed.is_empty() {
+                self.snapshot.push_log(strip_ansi(trimmed));
             }
         }
-        self.log_offset = size;
+        self.log_offset += consumed as u64;
     }
 
     fn auto_update_due(&mut self) -> bool {
@@ -998,11 +1163,196 @@ fn now_epoch() -> u64 {
         .as_secs()
 }
 
+/// Removes ANSI escape sequences (sing-box colors its log lines) so the
+/// clients' log views show plain text.
+fn strip_ansi(line: &str) -> String {
+    if !line.contains('\u{1b}') {
+        return line.to_owned();
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                // CSI: consume parameters, intermediates and the final byte.
+                for follow in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&follow) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                // OSC: run to the string terminator (BEL or ST).
+                let mut previous = ' ';
+                for follow in chars.by_ref() {
+                    if follow == '\u{7}' || (previous == '\u{1b}' && follow == '\\') {
+                        break;
+                    }
+                    previous = follow;
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::clash_api::OutboundMode;
     use crate::settings::Profile;
+
+    async fn test_engine(dir: &std::path::Path) -> Engine {
+        std::fs::create_dir_all(dir.join("cache")).unwrap();
+        let (events, _) = mpsc::channel(32);
+        Engine::new(dir.to_path_buf(), events).await
+    }
+
+    const NODE_CONFIG: &str = r#"{"outbounds":[{"type":"shadowsocks","tag":"test","server":"example.test","server_port":443,"method":"aes-128-gcm","password":"fixture"}]}"#;
+
+    #[tokio::test]
+    async fn short_lived_successes_exhaust_restarts_and_stable_runs_reset_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = test_engine(dir.path()).await;
+        for attempt in 1..=MAX_AUTO_RESTARTS {
+            engine.healthy_since = Some(Instant::now());
+            engine.reset_restarts_after_stable_run();
+            engine.schedule_restart();
+            assert_eq!(engine.restart_attempts, attempt);
+            assert!(engine.restart_at.is_some());
+        }
+        engine.healthy_since = Some(Instant::now());
+        engine.reset_restarts_after_stable_run();
+        engine.schedule_restart();
+        assert!(engine.restart_at.is_none());
+        engine.healthy_since = Some(Instant::now() - STABLE_RUN);
+        engine.reset_restarts_after_stable_run();
+        assert_eq!(engine.restart_attempts, 0);
+    }
+
+    #[tokio::test]
+    async fn stopped_clients_refuse_to_control_an_unowned_api() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = test_engine(dir.path()).await;
+        assert!(
+            engine
+                .apply(ClientCommand::CloseAllConnections)
+                .await
+                .is_err()
+        );
+        assert!(engine.pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn deleting_one_profile_preserves_the_other_profiles_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = test_engine(dir.path()).await;
+        for name in ["a b", "a_b"] {
+            let path = dir.path().join(format!("{name}.json"));
+            std::fs::write(&path, NODE_CONFIG).unwrap();
+            engine
+                .import_profile_file(path.to_string_lossy().into())
+                .await
+                .unwrap();
+        }
+        engine.remove_profile("a b").await.unwrap();
+        assert!(settings::profile_cache_path(dir.path(), "a_b").is_file());
+    }
+
+    #[tokio::test]
+    async fn importing_a_legacy_link_retries_the_bare_endpoint() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for suffix in ["sing-box-full.json", "sing-box.json"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buffer = [0; 4096];
+                let count = socket.read(&mut buffer).await.unwrap();
+                assert!(String::from_utf8_lossy(&buffer[..count]).contains(suffix));
+                let (status, body) = if suffix == "sing-box-full.json" {
+                    ("404 Not Found", "")
+                } else {
+                    ("200 OK", NODE_CONFIG)
+                };
+                socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = test_engine(dir.path()).await;
+        let result = engine
+            .import_subscription(
+                Some("legacy".into()),
+                format!("http://{address}/sub/fixture/sing-box.json"),
+            )
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while engine.pending.is_some() {
+                engine.finish_operation().await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        server.abort();
+        assert!(
+            settings::profile_cache_path(dir.path(), "legacy").is_file(),
+            "{}",
+            engine.snapshot.status
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pending_import_publishes_busy_and_can_be_stopped() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("cache")).unwrap();
+        let controller = ClientController::start(dir.path().to_path_buf());
+        controller
+            .send(ClientCommand::ImportSubscription {
+                name: None,
+                url: format!("http://{address}/config.json"),
+            })
+            .unwrap();
+        let (_socket, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(controller.snapshot().busy.is_some());
+        controller.send(ClientCommand::StopCore).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if controller.snapshot().busy.is_none()
+                    && controller.snapshot().status.contains("内核已停止")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("StopCore must cancel pending network work");
+    }
+
+    #[test]
+    fn strip_ansi_removes_color_sequences_but_keeps_text() {
+        assert_eq!(
+            strip_ansi("\u{1b}[36mINFO\u{1b}[0m inbound started"),
+            "INFO inbound started"
+        );
+        assert_eq!(strip_ansi("plain line"), "plain line");
+        assert_eq!(
+            strip_ansi("\u{1b}[38;5;49m\u{1b}[1mcolored\u{1b}[0m tail"),
+            "colored tail"
+        );
+    }
 
     #[tokio::test]
     async fn commands_produce_snapshot_events() {

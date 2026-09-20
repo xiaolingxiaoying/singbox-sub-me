@@ -1,4 +1,10 @@
 target/
 target-linux/
+target-linux*/
+target-fixtures/
+.scratch/
+.reference-*/
+.tmp-*/
+dist/
 .git/
 sbctl-linux-amd64

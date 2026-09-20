@@ -18,7 +18,15 @@ permissions:
   contents: write
 
 jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   build-sbctl:
+    needs: checks
+    env:
+      SBCTL_RELEASE_PUBLIC_KEY_HEX: ${{ vars.SBCTL_RELEASE_PUBLIC_KEY_HEX }}
     strategy:
       fail-fast: false
       matrix:
@@ -40,12 +48,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+      - name: Validate the production trust anchor
+        run: python3 scripts/prepare-installer.py install.sh
       - name: Build release binary
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
           CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release -p sbctl --no-default-features --target ${{ matrix.target }}
       - run: cp target/${{ matrix.target }}/release/sbctl sbctl-linux-${{ matrix.arch }}
       - uses: actions/upload-artifact@v4
         with:
@@ -102,12 +112,18 @@ jobs:
         with:
           name: sbctl-amd64
       - run: chmod 0755 sbctl-linux-amd64
-      - name: Validate the Linux release artifact on supported systemd hosts
-        run: SBCTL_ARTIFACT="$GITHUB_WORKSPACE/sbctl-linux-amd64" sh tests/acceptance/run.sh
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build isolated fixture verifier (never uploaded)
+        run: cargo build --release -p sbctl --features test-signing --target-dir target-fixtures
+      - name: Validate production lifecycle and fixture-signed rollback on systemd hosts
+        run: SBCTL_ARTIFACT="$GITHUB_WORKSPACE/sbctl-linux-amd64" SBCTL_TEST_ARTIFACT="$GITHUB_WORKSPACE/target-fixtures/release/sbctl" sh tests/acceptance/run.sh
 
   package:
     needs: [build-sbctl, build-sbtui, acceptance]
     runs-on: ubuntu-22.04
+    environment: release
+    env:
+      SBCTL_RELEASE_PUBLIC_KEY_HEX: ${{ vars.SBCTL_RELEASE_PUBLIC_KEY_HEX }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -132,6 +148,31 @@ jobs:
             install -m 0755 "extract-${arch}/sing-box-${SING_BOX_VERSION}-linux-${arch}/sing-box" "sing-box-linux-${arch}"
             rm -rf "extract-${arch}" "$archive"
           done
+      - name: Install tooling for manifest signing
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          install -m 0755 sbctl-linux-amd64 /usr/local/bin/sbctl
+      - name: Sign and verify every artifact before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          SING_BOX_VERSION: ${{ inputs.sing_box_version || '1.12.0' }}
+          SBCTL_SIGNING_SEED: ${{ secrets.SBCTL_SIGNING_SEED }}
+        run: |
+          set -euo pipefail
+          test -n "$SBCTL_SIGNING_SEED" || { echo 'Missing production signing secret' >&2; exit 2; }
+          umask 077
+          export SBCTL_SIGNING_KEY="$RUNNER_TEMP/sbctl-release-key.hex"
+          trap 'rm -f "$SBCTL_SIGNING_KEY"' EXIT
+          printf '%s' "$SBCTL_SIGNING_SEED" > "$SBCTL_SIGNING_KEY"
+          unset SBCTL_SIGNING_SEED
+          python3 scripts/prepare-installer.py install.sh
+          for arch in amd64 arm64; do
+            scripts/generate-manifest.sh \
+              "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$SING_BOX_VERSION" "$arch" \
+              "sbctl-linux-$arch" "sing-box-linux-$arch" "manifest-$arch.json"
+          done
       - name: Create GitHub release and upload binaries
         env:
           GH_TOKEN: ${{ github.token }}
@@ -144,22 +185,5 @@ jobs:
             sbctl-linux-amd64 sbctl-linux-arm64 sing-box-linux-amd64 sing-box-linux-arm64 \
             sbtui-windows-amd64.exe sbtui-macos-arm64 sbtui-linux-amd64 \
             ly-windows-amd64.exe ly-macos-arm64 ly-linux-amd64 sbtui-install.sh \
+            manifest-amd64.json manifest-arm64.json install.sh \
             --repo "$GITHUB_REPOSITORY" --clobber
-      - name: Install tooling for manifest signing
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
-          install -m 0755 sbctl-linux-amd64 /usr/local/bin/sbctl
-      - name: Generate and upload architecture manifests
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-          SING_BOX_VERSION: ${{ inputs.sing_box_version || '1.12.0' }}
-        run: |
-          set -euo pipefail
-          for arch in amd64 arm64; do
-            scripts/generate-manifest.sh \
-              "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$SING_BOX_VERSION" "$arch" \
-              "sbctl-linux-$arch" "sing-box-linux-$arch" "manifest-$arch.json"
-          done
-          gh release upload "$RELEASE_TAG" manifest-amd64.json manifest-arm64.json --repo "$GITHUB_REPOSITORY" --clobber

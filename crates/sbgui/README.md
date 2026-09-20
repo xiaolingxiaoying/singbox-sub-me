@@ -1,15 +1,27 @@
 # sbgui — 桌面 sing-box 客户端
 
-`sbgui` 是基于 GPUI 的 Windows 桌面客户端，与终端客户端 `sbtui` 共用同一个控制面
-（`crates/client-core`）。窗口本身只做两件事：渲染引擎发布的 `ClientSnapshot`，以及
-把用户操作转换成 `ClientCommand`。因此两个客户端在订阅、节点、系统代理、TUN、流量、
-连接与日志上共享业务逻辑；桌面和终端的布局、操作入口与快捷键分别实现。
+`sbgui` 是基于 GPUI 的桌面客户端（Windows，以及启用了 X11 后端的 Linux），与终端客户端
+`sbtui` 共用同一个控制面（`crates/client-core`）。窗口本身只做两件事：渲染引擎发布的
+`ClientSnapshot`，以及把用户操作转换成 `ClientCommand`。因此两个客户端在订阅、节点、
+系统代理、TUN、流量、连接与日志上共享业务逻辑；桌面和终端的布局、操作入口与快捷键分别实现。
 
 ## 构建与运行
 
 ```bash
 cargo build --release -p sbgui
-# 产出 target/release/sbgui.exe
+# Windows 产出 target/release/sbgui.exe
+# Linux 产出 target/release/sbgui
+```
+
+Windows / macOS 的 GPUI 后端无需额外系统库。Linux 上 `crates/sbgui/Cargo.toml` 会为
+`cfg(target_os = "linux")` 启用 GPUI 的 `x11` 后端；缺少它时 GPUI 会静默退化为无窗口的
+headless 渲染器。构建需要 X11 开发库：
+
+```bash
+sudo apt-get install -y --no-install-recommends \
+  libfontconfig1-dev libfreetype6-dev libx11-dev libxcb1-dev \
+  libxkbcommon-dev libxkbcommon-x11-dev libgl1-mesa-dev libegl1-mesa-dev \
+  libvulkan-dev libasound2-dev
 ```
 
 首次运行会在 `%APPDATA%\sbgui` 下创建 `settings.toml`、`profiles.toml`、`cache/` 与

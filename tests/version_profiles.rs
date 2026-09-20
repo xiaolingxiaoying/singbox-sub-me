@@ -64,3 +64,45 @@ fn generated_profiles_pass_a_real_sing_box_check() {
         "no sing-box profile was checked; set SING_BOX_BIN_<major>_<minor>"
     );
 }
+
+/// The generated *server* configuration must be accepted by the latest stable
+/// kernel on an IPv4-only host. This guards the fields sing-box removed in
+/// 1.13 (notably inbound `domain_strategy`): the fake-kernel acceptance suite
+/// cannot catch them, and a default `sbctl install` downloads the latest core.
+#[test]
+#[ignore = "requires the latest real sing-box core; run by the CI sing-box-profiles job"]
+fn server_config_passes_the_latest_real_core_check() {
+    let Ok(binary) = std::env::var("SING_BOX_BIN_1_14") else {
+        eprintln!("skipping: SING_BOX_BIN_1_14 is not set");
+        return;
+    };
+    let root = tempfile::tempdir().expect("temporary root is created");
+    let mut config = DeploymentConfig::new(
+        SubscriptionMode::IpFallback,
+        "127.0.0.1".into(),
+        None,
+        Some(2080),
+        "ens3".into(),
+        vec![
+            ManagedProtocol::VlessReality,
+            ManagedProtocol::VmessWebsocket,
+            ManagedProtocol::Hysteria2,
+            ManagedProtocol::Tuic,
+            ManagedProtocol::Anytls,
+        ],
+        Some("www.cloudflare.com".into()),
+    )
+    .expect("a five-protocol IP fallback deployment is valid");
+    // Force the IPv4-only resolution path regardless of the CI host's routing,
+    // so the generated `dns.strategy` and route `resolve` rules are exercised.
+    config.ipv4_only = true;
+    let artifacts = generated_artifacts(&config, root.path()).expect("artifacts generate");
+    let server = artifacts
+        .iter()
+        .find(|(name, _)| name == "sing-box-server.json")
+        .map(|(_, contents)| contents)
+        .expect("the server artifact is generated");
+    sbctl::subscription::check_sing_box_config(Path::new(&binary), server).unwrap_or_else(
+        |error| panic!("the latest sing-box rejected the generated server config: {error}"),
+    );
+}

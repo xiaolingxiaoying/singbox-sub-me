@@ -449,6 +449,11 @@ fn sing_box_update_rejects_an_unsigned_manifest() {
     assert!(!fixture.path().join("downloaded-sing-box").exists());
 }
 
+// The install flow ends by executing the downloaded kernel, and the fixture
+// it downloads is the platform's config-check script: on Windows an
+// extensionless file cannot be spawned as a Win32 process, so the full
+// download-verify-install path is only exercisable on Unix.
+#[cfg(unix)]
 #[test]
 fn install_with_a_signed_manifest_downloads_and_verifies_sing_box() {
     let fixture = supported_systemd_host();
@@ -583,30 +588,27 @@ fn write_systemctl_fixture(fixture: &TempDir, succeeds: bool) {
 }
 
 /// Writes an executable host command that exits with the given status and,
-/// when non-empty, emits `stderr_text` so diagnostics can be asserted.
+/// when non-empty, emits `stderr_text` so diagnostics can be asserted. Only
+/// its Unix callers exist, so the fixture itself is Unix-only.
+#[cfg(unix)]
 fn write_command_fixture(fixture: &TempDir, name: &str, status: u8, stderr_text: &str) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let path = fixture.path().join(name);
-        fs::create_dir_all(path.parent().expect("command path has a parent"))
-            .expect("command directory is created");
-        fs::write(
-            &path,
-            format!("#!/bin/sh\n{}\nexit {status}\n", {
-                if stderr_text.is_empty() {
-                    String::new()
-                } else {
-                    format!("echo {stderr_text} >&2")
-                }
-            }),
-        )
-        .expect("command fixture is written");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
-            .expect("command fixture is executable");
-    }
-    #[cfg(not(unix))]
-    let _ = (fixture, name, status, stderr_text);
+    use std::os::unix::fs::PermissionsExt;
+    let path = fixture.path().join(name);
+    fs::create_dir_all(path.parent().expect("command path has a parent"))
+        .expect("command directory is created");
+    fs::write(
+        &path,
+        format!("#!/bin/sh\n{}\nexit {status}\n", {
+            if stderr_text.is_empty() {
+                String::new()
+            } else {
+                format!("echo {stderr_text} >&2")
+            }
+        }),
+    )
+    .expect("command fixture is written");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+        .expect("command fixture is executable");
 }
 
 /// Persists a Direct subscription configuration without starting services.
@@ -3746,7 +3748,20 @@ fn direct_serve_refuses_to_bind_public_ports_without_socket_activation() {
         ])
         .assert()
         .code(2)
-        .stderr(predicate::str::contains("requires sbctl-http.socket"));
+        .stderr(predicate::str::contains(refusal_message()));
+}
+
+/// Why `serve` refuses a Direct bind: production hosts name the missing
+/// socket unit, other platforms name the unsupported socket activation.
+fn refusal_message() -> &'static str {
+    #[cfg(unix)]
+    {
+        "requires sbctl-http.socket"
+    }
+    #[cfg(not(unix))]
+    {
+        "only supported on Unix systemd hosts"
+    }
 }
 
 #[test]
@@ -4018,6 +4033,8 @@ fn certificate_verify_rejects_a_certificate_that_does_not_cover_the_host_without
     );
 }
 
+// The fake certbot is a POSIX shell fixture; there is no certbot on Windows.
+#[cfg(unix)]
 #[test]
 fn certificate_obtain_fails_with_a_redacted_diagnostic_when_certbot_fails() {
     let fixture = supported_systemd_host();
@@ -4051,6 +4068,7 @@ fn certificate_obtain_fails_with_a_redacted_diagnostic_when_certbot_fails() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn certificate_obtain_runs_certbot_and_pins_the_renewed_certificate() {
     let fixture = supported_systemd_host();
@@ -5149,6 +5167,8 @@ fn system_status_reports_the_kernel_congestion_control_from_the_fixture() {
         .stdout(predicate::str::contains("default_qdisc=fq_codel"));
 }
 
+// The fake sysctl is a POSIX shell fixture; sysctl does not exist on Windows.
+#[cfg(unix)]
 #[test]
 fn system_bbr_applies_and_persists_the_drop_in_without_touching_sing_box() {
     let fixture = TempDir::new().expect("temporary root is created");

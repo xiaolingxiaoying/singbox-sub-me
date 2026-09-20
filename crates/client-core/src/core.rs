@@ -18,6 +18,157 @@ pub struct CoreHandle {
     pub child: Child,
 }
 
+pub struct StartedCore {
+    pub handle: CoreHandle,
+    pub api: crate::clash_api::ClashApi,
+    pub version: String,
+    pub config: String,
+}
+
+/// How long a freshly spawned core may take to expose its control API before
+/// startup is treated as failed. A first run may need to download remote
+/// rule-sets, so this is deliberately generous; the reason for any failure is
+/// reported from the core log instead of a bare timeout.
+const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Each launch gets a fresh local endpoint and secret. A port race can make
+/// startup fail, but cannot cause us to control an existing proxy instance.
+pub async fn start_managed(
+    dir: &Path,
+    raw: &str,
+    mode: crate::system_proxy::TrafficMode,
+    mixed_port: u16,
+) -> Result<StartedCore> {
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let address = reservation.local_addr()?;
+    let mut entropy = [0u8; 32];
+    getrandom::fill(&mut entropy)
+        .map_err(|error| anyhow::anyhow!("controller secret generation failed: {error}"))?;
+    let secret = entropy
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let config = runtime_config(raw, mode, mixed_port, &address.to_string(), &secret)?;
+    let api = crate::clash_api::ClashApi::authenticated(&format!("http://{address}"), &secret);
+    let core = crate::settings::core_path(dir);
+    let active = dir.join("cache/active-config.json");
+    use tokio::io::AsyncWriteExt;
+    let mut options = tokio::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&active).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .await?;
+    }
+    file.write_all(config.as_bytes()).await?;
+    file.flush().await?;
+    drop(file);
+    let check = Command::new(&core)
+        .args(["check", "-c"])
+        .arg(&active)
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(30), check)
+        .await
+        .context("sing-box check timed out")??;
+    if !output.status.success() {
+        bail!(
+            "sing-box check rejected the configuration: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    drop(reservation);
+    let core_log = dir.join("cache/core.log");
+    let mut handle = start(&core, &active, &core_log).await?;
+    let ready = tokio::time::timeout(READY_TIMEOUT, wait_ready(&mut handle.child, &api)).await;
+    match ready {
+        Ok(Ok(version)) => Ok(StartedCore {
+            handle,
+            api,
+            version,
+            config,
+        }),
+        Ok(Err(error)) => {
+            let _ = handle.child.kill().await;
+            Err(error.context(format!(
+                "sing-box 启动失败；核心日志末尾：\n{}",
+                core_log_tail(&core_log)
+            )))
+        }
+        Err(_) => {
+            let _ = handle.child.kill().await;
+            bail!(
+                "内核控制通道在 {} 秒内未就绪（常见原因是远端规则集下载缓慢或被阻断）；核心日志末尾：\n{}",
+                READY_TIMEOUT.as_secs(),
+                core_log_tail(&core_log)
+            )
+        }
+    }
+}
+
+/// The tail of the core log, appended to a startup failure so the reason
+/// (a rejected configuration, a failed remote rule-set download, a port
+/// conflict) is visible instead of a bare timeout or channel error.
+fn core_log_tail(path: &Path) -> String {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return "（核心日志不可读）".to_owned();
+    };
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if lines.is_empty() {
+        return "（核心日志为空）".to_owned();
+    }
+    let start = lines.len().saturating_sub(10);
+    lines[start..].join("\n")
+}
+
+async fn wait_ready(child: &mut Child, api: &crate::clash_api::ClashApi) -> Result<String> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            bail!("sing-box exited during startup: {status}");
+        }
+        if let Ok(version) = api.version().await {
+            if let Some(status) = child.try_wait()? {
+                bail!("sing-box exited during startup: {status}");
+            }
+            return Ok(version);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+fn runtime_config(
+    raw: &str,
+    mode: crate::system_proxy::TrafficMode,
+    mixed_port: u16,
+    address: &str,
+    secret: &str,
+) -> Result<String> {
+    let mut config: serde_json::Value =
+        serde_json::from_str(&adapt_inbounds(raw, mode, mixed_port)?)?;
+    if !config
+        .get("experimental")
+        .is_some_and(serde_json::Value::is_object)
+    {
+        config["experimental"] = serde_json::json!({});
+    }
+    if !config["experimental"]
+        .get("clash_api")
+        .is_some_and(serde_json::Value::is_object)
+    {
+        config["experimental"]["clash_api"] = serde_json::json!({});
+    }
+    config["experimental"]["clash_api"]["external_controller"] = address.into();
+    config["experimental"]["clash_api"]["secret"] = secret.into();
+    Ok(serde_json::to_string_pretty(&config)?)
+}
+
 /// The result of a core download: where the binary was installed and the
 /// SHA-256 of the release archive it came from.
 pub struct CoreDownload {
@@ -33,7 +184,13 @@ pub fn detect_version(core: &Path) -> Result<String> {
         .output()
         .context("running `sing-box version` failed")?;
     let text = String::from_utf8_lossy(&output.stdout);
-    Ok(text.lines().next().unwrap_or("").trim().to_owned())
+    let first = text.lines().next().unwrap_or("").trim();
+    // The binary reports "sing-box version 1.14.1"; the "sing-box" half is
+    // already every caller's label, so only the version remains.
+    Ok(first
+        .strip_prefix("sing-box version ")
+        .unwrap_or(first)
+        .to_owned())
 }
 
 /// Validates a configuration with `sing-box check`.
@@ -344,6 +501,61 @@ pub fn adapt_inbounds(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_dead_child_cannot_be_made_healthy_by_another_api() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api =
+            crate::clash_api::ClashApi::new(&format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buffer = [0; 4096];
+                let _ = socket.read(&mut buffer).await;
+                let body = r#"{"version":"foreign"}"#;
+                let _ = socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+            }
+        });
+        assert!(api.alive().await);
+        #[cfg(windows)]
+        let mut child = Command::new("cmd.exe")
+            .args(["/C", "exit", "9"])
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        #[cfg(not(windows))]
+        let mut child = Command::new("sh")
+            .args(["-c", "exit 9"])
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        child.wait().await.unwrap();
+        assert!(wait_ready(&mut child, &api).await.is_err());
+        server.abort();
+    }
+
+    #[test]
+    fn each_runtime_overrides_foreign_controller_settings() {
+        let raw = r#"{"outbounds":[],"experimental":{"clash_api":{"external_controller":"127.0.0.1:9090","secret":"foreign"},"cache_file":{"enabled":true}}}"#;
+        let config: serde_json::Value = serde_json::from_str(
+            &runtime_config(
+                raw,
+                crate::system_proxy::TrafficMode::SystemProxy,
+                2080,
+                "127.0.0.1:12345",
+                "owned",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            config["experimental"]["clash_api"]["external_controller"],
+            "127.0.0.1:12345"
+        );
+        assert_eq!(config["experimental"]["clash_api"]["secret"], "owned");
+        assert_eq!(config["experimental"]["cache_file"]["enabled"], true);
+    }
 
     #[cfg(windows)]
     #[tokio::test]

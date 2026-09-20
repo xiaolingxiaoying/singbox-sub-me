@@ -464,7 +464,7 @@ fn handle_key(app: &mut App, key: KeyCode) {
         KeyCode::Up | KeyCode::Char('k') => move_cursor(app, -1),
         KeyCode::Enter => select_current(app),
         KeyCode::Char('s') => {
-            if app.snapshot.core_running {
+            if app.snapshot.core_running || app.snapshot.starting || app.snapshot.busy.is_some() {
                 app.send(ClientCommand::StopCore);
             } else {
                 app.send(ClientCommand::StartCore);

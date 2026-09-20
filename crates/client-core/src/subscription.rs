@@ -31,18 +31,24 @@ pub fn normalize_url(input: &str) -> String {
     format!("{base}{credential}/{TARGET_FORMAT}")
 }
 
-/// Returns the original bare sing-box JSON endpoint when it can act as a
-/// compatibility fallback for an older sbctl server. Such servers predate the
-/// full client profile route but still serve a valid node list at this URL.
-/// All other inputs deliberately return `None`: changing a Clash, URI, QR, or
-/// local-file source into a fallback would silently alter its meaning.
+/// Builds the bare endpoint from a normalized sbctl full-profile route.
+/// Unrelated URLs and arbitrary suffixes are never rewritten.
 pub fn bare_sing_box_fallback_url(input: &str) -> Option<String> {
-    let trimmed = input.trim();
-    let (_, tail) = trimmed.split_once("/sub/")?;
-    let mut parts = tail.split('/').filter(|part| !part.is_empty());
-    let credential = parts.next()?;
-    let suffix = parts.collect::<Vec<_>>().join("/");
-    (!credential.is_empty() && suffix == "sing-box.json").then(|| trimmed.to_owned())
+    let mut url = reqwest::Url::parse(input.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let (prefix, tail) = url.path().rsplit_once("/sub/")?;
+    let (credential, suffix) = tail.split_once('/')?;
+    if credential.is_empty() || !matches!(suffix, "sing-box-full.json" | "sing-box.json") {
+        return None;
+    }
+    let path = format!("{prefix}/sub/{credential}/sing-box.json");
+    url.set_path(&path);
+    Some(url.into())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -476,9 +482,13 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_only_a_bare_sing_box_source_as_a_compatibility_fallback() {
+    fn normalized_full_profiles_fall_back_only_to_the_same_credentials_bare_route() {
         let bare = "https://sub.example.test/sub/cred-abc/sing-box.json";
         assert_eq!(bare_sing_box_fallback_url(bare).as_deref(), Some(bare));
+        assert_eq!(
+            bare_sing_box_fallback_url(&normalize_url(bare)).as_deref(),
+            Some(bare)
+        );
         assert_eq!(
             bare_sing_box_fallback_url("https://sub.example.test/sub/cred-abc/clash.yaml"),
             None

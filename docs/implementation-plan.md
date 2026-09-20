@@ -75,7 +75,7 @@ sbctl traffic set-used --rx <BYTES> --tx <BYTES>
 - 周期任务负责建立新账期 baseline；
 - `sbctl traffic` 可执行同一套 reconciliation 逻辑；
 - 订阅 HTTP 请求只读状态；
-- 状态缺失或损坏时返回脱敏 `503`，不返回 HTTP 200 占位订阅；
+- 订阅工件缺失或不可读时返回脱敏 `503`；账期状态缺失或损坏时仍返回真实工件（HTTP 200，不含 `subscription-userinfo`）并写脱敏诊断；
 - 无效路径、query credential 和错误 credential 统一返回 `404`；
 - 日志不得记录完整订阅 credential；
 - `subscription-userinfo` 的 `upload/download/total/expire` 与当前账期状态一致。
@@ -301,7 +301,7 @@ manifest 还必须声明经过测试的 sing-box 版本兼容矩阵；安装或�
 - `download=RX`、`upload=TX`；
 - 五协议四格式生成；
 - query credential 返回 404；
-- 错误状态返回 503 且不泄露 credential；
+- 工件缺失返回 503；账期状态故障降级为 200 且不含 `subscription-userinfo`；均不泄露 credential；
 - manifest 签名成功、签名失败、digest 失败；
 - canonical manifest 字段、编码、Base64 签名和 schema 版本；
 - DST 重复/不存在本地时间被拒绝；

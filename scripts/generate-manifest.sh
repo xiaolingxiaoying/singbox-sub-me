@@ -7,7 +7,7 @@ set -euo pipefail
 # canonical JSON (every field except `signature`, compact, keys sorted) exactly
 # as the Rust update logic verifies it. The manifest is signed by the sbctl
 # binary via `sbctl release sign`; the signing key seed is read from
-# SBCTL_SIGNING_KEY (default: scripts/dev-signing-key.hex) and the signer from
+# SBCTL_SIGNING_KEY (required, no development-key fallback) and the signer from
 # SBCTL_SIGNER (default: sbctl on PATH).
 
 if [[ "$#" -lt 7 || "$#" -gt 8 ]]; then
@@ -26,8 +26,7 @@ compat=${8:-"${sing_box_version}:${sing_box_version}"}
 min_version=${compat%%:*}
 max_version=${compat##*:}
 
-script_dir=$(cd "$(dirname "$0")" && pwd)
-signing_key=${SBCTL_SIGNING_KEY:-"$script_dir/dev-signing-key.hex"}
+signing_key=${SBCTL_SIGNING_KEY:?set SBCTL_SIGNING_KEY to a private production key file}
 signer=${SBCTL_SIGNER:-$(command -v sbctl || true)}
 if [[ -z "$signer" ]]; then
   echo "no sbctl binary available for signing; build one or set SBCTL_SIGNER" >&2
@@ -54,3 +53,5 @@ jq -n \
   > "$unsigned"
 
 "$signer" release sign --manifest "$unsigned" --private-key "$signing_key" --output "$output"
+# Detect a mismatched key before publishing either architecture manifest.
+"$signer" release verify --manifest "$output"

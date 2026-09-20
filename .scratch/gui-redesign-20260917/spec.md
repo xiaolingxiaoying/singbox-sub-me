@@ -61,3 +61,36 @@ Operate 模式；浅色桌面网络控制台，中文系统字体，克制蓝色
 - cargo build -p sbgui --release --offline 通过，产物复制到 dist/sbgui-clash-inspired.exe。
 - cargo fmt -p sbgui --check 与 git diff --check 通过。
 - 代码实现及构建完成，原生视觉验收仍待用户运行确认。
+
+## 2026-09-19 原生运行视觉验收与引擎修复
+
+补齐了此前"未完成运行视觉或点击验收"的欠账。桌面会话锁定导致合成鼠标输入不可用，改为给 sbgui
+增加三个启动期评审接缝：`SBGUI_PAGE`（直接打开指定页面）、`SBGUI_SIZE`（覆盖窗口尺寸）、
+`SBGUI_SHOW_EXIT_CONFIRM=1`（渲染退出确认弹窗而不启用系统代理）。配合 `PrintWindow` 截图脚本
+（`.scratch/gui-screenshots/capture.ps1`、`shoot-all.sh`、`traffic-loop.sh`），七个页面 + 退出
+弹窗 + 长页变体全部截取并逐一审查；演示数据（本地 sing-box 配置 + 官方内核 1.14.1 + 本地规则集）
+在审查后已清理还原。
+
+### 审查发现并修复的缺陷
+
+1. **P0：tokio runtime 在 GPUI 启动闭包结束时被 drop**，引擎任务随 runtime 关闭被取消——GUI
+   启动约一秒后所有异步操作（订阅缓存读取、流量轮询、命令）都以 "background task failed" 失败，
+   界面停留在冻结快照。修复：runtime 有意泄漏为进程生命周期（`Box::leak`，附注释）。
+2. **实时速率与内核内存恒为 0**：sing-box 的 `/traffic`、`/memory` 流式端点先推送一个零基线
+   采样，而引擎每次轮询读取新流的第一个对象。修复：改为跳过基线读取第二个采样（流提前结束时
+   回退到唯一采样）；TUI 一并受益。
+3. **内核日志带 ANSI 颜色转义码**原样入库显示；引擎 tail 阶段现在剥离 CSI/OSC 序列。
+4. **内核崩溃自动重启无上限**（如 9090 端口被残留内核占用时无限循环）；连续失败 5 次后停止并
+   提示排查端口后手动启动。
+5. `detect_version` 剥离 "sing-box version " 前缀，界面显示 `1.14.1`。
+6. sbgui 界面细节：连接表包进与日志列表一致的白色面板容器；连接行无已解析 IP 时远程目标显示
+   "-"（原为 ":80"）；本地导入的订阅卡片 URL 行显示说明文字（原为空白）；设置页激活档案行显示
+   "使用中"（原仍显示"激活"按钮）；"延迟地址"输入框加宽到 220px。
+
+### 验证
+
+- `cargo test --workspace --offline`：client-core 32、sbtui 157、sbgui 全部通过；`tests/cli.rs`
+  中 7 个 certbot/安装类失败在无本地改动的 stash 树上同样失败（预存环境依赖，与本工作无关）。
+- `cargo fmt --check` 通过；`cargo build -p sbgui --release --offline` 通过。
+- 运行视觉：全页截图见 `.scratch/gui-screenshots/01..09*.png`；实时速率、连接数、内核内存、
+  日志、代理组、规则、退出确认弹窗均按预期渲染。

@@ -347,7 +347,7 @@ fn download_artifact(
             "--silent",
             "--show-error",
             "--proto",
-            "=https",
+            download_protocols(url),
             "--connect-timeout",
             "15",
             "--max-time",
@@ -379,6 +379,42 @@ fn download_artifact(
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+/// Manifest-supplied artifact URLs must be fetched over HTTPS. Loopback hosts
+/// are the one exception: that traffic never leaves the machine and the
+/// artifact's SHA-256 is pinned by the signed manifest, so a plaintext
+/// download there cannot be swapped undetected. This is what lets the
+/// integration tests drive the real download path against a local server.
+fn download_protocols(url: &str) -> &'static str {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return "=https";
+    };
+    if scheme != "http" {
+        return "=https";
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    // Strip userinfo, then IPv6 brackets, then the port, before comparing.
+    let mut host = authority.rsplit('@').next().unwrap_or_default();
+    host = match host.strip_prefix('[') {
+        Some(value) => value.split(']').next().unwrap_or(value),
+        None => match host.rsplit_once(':') {
+            // Only strip a real `host:port` tail; anything else is not a
+            // host this check understands and stays HTTPS-only.
+            Some((value, port))
+                if !value.contains(':')
+                    && !port.is_empty()
+                    && port.bytes().all(|b| b.is_ascii_digit()) =>
+            {
+                value
+            }
+            _ => host,
+        },
+    };
+    match host.to_ascii_lowercase().as_str() {
+        "127.0.0.1" | "::1" | "localhost" => "=https,http",
+        _ => "=https",
+    }
 }
 
 /// Builds the download-failure diagnostic: curl's stderr when it has content,
@@ -710,5 +746,38 @@ mod tests {
     fn host_arch_maps_to_supported_key() {
         let arch = host_arch();
         assert!(matches!(arch, "amd64" | "arm64"), "unexpected arch: {arch}");
+    }
+
+    #[test]
+    fn download_protocols_allow_plain_http_only_on_loopback() {
+        assert_eq!(
+            download_protocols("https://example.test/sing-box"),
+            "=https"
+        );
+        assert_eq!(download_protocols("http://example.test/sing-box"), "=https");
+        assert_eq!(download_protocols("http://10.1.2.3/sing-box"), "=https");
+        assert_eq!(download_protocols("http://192.168.0.9/x"), "=https");
+        assert_eq!(
+            download_protocols("http://[::ffff:127.0.0.1]/sing-box"),
+            "=https",
+            "IPv4-mapped addresses are not loopback literals"
+        );
+        assert_eq!(
+            download_protocols("http://127.0.0.1:8080/sing-box"),
+            "=https,http"
+        );
+        assert_eq!(
+            download_protocols("http://localhost/sing-box"),
+            "=https,http"
+        );
+        assert_eq!(
+            download_protocols("http://[::1]:8080/sing-box"),
+            "=https,http"
+        );
+        // A https URL must never be downgraded, and relative/odd input is
+        // rejected conservatively.
+        assert_eq!(download_protocols("https://localhost/sing-box"), "=https");
+        assert_eq!(download_protocols("ftp://localhost/sing-box"), "=https");
+        assert_eq!(download_protocols("localhost/sing-box"), "=https");
     }
 }

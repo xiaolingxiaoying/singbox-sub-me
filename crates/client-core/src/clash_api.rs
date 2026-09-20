@@ -89,7 +89,9 @@ impl Connection {
             return true;
         }
         let haystack = format!(
-            "{} {} {} {} {} {}",
+            "{} {} {} {} {} {} {} {}",
+            self.metadata.process,
+            self.metadata.process_path,
             self.metadata.destination_host,
             self.metadata.destination_ip,
             self.metadata.destination_port,
@@ -104,6 +106,10 @@ impl Connection {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ConnectionMetadata {
+    #[serde(default)]
+    pub process: String,
+    #[serde(default, rename = "processPath")]
+    pub process_path: String,
     #[serde(default)]
     pub network: String,
     #[serde(default, rename = "host")]
@@ -163,9 +169,22 @@ impl OutboundMode {
 
 impl ClashApi {
     pub fn new(base: &str) -> Self {
+        Self::authenticated(base, "")
+    }
+
+    pub fn authenticated(base: &str, secret: &str) -> Self {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if !secret.is_empty() {
+            let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {secret}"))
+                .expect("generated controller secret is a valid header");
+            value.set_sensitive(true);
+            headers.insert(reqwest::header::AUTHORIZATION, value);
+        }
         Self {
             base: base.trim_end_matches('/').to_owned(),
             client: reqwest::Client::builder()
+                .no_proxy()
+                .default_headers(headers)
                 .timeout(std::time::Duration::from_secs(10))
                 .build()
                 .expect("clash_api client builds"),
@@ -332,8 +351,9 @@ impl ClashApi {
     }
 
     /// Reads one sample from the `/memory` endpoint: the heap bytes the core
-    /// currently uses. sing-box streams this the same way as `/traffic`, so
-    /// only the first complete object is read.
+    /// currently uses. sing-box streams this the same way as `/traffic`; the
+    /// first object of a fresh stream is the zero baseline, so the measured
+    /// value comes from the second sample.
     pub async fn memory(&self) -> Result<u64> {
         let mut response = self
             .client
@@ -348,8 +368,9 @@ impl ClashApi {
             match tokio::time::timeout_at(deadline, response.chunk()).await {
                 Ok(Ok(Some(chunk))) => {
                     buffer.extend_from_slice(&chunk);
-                    if let Some(value) = first_json_object(&buffer) {
-                        return value
+                    let samples = complete_json_objects(&buffer);
+                    if samples.len() >= 2 {
+                        return samples[1]
                             .get("inuse")
                             .and_then(|v| v.as_u64())
                             .context("the memory response lacks an inuse value");
@@ -360,14 +381,18 @@ impl ClashApi {
                 Err(_) => break,
             }
         }
-        first_json_object(&buffer)
+        complete_json_objects(&buffer)
+            .last()
             .and_then(|value| value.get("inuse").and_then(|v| v.as_u64()))
             .context("the memory stream produced no complete sample")
     }
 
-    /// Reads the first sample from the streaming `/traffic` endpoint. The
-    /// endpoint never closes, so only the first complete `{up,down}` object is
-    /// read (bounded by a short deadline) instead of awaiting the whole body.
+    /// Reads the current sample from the streaming `/traffic` endpoint. The
+    /// endpoint never closes, so reading is bounded by a short deadline
+    /// instead of awaiting the whole body. The first object a fresh stream
+    /// pushes is the zero baseline since the connection opened; the second
+    /// sample carries the real measured rates, so that is what is returned
+    /// (falling back to the only sample when the stream ends early).
     pub async fn traffic(&self) -> Result<TrafficSample> {
         let mut response = self
             .client
@@ -382,8 +407,9 @@ impl ClashApi {
             match tokio::time::timeout_at(deadline, response.chunk()).await {
                 Ok(Ok(Some(chunk))) => {
                     buffer.extend_from_slice(&chunk);
-                    if let Some(sample) = first_traffic_sample(&buffer) {
-                        return Ok(sample);
+                    let samples = complete_json_objects(&buffer);
+                    if samples.len() >= 2 {
+                        return Ok(traffic_sample(&samples[1]));
                     }
                 }
                 Ok(Ok(None)) => break,
@@ -391,7 +417,10 @@ impl ClashApi {
                 Err(_) => break,
             }
         }
-        first_traffic_sample(&buffer).context("the traffic stream produced no complete sample")
+        complete_json_objects(&buffer)
+            .last()
+            .map(traffic_sample)
+            .context("the traffic stream produced no complete sample")
     }
 }
 
@@ -402,37 +431,46 @@ pub struct TrafficSample {
     pub down: u64,
 }
 
-/// Extracts the first complete JSON object from a partial stream.
-/// Tolerates leading whitespace and concatenated samples.
-fn first_json_object(buffer: &[u8]) -> Option<serde_json::Value> {
-    let text = std::str::from_utf8(buffer).ok()?;
-    let start = text.find('{')?;
-    let mut depth = 0usize;
-    let mut end = None;
-    for (offset, ch) in text[start..].char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = Some(start + offset + 1);
-                    break;
+/// Extracts every complete JSON object from a partial stream. Tolerates
+/// leading whitespace and concatenated samples; a trailing incomplete object
+/// is ignored until its remaining bytes arrive.
+fn complete_json_objects(buffer: &[u8]) -> Vec<serde_json::Value> {
+    let Ok(text) = std::str::from_utf8(buffer) else {
+        return Vec::new();
+    };
+    let mut objects = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(rel) = text[cursor..].find('{') {
+        let start = cursor + rel;
+        let mut depth = 0usize;
+        let mut end = None;
+        for (offset, ch) in text[start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(start + offset + 1);
+                        break;
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
+        let Some(end) = end else { break };
+        if let Ok(value) = serde_json::from_str(&text[start..end]) {
+            objects.push(value);
+        }
+        cursor = end;
     }
-    serde_json::from_str(&text[start..end?]).ok()
+    objects
 }
 
-/// Extracts the first complete JSON object from a partial stream and reads its
-/// `up`/`down` fields. Tolerates leading whitespace and concatenated samples.
-fn first_traffic_sample(buffer: &[u8]) -> Option<TrafficSample> {
-    let value = first_json_object(buffer)?;
-    Some(TrafficSample {
+fn traffic_sample(value: &serde_json::Value) -> TrafficSample {
+    TrafficSample {
         up: value.get("up").and_then(|v| v.as_u64()).unwrap_or(0),
         down: value.get("down").and_then(|v| v.as_u64()).unwrap_or(0),
-    })
+    }
 }
 
 fn urlencoded(value: &str) -> String {
@@ -451,6 +489,28 @@ fn urlencoded(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn authenticated_api_sends_the_instance_secret() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 4096];
+            let count = socket.read(&mut buffer).await.unwrap();
+            let request = String::from_utf8_lossy(&buffer[..count]).to_ascii_lowercase();
+            let authorized = request.contains("authorization: bearer test-instance-secret\r\n");
+            let response = if authorized {
+                "HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"version\":\"1\"}"
+            } else {
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n"
+            };
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let api = ClashApi::authenticated(&format!("http://{address}"), "test-instance-secret");
+        assert_eq!(api.version().await.unwrap(), "1");
+        server.await.unwrap();
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -533,23 +593,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn traffic_reads_one_sample_from_the_streamed_endpoint() {
+    async fn traffic_skips_the_connect_baseline_sample() {
         let port = spawn_server(vec![(
             "GET",
             "/traffic",
-            r#"{"up":10,"down":20}{"up":30,"down":40}"#,
+            r#"{"up":0,"down":0}{"up":30,"down":40}"#,
         )])
         .await;
         let sample = api(port).traffic().await.expect("traffic");
-        assert_eq!(sample, TrafficSample { up: 10, down: 20 });
+        assert_eq!(sample, TrafficSample { up: 30, down: 40 });
     }
 
     #[tokio::test]
-    async fn memory_reads_the_inuse_bytes_from_the_streamed_endpoint() {
+    async fn memory_skips_the_connect_baseline_sample() {
         let port = spawn_server(vec![(
             "GET",
             "/memory",
-            r#"{"inuse":1048576,"oslimit":0}{"inuse":2}"#,
+            r#"{"inuse":0,"oslimit":0}{"inuse":1048576,"oslimit":0}"#,
         )])
         .await;
         assert_eq!(api(port).memory().await.expect("memory"), 1_048_576);
@@ -578,18 +638,17 @@ mod tests {
     }
 
     #[test]
-    fn first_traffic_sample_reads_one_object_from_a_partial_stream() {
-        assert_eq!(
-            first_traffic_sample(br#"{"up":10,"down":20}"#),
-            Some(TrafficSample { up: 10, down: 20 })
-        );
-        // A second, incomplete object must be ignored.
-        assert_eq!(
-            first_traffic_sample(br#"{"up":1,"down":2}{"up":3,"down":"#),
-            Some(TrafficSample { up: 1, down: 2 })
-        );
-        assert_eq!(first_traffic_sample(b""), None);
-        assert_eq!(first_traffic_sample(br#"{"up":"#,), None);
+    fn complete_json_objects_scans_concatenated_and_partial_samples() {
+        let values = complete_json_objects(br#"{"up":1,"down":2}{"up":3,"down":"#);
+        assert_eq!(values.len(), 1);
+        assert_eq!(traffic_sample(&values[0]), TrafficSample { up: 1, down: 2 });
+        let values = complete_json_objects(br#"{"up":0,"down":0}{"up":3,"down":4}"#);
+        assert_eq!(values.len(), 2);
+        assert_eq!(traffic_sample(&values[1]), TrafficSample { up: 3, down: 4 });
+        assert!(complete_json_objects(b"").is_empty());
+        assert!(complete_json_objects(br#"{"up":"#).is_empty());
+        // A baseline object containing nested braces still parses as one.
+        assert_eq!(complete_json_objects(br#"{"a":{"b":1}}{"c":2}"#).len(), 2);
     }
 
     #[test]

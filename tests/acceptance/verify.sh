@@ -128,23 +128,29 @@ kill "$serve_pid" 2>/dev/null || true
 wait "$serve_pid" 2>/dev/null || true
 test "$(stat -c '%Y %s' "$root/var/lib/sbctl/state.json")" = "$state_before" || fail 'subscription reads changed accounting state'
 
-# Missing accounting state returns a redacted 503 (not a 200 placeholder) and
-# never logs the full Subscription credential. Invalid credentials stay 404.
+# A broken accounting state degrades the response instead of taking the
+# subscription offline: the real artifact is served (200) with no fabricated
+# `subscription-userinfo`, and the diagnostic stays redacted. Invalid
+# credentials remain a uniform 404.
 fixture_root_for unavailable "$platform"
 "$sbctl" --root "$root" config init --mode ip-fallback --subscription-host 127.0.0.1 --http-port 2087 --interface ens3 --protocol vless-reality --reality-decoy-sni www.cloudflare.com
 unavailable_credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' "$root/etc/sbctl/config.toml")
 "$sbctl" --root "$root" serve --max-requests 2 >"$work/unavailable.out" 2>"$work/unavailable.err" &
 sleep 1
-unavailable_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2087/sub/$unavailable_credential/uri")
-test "$unavailable_status" = 503 || fail 'missing state did not produce a 503'
-test ! -s "$work/unavailable.out" || fail 'subscription served a body despite missing state'
+unavailable_response=$(curl --silent --show-error --include "http://127.0.0.1:2087/sub/$unavailable_credential/uri")
+contains "$unavailable_response" 'HTTP/1.1 200 OK'
+contains "$unavailable_response" 'vless://'
+if printf '%s' "$unavailable_response" | grep -Fi 'subscription-userinfo:' >/dev/null; then
+  fail 'missing state fabricated subscription-userinfo metadata'
+fi
+test ! -s "$work/unavailable.out" || fail 'subscription wrote diagnostics to stdout'
 unavailable_404=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2087/sub/wrong-credential/uri")
 test "$unavailable_404" = 404 || fail 'invalid credential was not 404 even with missing state'
-grep -F -- "$unavailable_credential" "$work/unavailable.err" >/dev/null && fail '503 diagnostic leaked the Subscription credential'
+grep -F -- "$unavailable_credential" "$work/unavailable.err" >/dev/null && fail 'degraded-state diagnostic leaked the Subscription credential'
 wait
-test -s "$work/unavailable.err" || fail 'missing-state 503 did not write a redacted diagnostic'
+test -s "$work/unavailable.err" || fail 'degraded-state response did not write a redacted diagnostic'
 
-# Corrupted accounting state is also a redacted 503, never a 200 placeholder.
+# Corrupted accounting state degrades the same way: artifact-only 200.
 fixture_root_for corrupt "$platform"
 "$sbctl" --root "$root" config init --mode ip-fallback --subscription-host 127.0.0.1 --http-port 2088 --interface ens3 --protocol vless-reality --reality-decoy-sni www.cloudflare.com
 corrupt_credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' "$root/etc/sbctl/config.toml")
@@ -152,8 +158,12 @@ mkdir -p "$root/var/lib/sbctl"
 printf 'not json\n' > "$root/var/lib/sbctl/state.json"
 "$sbctl" --root "$root" serve --max-requests 2 >"$work/corrupt.out" 2>"$work/corrupt.err" &
 sleep 1
-corrupt_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:2088/sub/$corrupt_credential/uri")
-test "$corrupt_status" = 503 || fail 'corrupt state did not produce a 503'
+corrupt_response=$(curl --silent --show-error --include "http://127.0.0.1:2088/sub/$corrupt_credential/uri")
+contains "$corrupt_response" 'HTTP/1.1 200 OK'
+contains "$corrupt_response" 'vless://'
+if printf '%s' "$corrupt_response" | grep -Fi 'subscription-userinfo:' >/dev/null; then
+  fail 'corrupt state fabricated subscription-userinfo metadata'
+fi
 curl --silent --output /dev/null "http://127.0.0.1:2088/sub/$corrupt_credential/uri"
 grep -F -- "$corrupt_credential" "$work/corrupt.err" >/dev/null && fail 'corrupt-state diagnostic leaked the Subscription credential'
 wait

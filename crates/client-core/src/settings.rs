@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Settings {
@@ -113,11 +114,14 @@ impl Profiles {
         let path = dir.join("profiles.toml");
         if path.is_file() {
             let text = fs::read_to_string(&path).context("reading profiles.toml")?;
-            return toml::from_str(&text)
-                .map_err(|e| anyhow::anyhow!("parsing profiles.toml: {e}"));
+            let profiles: Self =
+                toml::from_str(&text).map_err(|e| anyhow::anyhow!("parsing profiles.toml: {e}"))?;
+            profiles.migrate_caches(dir)?;
+            return Ok(profiles);
         }
         let profiles = Self::default();
         profiles.save(dir)?;
+        profiles.migrate_caches(dir)?;
         Ok(profiles)
     }
 
@@ -125,6 +129,35 @@ impl Profiles {
         fs::create_dir_all(dir)?;
         let text = toml::to_string_pretty(self)?;
         fs::write(dir.join("profiles.toml"), text)?;
+        Ok(())
+    }
+
+    /// Copy only unambiguous legacy caches. Never guess which profile owned a
+    /// colliding file; retain originals so the user can recover/re-import them.
+    fn migrate_caches(&self, dir: &Path) -> Result<()> {
+        fs::create_dir_all(dir.join("cache/profiles"))?;
+        for profile in &self.profiles {
+            let old = legacy_profile_cache_path(dir, &profile.name);
+            let new = profile_cache_path(dir, &profile.name);
+            let key = old.to_string_lossy().to_lowercase();
+            let owners = self
+                .profiles
+                .iter()
+                .filter(|other| {
+                    legacy_profile_cache_path(dir, &other.name)
+                        .to_string_lossy()
+                        .to_lowercase()
+                        == key
+                })
+                .count();
+            if owners == 1
+                && !profile.name.eq_ignore_ascii_case("active-config")
+                && !new.exists()
+                && old.is_file()
+            {
+                fs::copy(old, new)?;
+            }
+        }
         Ok(())
     }
 
@@ -143,6 +176,13 @@ impl Profiles {
 
 /// The per-profile cached subscription body inside the data directory.
 pub fn profile_cache_path(dir: &Path, name: &str) -> PathBuf {
+    // Full digest of the exact name also distinguishes case-only names on
+    // case-insensitive filesystems. Profiles cannot currently be renamed.
+    let id = format!("{:x}", Sha256::digest(name.as_bytes()));
+    dir.join("cache/profiles").join(format!("{id}.json"))
+}
+
+fn legacy_profile_cache_path(dir: &Path, name: &str) -> PathBuf {
     let safe: String = name
         .chars()
         .map(|c| {
@@ -175,12 +215,12 @@ pub fn data_dir() -> Result<PathBuf> {
 }
 
 /// The data directory for one client application name. The TUI and GUI keep
-/// separate profile/core copies so two clients on the same machine cannot
-/// fight over the same sing-box process while still sharing the layout.
+/// separate profile/core copies; runtime API authentication additionally
+/// isolates their child processes.
 pub fn data_dir_for(app: &str) -> Result<PathBuf> {
     let base = dirs::config_dir().context("cannot resolve the user config directory")?;
     let dir = base.join(app);
-    fs::create_dir_all(dir.join("cache")).context("creating the client data directory")?;
+    fs::create_dir_all(dir.join("cache/profiles")).context("creating the client data directory")?;
     fs::create_dir_all(dir.join("core")).context("creating the client core directory")?;
     Ok(dir)
 }
@@ -203,7 +243,47 @@ mod tests {
     #[test]
     fn profile_cache_names_are_filesystem_safe() {
         let path = profile_cache_path(Path::new("/x"), "a/b:c");
-        assert!(path.to_string_lossy().ends_with("a_b_c.json"));
+        assert_eq!(path.parent().unwrap(), Path::new("/x/cache/profiles"));
+        assert_ne!(path, profile_cache_path(Path::new("/x"), "a_b_c"));
+        assert_ne!(
+            profile_cache_path(Path::new("/x"), "A"),
+            profile_cache_path(Path::new("/x"), "a")
+        );
+        assert_ne!(
+            profile_cache_path(Path::new("/x"), "active-config"),
+            Path::new("/x/cache/active-config.json")
+        );
+    }
+
+    #[test]
+    fn migration_preserves_unique_caches_but_does_not_guess_collisions() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("cache")).unwrap();
+        let profiles = Profiles {
+            active: None,
+            profiles: ["a b", "a_b", "unique", "active-config"]
+                .into_iter()
+                .map(|name| Profile {
+                    name: name.into(),
+                    url: String::new(),
+                    source: String::new(),
+                    last_updated: 0,
+                })
+                .collect(),
+        };
+        profiles.save(dir.path()).unwrap();
+        for name in ["a_b", "unique", "active-config"] {
+            fs::write(legacy_profile_cache_path(dir.path(), name), "old").unwrap();
+        }
+        Profiles::load_or_create(dir.path()).unwrap();
+        assert_eq!(
+            fs::read_to_string(profile_cache_path(dir.path(), "unique")).unwrap(),
+            "old"
+        );
+        for name in ["a b", "a_b", "active-config"] {
+            assert!(!profile_cache_path(dir.path(), name).exists());
+        }
+        assert!(legacy_profile_cache_path(dir.path(), "a_b").exists());
     }
 
     fn tempfile_dir() -> PathBuf {

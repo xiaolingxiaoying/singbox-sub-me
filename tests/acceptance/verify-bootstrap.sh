@@ -1,10 +1,19 @@
 #!/usr/bin/env sh
 set -eu
 
-installer=/usr/local/lib/sbctl-acceptance/install.sh
+installer_template=/usr/local/lib/sbctl-acceptance/install.sh
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
+# Test-only installer: production templates contain no usable default key.
+installer="$work/install.sh"
+python3 - "$installer_template" "$installer" <<'PY'
+from pathlib import Path
+import sys
+pem = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAJH+I4WMkKYa3EH63BKmD4SGG0ml6OSe35rQuwrNkJys=\n-----END PUBLIC KEY-----"
+Path(sys.argv[2]).write_text(Path(sys.argv[1]).read_text().replace("@SBCTL_RELEASE_PUBLIC_KEY_PEM@", pem))
+PY
+chmod 0755 "$installer"
 mkdir -p "$work/bin"
 printf '#!/bin/sh\nexit 0\n' > "$work/bin/apt-get"
 chmod 0755 "$work/bin/apt-get"
