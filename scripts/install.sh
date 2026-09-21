@@ -71,6 +71,15 @@ manifest_url=$(printf '%s' "$manifest_url_template" | sed "s/{arch}/$arch/g")
 work_dir=$(mktemp -d)
 trap 'rm -rf "$work_dir"' EXIT
 
+# `exec` would replace this shell and skip the EXIT trap above, leaving the
+# verified manifest and the downloaded binary behind in /tmp. Run the installer
+# and forward its status instead.
+run_installer() {
+  local status=0
+  "$@" || status=$?
+  exit "$status"
+}
+
 curl --fail --globoff --location --silent --show-error "$manifest_url" >"$work_dir/manifest.json"
 
 # Verify the manifest signature BEFORE trusting any URL or digest in it. A
@@ -87,14 +96,29 @@ if ! openssl pkeyutl -verify -pubin -inkey "$work_dir/public-key.pem" -rawin \
   exit 2
 fi
 
-# The manifest is now trusted: fetch the pinned sbctl and check its digest.
+# The manifest is now trusted: check the schema the same way `sbctl` does, then
+# fetch the pinned sbctl and check its digest.
+schema=$(jq -er '.schema' "$work_dir/manifest.json")
+if [[ "$schema" != 1 ]]; then
+  echo "release manifest schema 为 $schema，本安装器只支持 1，已中止安装。" >&2
+  exit 2
+fi
+for field in .sbctl.version .sing_box.version; do
+  pinned=$(jq -er "$field" "$work_dir/manifest.json")
+  # Same rule as src/release.rs: a floating reference is unsignable in any
+  # meaningful sense, and a digest pinned to a moving tag protects nobody.
+  if [[ ! "$pinned" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "release manifest 的 $field 不是固定版本号（$pinned），已中止安装。" >&2
+    exit 2
+  fi
+done
 artifact_url=$(jq -er '.sbctl.url' "$work_dir/manifest.json")
 expected_sha=$(jq -er '.sbctl.sha256' "$work_dir/manifest.json")
 # Floating, unsignable references are rejected exactly like the Rust verifier
 # rejects "latest"/"main"/"master" version fields: the artifact path must name
 # a fixed version, never a moving branch or the GitHub "latest" redirect.
 case "$artifact_url" in
-  *"/releases/latest/"* | *"/latest/download/"* | */latest | */main | */master)
+  *"/releases/latest/"* | *"/releases/download/latest/"* | *"/latest/download/"* | */latest | */main | */master)
     echo "release manifest 使用了不受支持的 latest/main 引用，已中止安装。" >&2
     exit 2 ;;
 esac
@@ -169,7 +193,7 @@ if [[ "$#" -eq 0 ]]; then
   echo ""
   echo "接下来可逐项选择要启用的协议；直接回车即启用。"
   # sing-box 下载、摘要、兼容矩阵和配置检查全部由 sbctl 依据同一签名 manifest 完成。
-  exec /usr/local/bin/sbctl install --manifest "$work_dir/manifest.json" "${install_args[@]}" <"$input"
+  run_installer /usr/local/bin/sbctl install --manifest "$work_dir/manifest.json" "${install_args[@]}" <"$input"
 fi
 
-exec /usr/local/bin/sbctl install --manifest "$work_dir/manifest.json" "$@"
+run_installer /usr/local/bin/sbctl install --manifest "$work_dir/manifest.json" "$@"

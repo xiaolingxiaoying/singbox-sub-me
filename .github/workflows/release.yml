@@ -15,7 +15,15 @@ on:
         type: string
 
 permissions:
-  contents: write
+  # Only the publication step needs write access; every build and acceptance
+  # job runs untrusted-ish input (downloaded archives, installer scripts) and
+  # must not be able to rewrite releases or other tags on its own token.
+  contents: read
+
+# Two overlapping releases would race on the same tag and assets.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   checks:
@@ -55,7 +63,7 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
           CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
-        run: cargo build --release -p sbctl --no-default-features --target ${{ matrix.target }}
+        run: cargo build --release --locked -p sbctl --no-default-features --target ${{ matrix.target }}
       - run: cp target/${{ matrix.target }}/release/sbctl sbctl-linux-${{ matrix.arch }}
       - uses: actions/upload-artifact@v4
         with:
@@ -63,6 +71,7 @@ jobs:
           path: sbctl-linux-${{ matrix.arch }}
 
   build-sbtui:
+    needs: checks
     strategy:
       fail-fast: false
       matrix:
@@ -80,7 +89,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release -p sbtui
+      - run: cargo build --release --locked -p sbtui
       - name: Stage the desktop binary and the ly shortcut
         shell: bash
         run: |
@@ -114,12 +123,15 @@ jobs:
       - run: chmod 0755 sbctl-linux-amd64
       - uses: dtolnay/rust-toolchain@stable
       - name: Build isolated fixture verifier (never uploaded)
-        run: cargo build --release -p sbctl --features test-signing --target-dir target-fixtures
+        run: cargo build --release --locked -p sbctl --features test-signing --target-dir target-fixtures
       - name: Validate production lifecycle and fixture-signed rollback on systemd hosts
         run: SBCTL_ARTIFACT="$GITHUB_WORKSPACE/sbctl-linux-amd64" SBCTL_TEST_ARTIFACT="$GITHUB_WORKSPACE/target-fixtures/release/sbctl" sh tests/acceptance/run.sh
 
   package:
     needs: [build-sbctl, build-sbtui, acceptance]
+    # The only job allowed to create or publish a release.
+    permissions:
+      contents: write
     runs-on: ubuntu-22.04
     environment: release
     env:
@@ -161,6 +173,18 @@ jobs:
           SBCTL_SIGNING_SEED: ${{ secrets.SBCTL_SIGNING_SEED }}
         run: |
           set -euo pipefail
+          # A manual dispatch checks out the selected branch, not the tag it is
+          # told to publish. Refuse unless both name the same commit, or bytes
+          # built from one commit get signed and shipped as another release.
+          if [ "${{ github.event_name }}" = workflow_dispatch ]; then
+            git fetch --depth=1 origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+            tag_commit=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+            head_commit=$(git rev-parse HEAD)
+            if [ "$tag_commit" != "$head_commit" ]; then
+              echo "refusing to publish: $RELEASE_TAG points at $tag_commit, tree is $head_commit" >&2
+              exit 2
+            fi
+          fi
           test -n "$SBCTL_SIGNING_SEED" || { echo 'Missing production signing secret' >&2; exit 2; }
           umask 077
           export SBCTL_SIGNING_KEY="$RUNNER_TEMP/sbctl-release-key.hex"
@@ -181,9 +205,12 @@ jobs:
           set -euo pipefail
           gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --title "$RELEASE_TAG" --generate-notes
+          # No --clobber on purpose: published bytes are immutable, so a re-run
+          # over an existing asset fails loudly instead of swapping what every
+          # already-installed host will download and trust.
           gh release upload "$RELEASE_TAG" \
             sbctl-linux-amd64 sbctl-linux-arm64 sing-box-linux-amd64 sing-box-linux-arm64 \
             sbtui-windows-amd64.exe sbtui-macos-arm64 sbtui-linux-amd64 \
             ly-windows-amd64.exe ly-macos-arm64 ly-linux-amd64 sbtui-install.sh \
             manifest-amd64.json manifest-arm64.json install.sh \
-            --repo "$GITHUB_REPOSITORY" --clobber
+            --repo "$GITHUB_REPOSITORY"
