@@ -7,11 +7,12 @@
 //! same control plane the terminal client uses, so the two clients cannot drift
 //! apart.
 //!
-//! THESIS: compact proxy control, informed by the Serein prototype and adapted to sing-box.
-//! OWN-WORLD: cool neutral canvas, teal actions, pale active navigation and quiet line icons.
+//! THESIS: calm proxy control, informed by the Serein prototype and adapted to sing-box.
+//! OWN-WORLD: cool neutral canvas, teal actions, pale active navigation, quiet line icons.
 //! STORY: find a section in the sidebar, understand its state, and change it without visual noise.
-//! FIRST VIEWPORT: 232px control sidebar with navigation, mode, takeover and live traffic.
-//! FORM: a compact desktop control surface with a data-first overview.
+//! FIRST VIEWPORT: 216px navigation sidebar plus one toolbar holding the page name and the
+//! kernel, mode, node, system-proxy and TUN state.
+//! FORM: a desktop control surface that separates blocks with whitespace, not with ink.
 //! FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -62,6 +63,7 @@ const SECTION: f32 = 14.0;
 const BODY: f32 = 13.0;
 const LABEL: f32 = 12.0;
 const META: f32 = 11.0;
+const WEIGHT_NORMAL: FontWeight = FontWeight(400.0);
 const WEIGHT_MEDIUM: FontWeight = FontWeight(500.0);
 const WEIGHT_SEMIBOLD: FontWeight = FontWeight(600.0);
 
@@ -78,6 +80,8 @@ const ROW_Y: f32 = 13.0;
 const TITLEBAR_H: f32 = 46.0;
 const SIDEBAR_W: f32 = 216.0;
 const CONTENT_MAX: f32 = 1120.0;
+/// How many rows the rules and connections lists draw before asking.
+const LIST_PAGE: usize = 120;
 
 const DATA_DIR: &str = "sbgui";
 /// The window's own artwork, served to GPUI by [`SereinAssets`] and drawn in
@@ -279,6 +283,11 @@ struct Sbgui {
     settings_section: SettingsSection,
     show_subscription_import: bool,
     show_rule_sets: bool,
+    /// Rules pages are walls of text on a real subscription: the list starts
+    /// capped and the user opens the rest on demand.
+    show_all_rules: bool,
+    /// Same cap for the connection list, which grows without bound.
+    show_all_connections: bool,
     core_menu_open: bool,
     node_card_view: bool,
     paused_connections: Option<Vec<Connection>>,
@@ -356,6 +365,8 @@ impl Sbgui {
             settings_section: SettingsSection::default(),
             show_subscription_import: false,
             show_rule_sets: false,
+            show_all_rules: false,
+            show_all_connections: false,
             core_menu_open: false,
             node_card_view: false,
             paused_connections: None,
@@ -684,48 +695,51 @@ impl Sbgui {
             .justify_center()
             .child(
                 div()
-                    .w(px(470.0))
+                    .w(px(480.0))
                     .rounded(px(RADIUS))
                     .bg(rgb(SURFACE))
                     .border_1()
                     .border_color(rgb(BORDER))
-                    .p(px(20.0))
+                    .p(px(26.0))
                     .flex()
                     .flex_col()
                     .gap(px(10.0))
                     .child(
                         div()
                             .text_size(px(18.0))
+                            .font_weight(WEIGHT_SEMIBOLD)
                             .text_color(rgb(TEXT))
                             .child("退出 Serein？"),
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .mt(px(4.0))
+                            .text_size(px(BODY))
+                            .line_height(px(21.0))
                             .text_color(rgb(MUTED))
                             .child("退出会停止 sing-box。若保留系统代理，其他应用可能无法联网。"),
                     )
                     .child(
                         div()
-                            .mt(px(2.0))
-                            .text_size(px(11.0))
+                            .mt(px(6.0))
+                            .text_size(px(LABEL))
                             .text_color(rgb(DANGER))
                             .child("选择「仅退出」后，系统代理设置将保留。"),
                     )
                     .child(
                         div()
-                            .mt(px(10.0))
+                            .mt(px(16.0))
                             .flex()
                             .items_center()
                             .justify_end()
-                            .gap(px(8.0))
+                            .gap(px(10.0))
                             .child(
                                 div()
                                     .id("exit-cancel")
-                                    .px(px(15.0))
-                                    .py(px(8.0))
-                                    .rounded(px(7.0))
-                                    .text_size(px(12.0))
+                                    .px(px(16.0))
+                                    .py(px(9.0))
+                                    .rounded(px(9.0))
+                                    .text_size(px(LABEL))
                                     .text_color(rgb(MUTED))
                                     .cursor_pointer()
                                     .hover(|style| style.bg(rgb(SURFACE_2)).text_color(rgb(TEXT)))
@@ -1392,12 +1406,15 @@ impl Sbgui {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
-            .mt(px(10.0))
+            .w_full()
+            .py(px(14.0))
             .flex()
             .items_center()
             .justify_between()
-            .gap(px(12.0))
-            .child(div().text_size(px(12.0)).text_color(rgb(TEXT)).child(label))
+            .gap(px(16.0))
+            .border_b_1()
+            .border_color(rgb(BORDER))
+            .child(div().text_size(px(BODY)).text_color(rgb(TEXT)).child(label))
             .child(self.text_field(spec, window, cx))
     }
 
@@ -1606,9 +1623,10 @@ impl Sbgui {
                         .id("add-subscription")
                         .px(px(14.0))
                         .py(px(8.0))
-                        .rounded(px(7.0))
+                        .rounded(px(9.0))
                         .bg(rgb(CYAN))
-                        .text_size(px(12.0))
+                        .text_size(px(LABEL))
+                        .font_weight(WEIGHT_MEDIUM)
                         .text_color(rgb(SURFACE))
                         .cursor_pointer()
                         .hover(|s| s.bg(rgb(CYAN_DARK)))
@@ -1623,11 +1641,12 @@ impl Sbgui {
                         .id("import-from-clipboard")
                         .px(px(14.0))
                         .py(px(8.0))
-                        .rounded(px(7.0))
+                        .rounded(px(9.0))
                         .bg(rgb(SURFACE))
                         .border_1()
                         .border_color(rgb(BORDER))
-                        .text_size(px(12.0))
+                        .text_size(px(LABEL))
+                        .font_weight(WEIGHT_MEDIUM)
                         .text_color(rgb(TEXT))
                         .cursor_pointer()
                         .hover(|style| style.border_color(rgb(CYAN)).text_color(rgb(CYAN)))
@@ -1652,20 +1671,13 @@ impl Sbgui {
                     Tone::Neutral,
                     cx,
                     ClientCommand::UpdateSubscription,
-                ))
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(rgb(MUTED))
-                        .child(format!("{} 个订阅档案", profiles.len())),
-                ),
+                )),
         );
 
         if self.show_subscription_import {
             root = root.child(
                 div()
-                    .p(px(16.0))
+                    .p(px(PAD_CARD))
                     .rounded(px(RADIUS))
                     .bg(rgb(SURFACE))
                     .border_1()
@@ -1677,7 +1689,8 @@ impl Sbgui {
                             .child(
                                 div()
                                     .flex_1()
-                                    .text_size(px(14.0))
+                                    .text_size(px(SECTION))
+                                    .font_weight(WEIGHT_SEMIBOLD)
                                     .text_color(rgb(TEXT))
                                     .child("添加订阅"),
                             )
@@ -1699,14 +1712,14 @@ impl Sbgui {
                     )
                     .child(
                         div()
-                            .mt(px(4.0))
-                            .text_size(px(11.0))
+                            .mt(px(6.0))
+                            .text_size(px(LABEL))
                             .text_color(rgb(MUTED))
                             .child("粘贴 HTTP/HTTPS 订阅地址或 sing-box JSON 地址。"),
                     )
                     .child(
                         div()
-                            .mt(px(12.0))
+                            .mt(px(16.0))
                             .flex()
                             .items_center()
                             .gap(px(10.0))
@@ -1723,11 +1736,12 @@ impl Sbgui {
                             .child(
                                 div()
                                     .id("import-manual")
-                                    .px(px(14.0))
-                                    .py(px(8.0))
-                                    .rounded(px(7.0))
+                                    .px(px(16.0))
+                                    .py(px(9.0))
+                                    .rounded(px(9.0))
                                     .bg(rgb(CYAN))
-                                    .text_size(px(12.0))
+                                    .text_size(px(LABEL))
+                                    .font_weight(WEIGHT_MEDIUM)
                                     .text_color(rgb(SURFACE))
                                     .cursor_pointer()
                                     .hover(|s| s.bg(rgb(CYAN_DARK)))
@@ -1754,143 +1768,113 @@ impl Sbgui {
             let active = profile.active;
             let name_for_activate = profile.name.clone();
             let name_for_remove = profile.name.clone();
-            let updated = age_label(profile.last_updated);
-            let usage = if active {
-                usage_label(self.snapshot.subscription_usage.as_ref())
+            // Usage and node counts only exist for the profile the core has
+            // loaded, so the two cases get their own sentence rather than a
+            // column of dashes.
+            let detail = if active {
+                let nodes = self
+                    .snapshot
+                    .proxy_groups
+                    .iter()
+                    .map(|group| group.members.len())
+                    .sum::<usize>();
+                format!(
+                    "{} · {} 个节点 · {}",
+                    age_label(profile.last_updated),
+                    nodes,
+                    usage_label(self.snapshot.subscription_usage.as_ref())
+                )
             } else {
-                "用量信息仅在当前订阅可用".to_owned()
+                format!("{} · 未启用", age_label(profile.last_updated))
             };
             div()
                 .id(format!("subscription-row-{index}"))
                 .w_full()
-                .min_h(px(68.0))
-                .px(px(14.0))
-                .py(px(10.0))
+                .px(px(PAD_CARD))
+                .py(px(16.0))
                 .bg(if active { rgb(BLUE_2) } else { rgb(SURFACE) })
-                .border_b_1()
-                .border_color(rgb(BORDER))
+                // Rules, logs and this list all separate rows with a hairline
+                // above every row but the first, so the last row does not draw
+                // a second line on the container's own edge.
+                .when(index > 0, |row| row.border_t_1().border_color(rgb(BORDER)))
                 .flex()
                 .items_center()
-                .gap(px(12.0))
+                .gap(px(16.0))
                 .text_color(rgb(TEXT))
-                .child(div().w(px(22.0)).child(if active {
-                    icon("check", CYAN, 17.0).into_any_element()
-                } else {
-                    status_dot(FAINT).into_any_element()
-                }))
                 .child(
                     div()
-                        .w(px(250.0))
-                        .min_w(px(160.0))
+                        .flex_1()
+                        .min_w(px(0.0))
                         .child(
                             div()
-                                .text_size(px(13.0))
-                                .text_color(rgb(TEXT))
-                                .truncate()
-                                .child(profile.name.clone()),
+                                .flex()
+                                .items_center()
+                                .gap(px(10.0))
+                                .child(
+                                    div()
+                                        .text_size(px(15.0))
+                                        .font_weight(WEIGHT_MEDIUM)
+                                        .text_color(rgb(TEXT))
+                                        .truncate()
+                                        .child(profile.name.clone()),
+                                )
+                                .children(active.then(|| pill("当前", CYAN))),
                         )
                         .child(
                             div()
-                                .mt(px(3.0))
-                                .text_size(px(10.0))
+                                .mt(px(6.0))
+                                .text_size(px(META))
                                 .text_color(rgb(MUTED))
                                 .truncate()
-                                .child(if active { "当前" } else { "可用" }),
+                                .child(detail),
                         ),
                 )
-                .child(
+                .children((!active).then(|| {
+                    self.mini_action(
+                        index + 300_000,
+                        "设为当前",
+                        cx,
+                        ClientCommand::SwitchProfile(name_for_activate.clone()),
+                    )
+                }))
+                .children(active.then(|| {
+                    self.mini_action(
+                        index + 100_000,
+                        "更新",
+                        cx,
+                        ClientCommand::UpdateSubscription,
+                    )
+                }))
+                .child({
+                    let armed = self
+                        .confirm_delete_profile
+                        .as_deref()
+                        .is_some_and(|pending| pending == name_for_remove);
                     div()
-                        .w(px(250.0))
-                        .flex_grow(1.0)
-                        .text_size(px(11.0))
-                        .text_color(rgb(MUTED))
-                        .truncate()
-                        .child(usage),
-                )
-                .child(
-                    div()
-                        .w(px(100.0))
-                        .text_size(px(11.0))
-                        .text_color(rgb(MUTED))
-                        .child(updated),
-                )
-                .child(
-                    div()
-                        .w(px(72.0))
-                        .text_size(px(11.0))
-                        .text_color(rgb(MUTED))
-                        .child(if active {
-                            self.snapshot
-                                .proxy_groups
-                                .iter()
-                                .map(|group| group.members.len())
-                                .sum::<usize>()
-                                .to_string()
-                        } else {
-                            "—".to_owned()
-                        }),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(8.0))
-                        .children((!active).then(|| {
-                            div()
-                                .id(format!("activate-{index}"))
-                                .px(px(12.0))
-                                .py(px(7.0))
-                                .rounded(px(7.0))
-                                .bg(rgb(BLUE_2))
-                                .text_size(px(11.0))
-                                .text_color(rgb(CYAN))
-                                .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
-                                    view.send(ClientCommand::SwitchProfile(
-                                        name_for_activate.clone(),
-                                    ));
-                                    cx.notify();
-                                }))
-                                .child("设为当前")
+                        .id(format!("remove-{index}"))
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .rounded(px(9.0))
+                        .text_size(px(LABEL))
+                        .text_color(rgb(DANGER))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(0xffecee)))
+                        .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                            // Deleting also drops the cached node list,
+                            // so the first click only arms the button —
+                            // the same shape as 关闭全部.
+                            if view.confirm_delete_profile.as_deref()
+                                == Some(name_for_remove.as_str())
+                            {
+                                view.send(ClientCommand::RemoveProfile(name_for_remove.clone()));
+                                view.confirm_delete_profile = None;
+                            } else {
+                                view.confirm_delete_profile = Some(name_for_remove.clone());
+                            }
+                            cx.notify();
                         }))
-                        .children(active.then(|| {
-                            self.mini_action(
-                                index + 100_000,
-                                "更新",
-                                cx,
-                                ClientCommand::UpdateSubscription,
-                            )
-                        }))
-                        .child({
-                            let armed = self
-                                .confirm_delete_profile
-                                .as_deref()
-                                .is_some_and(|pending| pending == name_for_remove);
-                            div()
-                                .id(format!("remove-{index}"))
-                                .px(px(10.0))
-                                .py(px(7.0))
-                                .rounded(px(7.0))
-                                .text_size(px(11.0))
-                                .text_color(rgb(DANGER))
-                                .hover(|style| style.bg(rgb(0xffecee)))
-                                .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
-                                    // Deleting also drops the cached node list,
-                                    // so the first click only arms the button —
-                                    // the same shape as 关闭全部.
-                                    if view.confirm_delete_profile.as_deref()
-                                        == Some(name_for_remove.as_str())
-                                    {
-                                        view.send(ClientCommand::RemoveProfile(
-                                            name_for_remove.clone(),
-                                        ));
-                                        view.confirm_delete_profile = None;
-                                    } else {
-                                        view.confirm_delete_profile = Some(name_for_remove.clone());
-                                    }
-                                    cx.notify();
-                                }))
-                                .child(if armed { "确认删除？" } else { "删除" })
-                        }),
-                )
+                        .child(if armed { "确认删除？" } else { "删除" })
+                })
         });
         root.child(
             div()
@@ -1898,23 +1882,7 @@ impl Sbgui {
                 .bg(rgb(SURFACE))
                 .border_1()
                 .border_color(rgb(BORDER))
-                .child(
-                    div()
-                        .min_h(px(38.0))
-                        .px(px(14.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(12.0))
-                        .bg(rgb(SURFACE_2))
-                        .text_size(px(10.0))
-                        .text_color(rgb(MUTED))
-                        .child(div().w(px(22.0)).child(""))
-                        .child(div().w(px(250.0)).min_w(px(160.0)).child("订阅名称"))
-                        .child(div().w(px(250.0)).flex_grow(1.0).child("用量"))
-                        .child(div().w(px(100.0)).child("上次更新"))
-                        .child(div().w(px(72.0)).child("节点"))
-                        .child(div().w(px(126.0)).child("操作")),
-                )
+                .overflow_hidden()
                 .children(rows),
         )
     }
@@ -1972,16 +1940,18 @@ impl Sbgui {
                     .w(if card_view { px(238.0) } else { px(720.0) })
                     .when(card_view, |row| row.flex_grow(1.0))
                     .min_w(px(0.0))
-                    .min_h(px(52.0))
-                    .px(px(14.0))
-                    .py(px(10.0))
-                    .rounded(px(if card_view { 9.0 } else { 0.0 }))
+                    .min_h(px(50.0))
+                    .px(px(ROW_X))
+                    .py(px(ROW_Y))
+                    .rounded(px(if card_view { 10.0 } else { 0.0 }))
                     .bg(rgb(if selected { BLUE_2 } else { SURFACE }))
                     .when(card_view, |row| {
                         row.border_1()
                             .border_color(rgb(if selected { CYAN } else { BORDER }))
                     })
-                    .when(!card_view, |row| row.border_b_1().border_color(rgb(BORDER)))
+                    .when(!card_view && index > 0, |row| {
+                        row.border_t_1().border_color(rgb(BORDER))
+                    })
                     .flex()
                     .items_center()
                     .gap(px(12.0))
@@ -2006,34 +1976,26 @@ impl Sbgui {
                         div()
                             .flex_1()
                             .min_w(px(0.0))
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(TEXT))
-                                    .truncate()
-                                    .child(display_name),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(3.0))
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(MUTED))
-                                    .child(if automatic {
-                                        "自动选择组"
-                                    } else {
-                                        "手动选择"
-                                    }),
-                            ),
+                            .text_size(px(BODY))
+                            .text_color(rgb(if selected { CYAN } else { TEXT }))
+                            .font_weight(if selected {
+                                WEIGHT_MEDIUM
+                            } else {
+                                WEIGHT_NORMAL
+                            })
+                            .truncate()
+                            .child(display_name),
                     )
                     .children(selected.then(|| pill("当前", CYAN)))
                     .child(
                         div()
                             .id(format!("delay-{index}"))
-                            .min_w(px(68.0))
-                            .px(px(8.0))
-                            .py(px(5.0))
-                            .rounded(px(6.0))
-                            .text_size(px(11.0))
+                            .min_w(px(74.0))
+                            .flex_shrink_0()
+                            .px(px(10.0))
+                            .py(px(6.0))
+                            .rounded(px(9.0))
+                            .text_size(px(LABEL))
                             .text_color(rgb(color))
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(SURFACE_2)))
@@ -2049,7 +2011,7 @@ impl Sbgui {
         div()
             .flex()
             .flex_col()
-            .gap(px(14.0))
+            .gap(px(GAP_SECTION))
             .child(
                 div()
                     .flex()
@@ -2091,39 +2053,26 @@ impl Sbgui {
                             ))
                             .child(
                                 div()
-                                    .id("node-list-view")
-                                    .px(px(10.0))
-                                    .py(px(8.0))
-                                    .rounded(px(7.0))
-                                    .bg(rgb(if !card_view { BLUE_2 } else { SURFACE }))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(9.0))
                                     .border_1()
                                     .border_color(rgb(BORDER))
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(if !card_view { CYAN } else { MUTED }))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
-                                        view.node_card_view = false;
-                                        cx.notify();
-                                    }))
-                                    .child("列表"),
-                            )
-                            .child(
-                                div()
-                                    .id("node-card-view")
-                                    .px(px(10.0))
-                                    .py(px(8.0))
-                                    .rounded(px(7.0))
-                                    .bg(rgb(if card_view { BLUE_2 } else { SURFACE }))
-                                    .border_1()
-                                    .border_color(rgb(BORDER))
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(if card_view { CYAN } else { MUTED }))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
-                                        view.node_card_view = true;
-                                        cx.notify();
-                                    }))
-                                    .child("卡片"),
+                                    .overflow_hidden()
+                                    .child(self.view_mode(
+                                        "node-list-view",
+                                        "列表",
+                                        !card_view,
+                                        cx,
+                                        false,
+                                    ))
+                                    .child(self.view_mode(
+                                        "node-card-view",
+                                        "卡片",
+                                        card_view,
+                                        cx,
+                                        true,
+                                    )),
                             ),
                     ),
             )
@@ -2131,68 +2080,55 @@ impl Sbgui {
                 div()
                     .flex()
                     .flex_wrap()
-                    .gap(px(6.0))
+                    .gap(px(8.0))
                     .children(groups.iter().enumerate().map(|(index, item)| {
                         let active = item.name == group.name;
                         div()
                             .id(format!("group-{index}"))
-                            .px(px(12.0))
-                            .py(px(8.0))
-                            .rounded(px(8.0))
+                            .px(px(14.0))
+                            .py(px(9.0))
+                            .rounded(px(10.0))
                             .bg(rgb(if active { BLUE_2 } else { SURFACE }))
-                            .text_size(px(12.0))
-                            .text_color(rgb(if active { CYAN } else { MUTED }))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
                             .cursor_pointer()
-                            .hover(|s| s.bg(rgb(BLUE_2)))
+                            .hover(|s| s.bg(rgb(SURFACE_2)))
                             .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
                                 view.group_index = index;
                                 cx.notify();
                             }))
-                            .child(clean_proxy_label(&item.name))
-                    })),
-            )
-            .child(
-                div()
-                    .p(px(14.0))
-                    .rounded(px(RADIUS))
-                    .bg(rgb(SURFACE))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .child(icon("nodes", CYAN, 18.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
                             .child(
                                 div()
-                                    .text_size(px(13.0))
-                                    .text_color(rgb(TEXT))
-                                    .truncate()
-                                    .child(clean_proxy_label(&group.name)),
+                                    .text_size(px(LABEL))
+                                    .font_weight(if active { WEIGHT_MEDIUM } else { WEIGHT_NORMAL })
+                                    .text_color(rgb(if active { CYAN } else { MUTED }))
+                                    .child(clean_proxy_label(&item.name)),
                             )
                             .child(
                                 div()
-                                    .mt(px(4.0))
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(MUTED))
-                                    .child(format!(
-                                        "{} · {} 个节点",
-                                        if automatic {
-                                            "自动选择，由内核决定当前节点"
-                                        } else {
-                                            "手动选择"
-                                        },
-                                        group.members.len()
-                                    )),
-                            ),
-                    )
-                    .child(self.action(
-                        "test-group",
-                        "测试延迟",
-                        Tone::Neutral,
-                        cx,
-                        ClientCommand::TestGroup(group.name.clone()),
+                                    .text_size(px(META))
+                                    .text_color(rgb(if active { CYAN } else { FAINT }))
+                                    .child(item.members.len().to_string()),
+                            )
+                    })),
+            )
+            // The group summary used to be a card of its own, repeating the
+            // selected chip and a second 测试延迟 button.
+            .child(
+                div()
+                    .px(px(4.0))
+                    .text_size(px(META))
+                    .text_color(rgb(MUTED))
+                    .child(format!(
+                        "{} · {} 个节点 · {}",
+                        clean_proxy_label(&group.name),
+                        group.members.len(),
+                        if automatic {
+                            "自动选择，点击节点不会切换"
+                        } else {
+                            "点击节点即可切换"
+                        }
                     )),
             )
             .child(
@@ -2204,9 +2140,34 @@ impl Sbgui {
                     .overflow_hidden()
                     .flex()
                     .flex_wrap()
-                    .gap(px(if card_view { 8.0 } else { 0.0 }))
+                    .gap(px(if card_view { 12.0 } else { 0.0 }))
                     .children(members),
             )
+    }
+
+    /// One half of the list/card segmented control.
+    fn view_mode(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        active: bool,
+        cx: &mut Context<Self>,
+        card: bool,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .px(px(12.0))
+            .py(px(8.0))
+            .text_size(px(LABEL))
+            .bg(rgb(if active { BLUE_2 } else { SURFACE }))
+            .text_color(rgb(if active { CYAN } else { MUTED }))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(SURFACE_2)))
+            .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                view.node_card_view = card;
+                cx.notify();
+            }))
+            .child(label)
     }
 
     // --------------------------------------------------------------- rules
@@ -2220,7 +2181,7 @@ impl Sbgui {
             .text
             .trim()
             .to_lowercase();
-        let rows: Vec<gpui::AnyElement> = rules
+        let matched: Vec<(usize, &RouteRuleSnapshot)> = rules
             .iter()
             .enumerate()
             .filter(|(_, rule)| {
@@ -2228,15 +2189,24 @@ impl Sbgui {
                     || rule.matcher.to_lowercase().contains(&query)
                     || rule.outbound.to_lowercase().contains(&query)
             })
-            .map(|(index, rule)| rule_row(index, rule))
+            .collect();
+        let visible = if self.show_all_rules {
+            matched.len()
+        } else {
+            matched.len().min(LIST_PAGE)
+        };
+        let rows: Vec<gpui::AnyElement> = matched
+            .iter()
+            .take(visible)
+            .map(|(index, rule)| rule_row(*index, rule))
             .collect();
         let rule_set_rows: Vec<gpui::AnyElement> = rule_sets
             .iter()
             .map(|set| {
                 div()
                     .w_full()
-                    .px(px(15.0))
-                    .py(px(10.0))
+                    .px(px(ROW_X))
+                    .py(px(ROW_Y))
                     .flex()
                     .items_center()
                     .gap(px(10.0))
@@ -2244,20 +2214,22 @@ impl Sbgui {
                     .border_color(rgb(BORDER))
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(BODY))
+                            .font_weight(WEIGHT_MEDIUM)
                             .text_color(rgb(CYAN))
                             .child(set.tag.clone()),
                     )
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(px(META))
                             .text_color(rgb(FAINT))
                             .child(set.kind.clone()),
                     )
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(11.0))
+                            .min_w(px(0.0))
+                            .text_size(px(META))
                             .text_color(rgb(MUTED))
                             .truncate()
                             .child(if set.url.is_empty() {
@@ -2366,35 +2338,79 @@ impl Sbgui {
                     .border_1()
                     .border_color(rgb(BORDER))
                     .overflow_hidden()
-                    .child(
-                        div()
-                            .px(px(15.0))
-                            .py(px(9.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(14.0))
-                            .bg(rgb(SURFACE_2))
-                            .text_size(px(10.0))
-                            .text_color(rgb(MUTED))
-                            .child(div().w(px(58.0)).child("优先级"))
-                            .child(div().flex_1().child("匹配条件"))
-                            .child(div().w(px(180.0)).child("出站"))
-                            .child(div().w(px(72.0)).child("状态")),
-                    )
+                    .children(if rows.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![
+                            div()
+                                .px(px(ROW_X))
+                                .py(px(10.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(16.0))
+                                .bg(rgb(SURFACE_2))
+                                .text_size(px(META))
+                                .text_color(rgb(MUTED))
+                                .child(div().w(px(44.0)).child("#"))
+                                .child(div().flex_1().child("匹配条件"))
+                                .child(div().w(px(200.0)).child("出站"))
+                                .into_any_element(),
+                        ]
+                    })
                     .children(if rows.is_empty() {
                         vec![
-                            empty_state(
+                            inline_empty(
                                 "暂无可读规则",
                                 "启动内核或激活订阅后，这里会显示当前配置的路由规则。",
-                                None,
-                                cx,
                             )
                             .into_any_element(),
                         ]
                     } else {
                         rows
-                    }),
+                    })
+                    // A real subscription ships hundreds of rules; the list
+                    // starts capped and opens on demand.
+                    .children((matched.len() > LIST_PAGE || self.show_all_rules).then(|| {
+                        self.list_more(
+                            if self.show_all_rules {
+                                format!("收起，先看前 {LIST_PAGE} 条")
+                            } else {
+                                format!("显示全部 {} 条规则", matched.len())
+                            },
+                            "rules-more",
+                            cx,
+                            |view| view.show_all_rules = !view.show_all_rules,
+                        )
+                    })),
             )
+    }
+
+    /// The "show the rest" footer shared by the capped rules and connection
+    /// lists.
+    fn list_more(
+        &self,
+        label: String,
+        id: &'static str,
+        cx: &mut Context<Self>,
+        toggle: impl Fn(&mut Sbgui) + 'static,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .w_full()
+            .py(px(14.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(LABEL))
+            .font_weight(WEIGHT_MEDIUM)
+            .text_color(rgb(CYAN))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(SURFACE_2)))
+            .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                toggle(view);
+                cx.notify();
+            }))
+            .child(label)
     }
 
     fn mini_action(
@@ -2464,8 +2480,14 @@ impl Sbgui {
         if !query.is_empty() {
             connections.retain(|connection| connection.matches(&query));
         }
+        let visible = if self.show_all_connections {
+            connections.len()
+        } else {
+            connections.len().min(LIST_PAGE)
+        };
         let rows: Vec<gpui::AnyElement> = connections
             .iter()
+            .take(visible)
             .enumerate()
             .map(|(index, connection)| connection_row(index, connection, cx))
             .collect();
@@ -2482,23 +2504,14 @@ impl Sbgui {
                     .child(
                         div()
                             .flex_1()
-                            .child(div().text_size(px(11.0)).text_color(rgb(MUTED)).child(
-                                if query.is_empty() {
-                                    format!("{total} 条活动连接 · 按下载流量排序")
-                                } else {
-                                    format!(
-                                        "匹配 {} / {total} 条 · 按下载流量排序",
-                                        connections.len()
-                                    )
-                                },
-                            ))
-                            .child(
-                                div()
-                                    .mt(px(3.0))
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(MUTED))
-                                    .child("行右侧按钮可断开单条连接"),
-                            ),
+                            .min_w(px(200.0))
+                            .text_size(px(LABEL))
+                            .text_color(rgb(MUTED))
+                            .child(if query.is_empty() {
+                                format!("{total} 条活动连接 · 按下载流量排序")
+                            } else {
+                                format!("匹配 {} / {total} 条 · 按下载流量排序", connections.len())
+                            }),
                     )
                     .child(self.text_field(
                         FieldSpec {
@@ -2510,51 +2523,34 @@ impl Sbgui {
                         window,
                         cx,
                     ))
-                    .child(
-                        div()
-                            .id("pause-connections")
-                            .px(px(12.0))
-                            .py(px(8.0))
-                            .rounded(px(7.0))
-                            .bg(rgb(if self.paused_connections.is_some() {
-                                BLUE_2
-                            } else {
-                                SURFACE
-                            }))
-                            .border_1()
-                            .border_color(rgb(BORDER))
-                            .text_size(px(12.0))
-                            .text_color(rgb(if self.paused_connections.is_some() {
-                                CYAN
-                            } else {
-                                TEXT
-                            }))
-                            .cursor_pointer()
-                            .hover(|s| s.border_color(rgb(CYAN)))
-                            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
-                                view.paused_connections = if view.paused_connections.is_some() {
-                                    None
-                                } else {
-                                    Some(view.snapshot.connections.connections.clone())
-                                };
-                                cx.notify();
-                            }))
-                            .child(if self.paused_connections.is_some() {
-                                "继续刷新"
-                            } else {
-                                "暂停刷新"
-                            }),
-                    )
+                    .child(self.utility_toggle(
+                        "pause-connections",
+                        if self.paused_connections.is_some() {
+                            "继续刷新"
+                        } else {
+                            "暂停刷新"
+                        },
+                        self.paused_connections.is_some(),
+                        cx,
+                        |view| {
+                            let paused = match view.paused_connections.take() {
+                                Some(_) => None,
+                                None => Some(view.snapshot.connections.connections.clone()),
+                            };
+                            view.paused_connections = paused;
+                        },
+                    ))
                     .child(
                         div()
                             .id("close-all")
                             .px(px(12.0))
                             .py(px(8.0))
-                            .rounded(px(7.0))
+                            .rounded(px(9.0))
                             .bg(rgb(SURFACE))
                             .border_1()
                             .border_color(rgb(DANGER))
-                            .text_size(px(12.0))
+                            .text_size(px(LABEL))
+                            .font_weight(WEIGHT_MEDIUM)
                             .text_color(rgb(DANGER))
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(0xfff1f1)))
@@ -2574,37 +2570,61 @@ impl Sbgui {
                             }),
                     ),
             )
-            .child(
-                // Same white bordered container as the log list, so the table
-                // does not float on the canvas next to the empty-state card.
-                div()
-                    .id("connections-panel")
-                    .w_full()
-                    .rounded(px(RADIUS))
-                    .bg(rgb(SURFACE))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .id("connections-horizontal")
-                            .w_full()
-                            .overflow_x_scroll()
-                            .child(
-                                div()
-                                    .min_w(px(1080.0))
-                                    .child(connection_header())
-                                    .child(div().flex().flex_col().gap(px(4.0)).children(rows)),
-                            ),
-                    ),
-            )
+            // With nothing to list there is no table: the empty-state card
+            // below carries the hint and the 启动内核 action.
+            .when(!connections.is_empty(), |page| {
+                page.child(
+                    div()
+                        .id("connections-panel")
+                        .w_full()
+                        .rounded(px(RADIUS))
+                        .bg(rgb(SURFACE))
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .id("connections-horizontal")
+                                .w_full()
+                                .overflow_x_scroll()
+                                .child(
+                                    div()
+                                        .min_w(px(920.0))
+                                        .child(connection_header())
+                                        .children(rows)
+                                        .children(
+                                            (connections.len() > LIST_PAGE
+                                                || self.show_all_connections)
+                                                .then(|| {
+                                                    self.list_more(
+                                                        if self.show_all_connections {
+                                                            format!("收起，先看前 {LIST_PAGE} 条")
+                                                        } else {
+                                                            format!(
+                                                                "显示全部 {} 条连接",
+                                                                connections.len()
+                                                            )
+                                                        },
+                                                        "connections-more",
+                                                        cx,
+                                                        |view| {
+                                                            view.show_all_connections =
+                                                                !view.show_all_connections
+                                                        },
+                                                    )
+                                                }),
+                                        ),
+                                ),
+                        ),
+                )
+            })
             .children(self.selected_connection.as_ref().and_then(|selected| {
                 connections
                     .iter()
                     .find(|connection| &connection.id == selected)
                     .map(|connection| {
                         div()
-                            .p(px(16.0))
+                            .p(px(PAD_CARD))
                             .rounded(px(RADIUS))
                             .bg(rgb(SURFACE))
                             .border_1()
@@ -2616,7 +2636,8 @@ impl Sbgui {
                                     .child(
                                         div()
                                             .flex_1()
-                                            .text_size(px(14.0))
+                                            .text_size(px(SECTION))
+                                            .font_weight(WEIGHT_SEMIBOLD)
                                             .text_color(rgb(TEXT))
                                             .child("连接详情"),
                                     )
@@ -2647,6 +2668,22 @@ impl Sbgui {
                             ))
                             .child(setting_line("使用节点", &connection_chain(connection)))
                             .child(setting_line("协议", &connection.metadata.network))
+                            .child(setting_line(
+                                "累计流量",
+                                &format!(
+                                    "↓ {} · ↑ {}",
+                                    human_bytes(connection.download),
+                                    human_bytes(connection.upload)
+                                ),
+                            ))
+                            .child(setting_line(
+                                "建立时间",
+                                if connection.start.is_empty() {
+                                    "刚刚"
+                                } else {
+                                    &connection.start
+                                },
+                            ))
                     })
             }))
             .children(if total == 0 {
@@ -2746,12 +2783,12 @@ impl Sbgui {
             level_chips.push(
                 div()
                     .id(format!("log-level-{:?}", candidate))
-                    .px(px(10.0))
-                    .py(px(4.0))
-                    .rounded(px(12.0))
-                    .text_size(px(11.0))
+                    .px(px(12.0))
+                    .py(px(6.0))
+                    .rounded(px(9.0))
+                    .text_size(px(LABEL))
                     .cursor_pointer()
-                    .bg(rgb(if active { BLUE_2 } else { SURFACE_2 }))
+                    .bg(rgb(if active { BLUE_2 } else { SURFACE }))
                     .border_1()
                     .border_color(rgb(if active { CYAN } else { BORDER }))
                     .text_color(rgb(if active { CYAN } else { MUTED }))
@@ -2778,14 +2815,14 @@ impl Sbgui {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(6.0))
+                            .gap(px(8.0))
                             .children(level_chips),
                     )
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(8.0))
+                            .gap(px(10.0))
                             .child(self.text_field(
                                 FieldSpec {
                                     field: InputField::LogQuery,
@@ -2798,7 +2835,7 @@ impl Sbgui {
                             ))
                             .child(
                                 div()
-                                    .text_size(px(11.0))
+                                    .text_size(px(LABEL))
                                     .text_color(rgb(MUTED))
                                     .child(format!("{} 行", rows.len())),
                             ),
@@ -2806,83 +2843,61 @@ impl Sbgui {
             )
             .child(
                 div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(self.utility_toggle(
-                        "log-follow",
-                        if self.log_follow {
-                            "自动滚动：开"
-                        } else {
-                            "自动滚动：关"
-                        },
-                        self.log_follow,
-                        cx,
-                        |view| view.log_follow = !view.log_follow,
-                    ))
-                    .child(self.utility_toggle(
-                        "log-wrap",
-                        if self.log_wrap {
-                            "自动换行：开"
-                        } else {
-                            "自动换行：关"
-                        },
-                        self.log_wrap,
-                        cx,
-                        |view| view.log_wrap = !view.log_wrap,
-                    ))
+                    .id("log-panel")
+                    .w_full()
+                    .rounded(px(RADIUS))
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .overflow_hidden()
+                    // The view controls used to be a third band of their own,
+                    // under a panel header that only repeated the page title.
                     .child(
                         div()
-                            .id("copy-logs")
-                            .px(px(10.0))
-                            .py(px(7.0))
-                            .rounded(px(7.0))
-                            .border_1()
+                            .px(px(ROW_X))
+                            .py(px(12.0))
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_end()
+                            .gap(px(8.0))
+                            .border_b_1()
                             .border_color(rgb(BORDER))
-                            .text_size(px(11.0))
-                            .text_color(rgb(TEXT))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(SURFACE_2)))
-                            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                            .child(self.utility_toggle(
+                                "log-follow",
+                                if self.log_follow {
+                                    "自动滚动：开"
+                                } else {
+                                    "自动滚动：关"
+                                },
+                                self.log_follow,
+                                cx,
+                                |view| view.log_follow = !view.log_follow,
+                            ))
+                            .child(self.utility_toggle(
+                                "log-wrap",
+                                if self.log_wrap {
+                                    "自动换行：开"
+                                } else {
+                                    "自动换行：关"
+                                },
+                                self.log_wrap,
+                                cx,
+                                |view| view.log_wrap = !view.log_wrap,
+                            ))
+                            .child(self.quiet_action("copy-logs", "复制", cx, move |view, cx| {
+                                let _ = view;
                                 cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
                             }))
-                            .child("复制"),
-                    )
-                    .child(
-                        div()
-                            .id("clear-logs")
-                            .px(px(10.0))
-                            .py(px(7.0))
-                            .rounded(px(7.0))
-                            .border_1()
-                            .border_color(rgb(BORDER))
-                            .text_size(px(11.0))
-                            .text_color(rgb(TEXT))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(SURFACE_2)))
-                            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
-                                // The engine owns the buffers: hiding lines by
-                                // count stops working once the ring is full.
+                            .child(self.quiet_action("clear-logs", "清空", cx, |view, cx| {
+                                // The engine owns the buffers: hiding lines
+                                // by count stops working once the ring is
+                                // full.
                                 view.send(ClientCommand::ClearLogs);
                                 view.log_rows.set(0);
                                 cx.notify();
                             }))
-                            .child("清空"),
-                    )
-                    .child(
-                        div()
-                            .id("export-logs")
-                            .px(px(10.0))
-                            .py(px(7.0))
-                            .rounded(px(7.0))
-                            .border_1()
-                            .border_color(rgb(BORDER))
-                            .text_size(px(11.0))
-                            .text_color(rgb(TEXT))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(SURFACE_2)))
-                            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                            .child(self.quiet_action("export-logs", "导出", cx, |view, cx| {
                                 let text = view
                                     .snapshot
                                     .core_logs
@@ -2902,56 +2917,24 @@ impl Sbgui {
                                     Err(error) => format!("导出日志失败：{error}"),
                                 };
                                 cx.notify();
-                            }))
-                            .child("导出"),
-                    ),
-            )
-            .child(
-                div()
-                    .id("log-panel")
-                    .w_full()
-                    .rounded(px(RADIUS))
-                    .bg(rgb(SURFACE))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .p(px(15.0))
-                            .border_b_1()
-                            .border_color(rgb(BORDER))
-                            .child(
-                                div()
-                                    .text_size(px(13.0))
-                                    .text_color(rgb(TEXT))
-                                    .child("日志输出"),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(3.0))
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(MUTED))
-                                    .child("内核日志与客户端运行事件按来源合并展示"),
-                            ),
+                            })),
                     )
-                    .child(log_table_header())
+                    .children(if rows.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![log_table_header().into_any_element()]
+                    })
                     .child(
                         div()
                             .id("log-view")
-                            .h(px(420.0))
+                            .h(px(if rows.is_empty() { 260.0 } else { 430.0 }))
                             .overflow_y_scroll()
                             .track_scroll(&self.log_scroll)
                             .children(if rows.is_empty() {
                                 vec![
-                                    empty_state(
+                                    inline_empty(
                                         "暂无日志",
                                         "启动内核后这里会显示 sing-box 的输出。",
-                                        if self.snapshot.core_running || self.snapshot.starting {
-                                            None
-                                        } else {
-                                            Some("启动内核")
-                                        },
-                                        cx,
                                     )
                                     .into_any_element(),
                                 ]
@@ -2960,6 +2943,29 @@ impl Sbgui {
                             }),
                     ),
             )
+    }
+
+    /// A quiet bordered action, used where a full `action` button would shout.
+    fn quiet_action(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        cx: &mut Context<Self>,
+        action: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .px(px(12.0))
+            .py(px(6.0))
+            .rounded(px(9.0))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .text_size(px(LABEL))
+            .text_color(rgb(TEXT))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(SURFACE_2)))
+            .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| action(view, cx)))
+            .child(label)
     }
 
     // ------------------------------------------------------------- settings
@@ -2976,33 +2982,24 @@ impl Sbgui {
                 div()
                     .id(index)
                     .w_full()
-                    .px(px(14.0))
-                    .py(px(11.0))
-                    .rounded(px(7.0))
+                    .py(px(14.0))
                     .flex()
                     .items_center()
-                    .gap(px(10.0))
-                    .bg(if active { rgb(BLUE_2) } else { rgb(SURFACE) })
-                    .border_1()
-                    .border_color(rgb(if active { 0xb9ceff } else { BORDER }))
-                    .child(
-                        div()
-                            .w(px(16.0))
-                            .text_color(rgb(if active { CYAN } else { FAINT }))
-                            .child(if active { "✓" } else { " " }),
-                    )
+                    .gap(px(12.0))
+                    .when(index > 0, |row| row.border_t_1().border_color(rgb(BORDER)))
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(12.0))
+                            .min_w(px(0.0))
+                            .text_size(px(BODY))
+                            .font_weight(if active { WEIGHT_MEDIUM } else { WEIGHT_NORMAL })
                             .text_color(rgb(TEXT))
                             .truncate()
                             .child(profile.name.clone()),
                     )
                     .child(
                         div()
-                            .w(px(96.0))
-                            .text_size(px(11.0))
+                            .text_size(px(META))
                             .text_color(rgb(MUTED))
                             .child(age_label(profile.last_updated)),
                     )
@@ -3011,7 +3008,7 @@ impl Sbgui {
                         // "激活" button here would be a no-op.
                         div()
                             .px(px(8.0))
-                            .text_size(px(11.0))
+                            .text_size(px(META))
                             .text_color(rgb(FAINT))
                             .child("使用中")
                             .into_any_element()
@@ -3046,23 +3043,17 @@ impl Sbgui {
                 .w_full()
                 .child(
                     div()
-                        .mt(px(6.0))
-                        .text_size(px(11.0))
+                        .mt(px(8.0))
+                        .text_size(px(LABEL))
+                        .line_height(px(19.0))
                         .text_color(rgb(MUTED))
                         .child("当前订阅与本地配置档案。订阅的添加、更新和删除请前往订阅页。"),
                 )
-                .child(
-                    div()
-                        .mt(px(12.0))
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .children(profile_rows),
-                )
+                .child(div().mt(px(16.0)).flex().flex_col().children(profile_rows))
                 .children(profiles.is_empty().then(|| {
                     div()
-                        .mt(px(12.0))
-                        .text_size(px(12.0))
+                        .mt(px(16.0))
+                        .text_size(px(LABEL))
                         .text_color(rgb(MUTED))
                         .child("尚未导入订阅。")
                 })),
@@ -3134,7 +3125,7 @@ impl Sbgui {
                     window,
                     cx,
                 ))
-                .child(div().mt(px(14.0)).child(self.action(
+                .child(div().mt(px(20.0)).child(self.action(
                     "download-core",
                     "检查并更新内核",
                     Tone::Neutral,
@@ -3231,8 +3222,9 @@ impl Sbgui {
                 ))
                 .child(
                     div()
-                        .mt(px(12.0))
-                        .text_size(px(11.0))
+                        .mt(px(16.0))
+                        .text_size(px(LABEL))
+                        .line_height(px(19.0))
                         .text_color(rgb(AMBER))
                         .child("修改高级配置前请停止内核，并保留可恢复的配置副本。"),
                 ),
@@ -3242,18 +3234,20 @@ impl Sbgui {
             .flex()
             .flex_col()
             .gap(px(GAP_SECTION))
-            .child(div().flex().flex_wrap().gap(px(4.0)).children(
+            // A settings row is a label and its value; the measure is capped
+            // so both stay inside one eye sweep instead of drifting apart.
+            .max_w(px(780.0))
+            .child(div().flex().flex_wrap().gap(px(8.0)).children(
                 SettingsSection::all().into_iter().map(|section| {
                     let active = section == self.settings_section;
                     div()
                         .id(format!("settings-{:?}", section))
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .rounded(px(7.0))
+                        .px(px(14.0))
+                        .py(px(9.0))
+                        .rounded(px(10.0))
                         .bg(rgb(if active { BLUE_2 } else { SURFACE }))
-                        .border_1()
-                        .border_color(rgb(if active { CYAN } else { BORDER }))
-                        .text_size(px(12.0))
+                        .text_size(px(LABEL))
+                        .font_weight(if active { WEIGHT_MEDIUM } else { WEIGHT_NORMAL })
                         .text_color(rgb(if active { CYAN } else { MUTED }))
                         .cursor_pointer()
                         .hover(|s| s.bg(rgb(SURFACE_2)))
@@ -3267,13 +3261,13 @@ impl Sbgui {
             .child(content)
             .children((dirty_count > 0).then(|| {
                 div()
-                    .px(px(14.0))
-                    .py(px(10.0))
-                    .rounded(px(8.0))
+                    .px(px(16.0))
+                    .py(px(12.0))
+                    .rounded(px(10.0))
                     .bg(rgb(0xfff7ed))
                     .border_1()
                     .border_color(rgb(0xfed7aa))
-                    .text_size(px(11.0))
+                    .text_size(px(LABEL))
                     .text_color(rgb(AMBER))
                     .child(format!(
                         "有 {dirty_count} 项更改尚未保存；端口或内核配置可能需要重启后生效。"
@@ -3283,11 +3277,12 @@ impl Sbgui {
                 div().flex().justify_end().child(
                     div()
                         .id("save-settings")
-                        .px(px(16.0))
-                        .py(px(9.0))
-                        .rounded(px(7.0))
+                        .px(px(18.0))
+                        .py(px(10.0))
+                        .rounded(px(9.0))
                         .bg(rgb(CYAN))
-                        .text_size(px(12.0))
+                        .text_size(px(LABEL))
+                        .font_weight(WEIGHT_MEDIUM)
                         .text_color(rgb(SURFACE))
                         .cursor_pointer()
                         .hover(|s| s.bg(rgb(CYAN_DARK)))
@@ -3453,6 +3448,9 @@ fn traffic_panel(snapshot: &ClientSnapshot) -> impl IntoElement {
         .map(|p| (p.up, p.down))
         .collect();
     let peak = snapshot.traffic_peak();
+    // Two points make a line; before that the panel said "等待流量数据" under
+    // an empty 170px box, which was the loudest thing on the page.
+    let has_curve = samples.len() > 1;
     panel("流量趋势")
         // One legend for both rates: the metric cards used to repeat them, and
         // the 1 h / 24 h chips used to be two buttons that did nothing.
@@ -3476,24 +3474,35 @@ fn traffic_panel(snapshot: &ClientSnapshot) -> impl IntoElement {
         .child(
             div()
                 .mt(px(16.0))
-                .h(px(180.0))
+                .h(px(if has_curve { 180.0 } else { 96.0 }))
                 .w_full()
-                .child(traffic_chart(samples, peak.max(1))),
+                .when(has_curve, |plot| {
+                    plot.child(traffic_chart(samples, peak.max(1)))
+                })
+                .when(!has_curve, |plot| {
+                    plot.flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(8.0))
+                        .bg(rgb(SURFACE_2))
+                        .child(
+                            div()
+                                .text_size(px(LABEL))
+                                .text_color(rgb(FAINT))
+                                .child("内核运行并产生上下行后，这里绘制曲线。"),
+                        )
+                }),
         )
-        .child(
+        .children(has_curve.then(|| {
             div()
                 .mt(px(10.0))
                 .flex()
                 .justify_between()
                 .text_size(px(META))
                 .text_color(rgb(FAINT))
-                .child(if snapshot.traffic_history.is_empty() {
-                    "等待流量数据".to_owned()
-                } else {
-                    format!("{} 个采样点", snapshot.traffic_history.len())
-                })
-                .child("现在"),
-        )
+                .child(format!("{} 个采样点", snapshot.traffic_history.len()))
+                .child("现在")
+        }))
         .child(
             div()
                 .mt(px(18.0))
@@ -3577,63 +3586,56 @@ fn rule_row(index: usize, rule: &RouteRuleSnapshot) -> gpui::AnyElement {
     div()
         .id(format!("rule-row-{index}"))
         .w_full()
-        .px(px(15.0))
-        .py(px(11.0))
+        .px(px(ROW_X))
+        .py(px(ROW_Y))
         .flex()
         .items_center()
-        .gap(px(14.0))
-        .border_b_1()
-        .border_color(rgb(BORDER))
+        .gap(px(16.0))
+        .when(index > 0, |row| row.border_t_1().border_color(rgb(BORDER)))
         .hover(|style| style.bg(rgb(BLUE_2)))
         .child(
             div()
-                .w(px(58.0))
+                .w(px(44.0))
                 .flex_shrink_0()
-                .text_size(px(11.0))
-                .text_color(rgb(MUTED))
-                .child(format!("{:02}", index + 1)),
+                .text_size(px(META))
+                .text_color(rgb(FAINT))
+                .child((index + 1).to_string()),
         )
         .child(
             div()
                 .flex_1()
                 .min_w(px(0.0))
-                .text_size(px(12.0))
+                .text_size(px(BODY))
                 .text_color(rgb(TEXT))
                 .child(rule.matcher.clone()),
         )
         .child(
+            // The 状态 column used to sit here and say 已启用 on every row.
             div()
-                .w(px(180.0))
+                .w(px(200.0))
+                .flex_shrink_0()
                 .truncate()
-                .text_size(px(12.0))
+                .text_size(px(BODY))
                 .text_color(rgb(CYAN))
                 .child(rule.outbound.clone()),
-        )
-        .child(
-            div()
-                .w(px(72.0))
-                .flex_shrink_0()
-                .flex()
-                .justify_end()
-                .child(pill("已启用", MINT)),
         )
         .into_any_element()
 }
 
 fn log_table_header() -> impl IntoElement {
     div()
-        .px(px(15.0))
-        .py(px(8.0))
+        .px(px(ROW_X))
+        .py(px(10.0))
         .flex()
+        .items_center()
         .gap(px(12.0))
         .bg(rgb(SURFACE_2))
         .border_b_1()
         .border_color(rgb(BORDER))
-        .text_size(px(10.0))
+        .text_size(px(META))
         .text_color(rgb(MUTED))
-        .child(div().w(px(62.0)).child("序号"))
-        .child(div().w(px(72.0)).child("级别"))
-        .child(div().w(px(120.0)).child("来源"))
+        .child(div().w(px(76.0)).child("级别"))
+        .child(div().w(px(110.0)).child("来源"))
         .child(div().flex_1().child("内容"))
 }
 
@@ -3650,25 +3652,30 @@ fn log_row(index: usize, source: &str, line: &str, wrap: bool) -> gpui::AnyEleme
     };
     div()
         .id(format!("log-row-{index}"))
-        .px(px(15.0))
-        .py(px(8.0))
+        .w_full()
+        .px(px(ROW_X))
+        .py(px(ROW_Y))
         .flex()
-        .items_center()
+        .items_start()
         .gap(px(12.0))
-        .border_b_1()
-        .border_color(rgb(BORDER))
+        .when(index > 0, |row| row.border_t_1().border_color(rgb(BORDER)))
         .hover(|style| style.bg(rgb(BLUE_2)))
-        .text_size(px(11.0))
+        .text_size(px(LABEL))
+        .line_height(px(19.0))
+        // The 序号 column is gone: a line number nobody cites is decoration,
+        // and the level no longer needs a filled pill to be read as a level.
         .child(
             div()
-                .w(px(62.0))
-                .text_color(rgb(MUTED))
-                .child(format!("{:03}", index + 1)),
+                .w(px(76.0))
+                .flex_shrink_0()
+                .font_weight(WEIGHT_MEDIUM)
+                .text_color(rgb(color))
+                .child(level),
         )
-        .child(div().w(px(72.0)).child(pill(level, color)))
         .child(
             div()
-                .w(px(120.0))
+                .w(px(110.0))
+                .flex_shrink_0()
                 .truncate()
                 .text_color(rgb(MUTED))
                 .child(source.to_owned()),
@@ -3677,6 +3684,7 @@ fn log_row(index: usize, source: &str, line: &str, wrap: bool) -> gpui::AnyEleme
             div()
                 .flex_1()
                 .min_w(px(0.0))
+                .font_family("Cascadia Mono, Consolas")
                 .when(!wrap, |row| {
                     row.whitespace_nowrap().overflow_hidden().text_ellipsis()
                 })
@@ -3688,21 +3696,21 @@ fn log_row(index: usize, source: &str, line: &str, wrap: bool) -> gpui::AnyEleme
 
 fn connection_header() -> impl IntoElement {
     div()
-        .min_w(px(1080.0))
-        .px(px(12.0))
-        .py(px(8.0))
+        .min_w(px(920.0))
+        .px(px(ROW_X))
+        .py(px(10.0))
         .flex()
-        .gap(px(10.0))
-        .text_size(px(11.0))
+        .items_center()
+        .gap(px(12.0))
+        .bg(rgb(SURFACE_2))
+        .text_size(px(META))
         .text_color(rgb(MUTED))
-        .child(div().w(px(62.0)).child("状态"))
-        .child(div().w(px(140.0)).child("应用 / 入口"))
-        .child(div().w(px(230.0)).child("远程目标"))
-        .child(div().w(px(72.0)).child("协议"))
+        .child(div().w(px(150.0)).child("应用 / 入口"))
+        .child(div().flex_1().child("远程目标"))
+        .child(div().w(px(64.0)).child("协议"))
         .child(div().w(px(150.0)).child("命中规则"))
-        .child(div().w(px(160.0)).child("使用节点"))
-        .child(div().w(px(140.0)).child("累计流量"))
-        .child(div().w(px(120.0)).child("建立时间"))
+        .child(div().w(px(130.0)).child("累计流量"))
+        .child(div().w(px(100.0)).child("建立时间"))
         .child(div().w(px(48.0)).child(""))
 }
 
@@ -3722,17 +3730,16 @@ fn connection_row(
     };
     div()
         .id(index)
-        .min_w(px(1080.0))
-        .px(px(12.0))
-        .py(px(9.0))
+        .min_w(px(920.0))
+        .px(px(ROW_X))
+        .py(px(ROW_Y))
         .flex()
         .items_center()
-        .gap(px(10.0))
+        .gap(px(12.0))
         .bg(rgb(SURFACE))
-        .border_b_1()
-        .border_color(rgb(BORDER))
+        .when(index > 0, |row| row.border_t_1().border_color(rgb(BORDER)))
         .font_family("Cascadia Mono, Consolas")
-        .text_size(px(11.0))
+        .text_size(px(LABEL))
         .text_color(rgb(TEXT))
         .cursor_pointer()
         .hover(|style| style.bg(rgb(BLUE_2)))
@@ -3740,64 +3747,72 @@ fn connection_row(
             view.selected_connection = Some(detail_id.clone());
             cx.notify();
         }))
+        // 状态 and 使用节点 left the row for the detail card: every row here is
+        // active, and the chain is the least readable column in a fixed width.
         .child(
             div()
-                .w(px(62.0))
+                .w(px(150.0))
+                .flex_shrink_0()
                 .flex()
                 .items_center()
-                .gap(px(6.0))
+                .gap(px(8.0))
                 .child(status_dot(MINT))
-                .child("活动"),
+                .child(div().truncate().child(application)),
         )
         .child(
             div()
-                .w(px(140.0))
+                .flex_1()
+                .min_w(px(0.0))
                 .truncate()
-                .text_color(rgb(TEXT))
-                .child(application),
-        )
-        .child(
-            div()
-                .w(px(230.0))
-                .truncate()
-                .text_color(rgb(TEXT))
                 .child(connection_target(connection)),
         )
         .child(
             div()
-                .w(px(72.0))
+                .w(px(64.0))
+                .flex_shrink_0()
+                .text_color(rgb(MUTED))
                 .child(connection.metadata.network.to_uppercase()),
         )
-        .child(div().w(px(150.0)).truncate().text_color(rgb(MUTED)).child(
-            if connection.rule.is_empty() {
-                "未匹配".to_owned()
-            } else {
-                connection.rule.clone()
-            },
-        ))
         .child(
             div()
-                .w(px(160.0))
+                .w(px(150.0))
+                .flex_shrink_0()
                 .truncate()
                 .text_color(rgb(MUTED))
-                .child(connection_chain(connection)),
+                .child(if connection.rule.is_empty() {
+                    "未匹配".to_owned()
+                } else {
+                    connection.rule.clone()
+                }),
         )
-        .child(div().w(px(140.0)).text_color(rgb(CYAN)).child(format!(
-            "↓ {}  ↑ {}",
-            human_bytes(connection.download),
-            human_bytes(connection.upload)
-        )))
-        .child(div().w(px(120.0)).truncate().text_color(rgb(MUTED)).child(
-            if connection.start.is_empty() {
-                "刚刚".to_owned()
-            } else {
-                connection.start.clone()
-            },
-        ))
+        .child(
+            div()
+                .w(px(130.0))
+                .flex_shrink_0()
+                .text_color(rgb(CYAN))
+                .child(format!(
+                    "↓ {} ↑ {}",
+                    human_bytes(connection.download),
+                    human_bytes(connection.upload)
+                )),
+        )
+        .child(
+            div()
+                .w(px(100.0))
+                .flex_shrink_0()
+                .truncate()
+                .text_color(rgb(MUTED))
+                .child(if connection.start.is_empty() {
+                    "刚刚".to_owned()
+                } else {
+                    connection.start.clone()
+                }),
+        )
         .child(
             div()
                 .id(index + 300_000)
                 .w(px(48.0))
+                .flex_shrink_0()
                 .text_color(rgb(DANGER))
                 .hover(|style| style.text_color(rgb(0xffb0ab)))
                 .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
@@ -3812,25 +3827,26 @@ fn connection_row(
 
 fn setting_line(label: &str, value: &str) -> impl IntoElement {
     div()
-        .mt(px(4.0))
-        .min_h(px(42.0))
-        .px(px(12.0))
+        .w_full()
+        .py(px(14.0))
         .flex()
         .items_center()
-        .gap(px(12.0))
+        .gap(px(16.0))
         .border_b_1()
         .border_color(rgb(BORDER))
         .child(
             div()
-                .w(px(148.0))
-                .text_size(px(12.0))
+                .w(px(160.0))
+                .flex_shrink_0()
+                .text_size(px(BODY))
                 .text_color(rgb(TEXT))
                 .child(label.to_owned()),
         )
         .child(
             div()
                 .flex_1()
-                .text_size(px(12.0))
+                .min_w(px(0.0))
+                .text_size(px(LABEL))
                 .text_color(rgb(MUTED))
                 .truncate()
                 .child(value.to_owned()),
@@ -3839,21 +3855,19 @@ fn setting_line(label: &str, value: &str) -> impl IntoElement {
 
 fn setting_row_intro(label: &str, detail: &str) -> impl IntoElement {
     div()
-        .mt(px(10.0))
-        .px(px(12.0))
-        .py(px(10.0))
-        .border_b_1()
-        .border_color(rgb(BORDER))
+        .mt(px(18.0))
         .child(
             div()
-                .text_size(px(12.0))
+                .text_size(px(BODY))
+                .font_weight(WEIGHT_MEDIUM)
                 .text_color(rgb(TEXT))
                 .child(label.to_owned()),
         )
         .child(
             div()
-                .mt(px(3.0))
-                .text_size(px(11.0))
+                .mt(px(4.0))
+                .text_size(px(LABEL))
+                .line_height(px(19.0))
                 .text_color(rgb(MUTED))
                 .child(detail.to_owned()),
         )
@@ -3867,45 +3881,44 @@ fn toggle_line(
     patch: SettingsPatch,
 ) -> impl IntoElement {
     div()
-        .mt(px(4.0))
-        .min_h(px(48.0))
-        .px(px(12.0))
+        .w_full()
+        .py(px(16.0))
         .flex()
         .items_center()
-        .gap(px(12.0))
+        .gap(px(16.0))
         .border_b_1()
         .border_color(rgb(BORDER))
         .child(
             div()
                 .flex_1()
-                .text_size(px(12.0))
+                .min_w(px(0.0))
+                .text_size(px(BODY))
                 .text_color(rgb(TEXT))
                 .child(label),
         )
         .child(
             div()
                 .id(id)
-                .w(px(42.0))
-                .h(px(24.0))
+                .w(px(46.0))
+                .h(px(26.0))
+                .flex_shrink_0()
                 .p(px(3.0))
-                .rounded(px(12.0))
+                .rounded(px(13.0))
                 .flex()
                 .items_center()
                 .when(on, |control| control.justify_end())
                 .when(!on, |control| control.justify_start())
                 .bg(rgb(if on { CYAN } else { 0xc7cbd1 }))
-                .border_1()
-                .border_color(rgb(if on { CYAN } else { 0xc7cbd1 }))
-                .hover(|style| style.border_color(rgb(CYAN)))
+                .cursor_pointer()
                 .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
                     view.send(ClientCommand::UpdateSettings(patch.clone()));
                     cx.notify();
                 }))
                 .child(
                     div()
-                        .w(px(16.0))
-                        .h(px(16.0))
-                        .rounded(px(8.0))
+                        .w(px(20.0))
+                        .h(px(20.0))
+                        .rounded(px(10.0))
                         .bg(rgb(SURFACE)),
                 ),
         )
@@ -3974,6 +3987,35 @@ fn empty_state(
                 .child(detail),
         )
         .children(button)
+}
+
+/// The empty case inside a panel that already owns the border and the surface,
+/// so the two boxes no longer nest inside each other.
+fn inline_empty(title: &'static str, detail: &'static str) -> impl IntoElement {
+    div()
+        .w_full()
+        .min_h(px(180.0))
+        .p(px(32.0))
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(8.0))
+        .child(
+            div()
+                .text_size(px(BODY))
+                .font_weight(WEIGHT_MEDIUM)
+                .text_color(rgb(TEXT))
+                .child(title),
+        )
+        .child(
+            div()
+                .max_w(px(420.0))
+                .text_size(px(LABEL))
+                .line_height(px(19.0))
+                .text_color(rgb(MUTED))
+                .child(detail),
+        )
 }
 
 fn level_color(line: &str) -> u32 {
