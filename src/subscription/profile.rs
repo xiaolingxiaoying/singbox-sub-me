@@ -363,3 +363,36 @@ pub fn client_subscription_matrix() -> Vec<ClientSubscriptionRow> {
         },
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{SING_BOX_VERSION_PROFILES, client_subscription_matrix};
+
+    #[test]
+    fn the_client_matrix_covers_the_mainstream_clients() {
+        let rows = client_subscription_matrix();
+        let clients: Vec<&str> = rows.iter().map(|row| row.client).collect();
+        for client in [
+            "Clash Party",
+            "Clash Verge",
+            "sing-box",
+            "V2rayN",
+            "Shadowrocket",
+        ] {
+            assert!(
+                clients.contains(&client),
+                "the client matrix must cover {client}"
+            );
+        }
+        let sing_box_row = rows
+            .iter()
+            .find(|row| row.client == "sing-box")
+            .expect("the sing-box row exists");
+        // One recommendation per version profile plus sing-box-full.
+        assert_eq!(
+            sing_box_row.formats.len(),
+            SING_BOX_VERSION_PROFILES.len() + 1,
+            "the sing-box row must recommend one format per supported version"
+        );
+    }
+}
