@@ -4,19 +4,17 @@
 
 use crate::cli::args::{CliSubscriptionMode, InstallOptions, SingBoxCommand};
 use crate::cli::commands::{
+    config::{commit_config_change, regenerate, restart, run_config_wizard},
     install::install,
     serve::{print_subscription_qr, print_subscription_urls},
     status::{
         format_local_time, print_nodes, print_status, print_traffic, run_accounting_reset,
         traffic_set_used,
     },
+    system::{rotate_subscription_credential, system_info},
     update::{sing_box, uninstall, update},
 };
 use crate::cli::prompt::ConsolePrompts;
-use crate::{
-    commit_config_change, regenerate, restart, rotate_subscription_credential, run_config_wizard,
-    system_info,
-};
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
