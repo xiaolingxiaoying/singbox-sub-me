@@ -120,12 +120,19 @@ pub fn install_checked_sing_box(root: &Path, candidate: &Path) -> Result<(), Con
     let destination = root.join("usr/local/bin/sing-box");
     let parent = destination.parent().expect("binary path has a parent");
     fs::create_dir_all(parent)?;
-    fs::copy(candidate, &destination)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&destination, fs::Permissions::from_mode(0o755))?;
-    }
+    // Copy beside the target and rename: `fs::copy` truncates the destination in
+    // place, which fails with ETXTBSY while the service is running and can leave
+    // a live process reading a half-written image.
+    let temporary = parent.join(format!(
+        ".{}.new",
+        destination
+            .file_name()
+            .expect("binary path has a file name")
+            .to_string_lossy()
+    ));
+    fs::copy(candidate, &temporary)?;
+    set_executable(&temporary)?;
+    fs::rename(&temporary, &destination)?;
     Ok(())
 }
 
@@ -230,7 +237,12 @@ pub struct PreexistingState {
 pub fn preexisting_state(root: &Path) -> PreexistingState {
     PreexistingState {
         config: root.join("etc/sbctl/config.toml").exists(),
-        data_directory: root.join("var/lib/sbctl").exists(),
+        // The directory alone is not evidence: a rolled-back install leaves the
+        // operation lock in it, and that is state this install created.
+        data_directory: root.join("var/lib/sbctl/state.json").exists()
+            || root.join(OWNERSHIP_MARKER).exists()
+            || root.join("var/lib/sbctl/artifacts").is_dir()
+            || root.join("var/lib/sbctl/certificates").is_dir(),
     }
 }
 
@@ -296,19 +308,21 @@ pub fn rollback_fresh_installation(root: &Path, preexisting: PreexistingState) {
     }
     // Everything under var/lib/sbctl belongs to the failed installation (the
     // pinned certificates, the ACME webroot, the remaining versioned
-    // artifacts, and the operation lock), so it can be removed wholesale.
+    // artifacts, and the operation lock), so it can be removed wholesale —
+    // except the lock file itself, which is what keeps a concurrent transaction
+    // out. See `remove_data_directory_keeping_lock`.
     // etc/sbctl is only pruned when empty: administrator override templates
     // under etc/sbctl/overrides predate the install and must survive.
     if !preexisting.data_directory
-        && let Err(error) = fs::remove_dir_all(root.join("var/lib/sbctl"))
-        && error.kind() != std::io::ErrorKind::NotFound
+        && let Some(warning) = remove_data_directory_keeping_lock(root)
     {
-        warnings.push(format!("var/lib/sbctl: {error}"));
+        warnings.push(warning);
     }
-    for directory in ["var/lib/sbctl", "etc/sing-box"] {
-        if preexisting.data_directory && directory == "var/lib/sbctl" {
-            continue;
-        }
+    // A data directory left holding nothing but the lock stays; one that was
+    // emptied (a fixture root, or a failure before the lock was taken) goes, so
+    // a rolled-back install leaves no trace.
+    let _ = fs::remove_dir(root.join("var/lib/sbctl"));
+    for directory in ["etc/sing-box"] {
         if let Err(error) = fs::remove_dir(root.join(directory))
             && error.kind() != std::io::ErrorKind::NotFound
         {
@@ -389,6 +403,35 @@ pub fn uninstall(root: &Path, purge: bool) -> Result<Option<std::path::PathBuf>,
         remove_directory_if_present(&root.join(BACKUP_ROOT))?;
     }
     Ok(backup)
+}
+
+/// Removes the contents of the data directory but keeps the operation lock.
+///
+/// Deleting the lock file with everything else is not cosmetic: a transaction
+/// still holding it would then be excluded by nothing, because a later acquirer
+/// locks a freshly created inode while the old holder still believes it owns the
+/// deleted one. The directory survives holding only that file, which preflight
+/// does not count as a deployment.
+fn remove_data_directory_keeping_lock(root: &Path) -> Option<String> {
+    let directory = root.join("var/lib/sbctl");
+    let Ok(entries) = fs::read_dir(&directory) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy() == ".operation.lock" {
+            continue;
+        }
+        let path = entry.path();
+        let removed = if path.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        if let Err(error) = removed {
+            return Some(format!("{}: {error}", path.display()));
+        }
+    }
+    None
 }
 
 /// Removes the `ly` convenience symlink only when it points at the sbctl
@@ -504,7 +547,16 @@ fn write_unit(root: &Path, relative_path: &str, contents: &str) -> Result<(), Co
     let path = root.join(relative_path);
     let parent = path.parent().expect("unit path has parent");
     fs::create_dir_all(parent)?;
-    fs::write(path, contents)?;
+    // systemd parses whatever is on disk the next time the unit is referenced,
+    // so an interrupted install must not be able to leave half a unit behind.
+    let temporary = path.with_file_name(format!(
+        ".{}.new",
+        path.file_name()
+            .expect("unit path has a file name")
+            .to_string_lossy()
+    ));
+    fs::write(&temporary, contents)?;
+    fs::rename(&temporary, &path)?;
     Ok(())
 }
 
@@ -920,6 +972,25 @@ mod tests {
             !unit.is_file(),
             "a rollback must still remove what the install created"
         );
+    }
+
+    #[test]
+    fn a_rollback_keeps_the_operation_lock_that_excludes_other_transactions() {
+        let root = tempfile::tempdir().expect("fixture root");
+        let data = root.path().join("var/lib/sbctl");
+        fs::create_dir_all(&data).expect("fixture data directory");
+        let lock = data.join(".operation.lock");
+        fs::write(&lock, "").expect("fixture lock file");
+        fs::write(data.join("state.json"), "created by this install").expect("fixture state");
+
+        rollback_fresh_installation(root.path(), PreexistingState::default());
+
+        assert!(
+            lock.is_file(),
+            "deleting the lock lets a later transaction lock a new inode while an \
+             older holder still believes it owns the deleted one"
+        );
+        assert!(!data.join("state.json").exists());
     }
 
     #[test]

@@ -119,9 +119,14 @@ fn existing_deployment_paths(root: &Path) -> Vec<String> {
         // non-purge uninstall. A fresh install regenerates the subscription
         // credential, every protocol credential and the accounting state, and a
         // failed install deletes everything under these paths, so leftover state
-        // has to stop the install before it touches anything.
+        // has to stop the install before it touches anything. The data directory
+        // itself is not on the list: a rolled-back install leaves only the
+        // operation lock behind, and that is not a deployment.
         "etc/sbctl/config.toml",
-        "var/lib/sbctl",
+        "var/lib/sbctl/state.json",
+        "var/lib/sbctl/ownership",
+        "var/lib/sbctl/artifacts",
+        "var/lib/sbctl/certificates",
     ]
     .into_iter()
     .filter(|path| root.join(path).exists())
