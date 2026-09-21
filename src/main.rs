@@ -895,6 +895,9 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
         };
     }
     let mut installation_started = false;
+    // Snapshot before anything is written: a failed install must not delete
+    // persistent state it did not create.
+    let state_before_install = sbctl::lifecycle::preexisting_state(root);
     let result = (|| {
         sbctl::preflight::preflight(root)
             .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
@@ -1030,7 +1033,7 @@ fn install(root: &Path, options: InstallOptions) -> ExitCode {
         }
         Err(error) => {
             if installation_started {
-                sbctl::lifecycle::rollback_fresh_installation(root);
+                sbctl::lifecycle::rollback_fresh_installation(root, state_before_install);
             }
             eprintln!("installation failed: {error}");
             ExitCode::from(2)
@@ -1982,7 +1985,9 @@ fn serve_subscription(root: &Path, bind: Option<String>, max_requests: Option<us
             ),
             sbctl::config::SubscriptionMode::IpFallback => format!(
                 "{}:{}",
-                config.subscription_host,
+                // An IPv6 bind address is only parseable bracketed; the stored
+                // host stays bare because the generated configs need it that way.
+                sbctl::canonical::uri_host(&config.subscription_host),
                 config.http_port.expect("validated IP fallback port")
             ),
             sbctl::config::SubscriptionMode::Direct => "0.0.0.0:0".to_owned(),

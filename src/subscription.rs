@@ -772,11 +772,14 @@ pub fn route_url(
     let prefix = match config.subscription_mode {
         SubscriptionMode::IpFallback => format!(
             "http://{}:{}",
-            config.subscription_host,
+            crate::canonical::uri_host(&config.subscription_host),
             config.http_port.expect("validated IP fallback port")
         ),
         SubscriptionMode::Direct | SubscriptionMode::ExternalProxy => {
-            format!("https://{}", config.subscription_host)
+            format!(
+                "https://{}",
+                crate::canonical::uri_host(&config.subscription_host)
+            )
         }
     };
     let suffix = match route {
@@ -967,9 +970,10 @@ async fn serve_acme_listener(
     Ok(())
 }
 
-/// Serves the TLS subscription listener on TCP 443. The certificate is
-/// reloaded before every accepted connection, so a Certbot renewal takes
-/// effect on the next handshake without signalling or restarting the service.
+/// Serves the TLS subscription listener on TCP 443. The certificate is reloaded
+/// whenever the pinned material changes, so a Certbot renewal takes effect on
+/// the next handshake without signalling or restarting the service — without
+/// re-parsing the pair for every accepted connection.
 async fn serve_tls_listener(
     listener: TcpListener,
     store: Arc<DeploymentStore>,
@@ -979,6 +983,7 @@ async fn serve_tls_listener(
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
     let counter = Arc::new(AtomicUsize::new(0));
     let mut tls = None;
+    let mut tls_stamp = None;
     loop {
         if max_requests.is_some_and(|max| counter.load(Ordering::Acquire) >= max) {
             break;
@@ -986,18 +991,25 @@ async fn serve_tls_listener(
         let Some(stream) = accept_next(&listener, max_requests).await? else {
             continue;
         };
-        match load_tls_config(&store, &config) {
-            Ok(reloaded) => tls = Some(reloaded),
-            Err(error) => {
-                // A TLS-terminating listener cannot emit an HTTP 5xx: the
-                // certificate is needed before the first HTTP byte. The failure
-                // is instead diagnosed with a redacted log line, and the last
-                // known-good configuration keeps serving until a valid
-                // certificate is pinned again.
-                eprintln!(
-                    "Direct HTTPS certificate unavailable; connection dropped: {}",
-                    redact_secret(&error.to_string(), &config.subscription_credential)
-                )
+        let stamp = crate::certificate::pinned_material_stamp(&store, &config);
+        if tls.is_none() || Some(stamp) != tls_stamp {
+            match load_tls_config(&store, &config) {
+                Ok(reloaded) => {
+                    tls = Some(reloaded);
+                    tls_stamp = Some(stamp);
+                }
+                Err(error) => {
+                    // A TLS-terminating listener cannot emit an HTTP 5xx: the
+                    // certificate is needed before the first HTTP byte. The
+                    // failure is instead diagnosed with a redacted log line, and
+                    // the last known-good configuration keeps serving until a
+                    // valid certificate is pinned again.
+                    tls_stamp = None;
+                    eprintln!(
+                        "Direct HTTPS certificate unavailable; connection dropped: {}",
+                        redact_secret(&error.to_string(), &config.subscription_credential)
+                    )
+                }
             }
         }
         let Some(tls) = tls.clone() else {
@@ -1972,7 +1984,13 @@ fn shadowrocket(
         0
     };
     let mut uris = String::new();
-    for node in nodes {
+    // A URI authority needs IPv6 hosts bracketed; the server and Clash
+    // renderers deliberately keep the bare address.
+    let nodes = nodes
+        .iter()
+        .map(CanonicalNode::with_bracketed_host)
+        .collect::<Vec<_>>();
+    for node in &nodes {
         match &node {
             CanonicalNode::VlessReality {
                 host,
@@ -2066,7 +2084,13 @@ fn uri(config: &DeploymentConfig, nodes: &[CanonicalNode]) -> Result<String, Sub
         0
     };
     let mut uris = String::new();
-    for node in nodes {
+    // A URI authority needs IPv6 hosts bracketed; the server and Clash
+    // renderers deliberately keep the bare address.
+    let nodes = nodes
+        .iter()
+        .map(CanonicalNode::with_bracketed_host)
+        .collect::<Vec<_>>();
+    for node in &nodes {
         match &node {
             CanonicalNode::VlessReality {
                 host,
@@ -2294,9 +2318,9 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::{
-        SING_BOX_VERSION_PROFILES, SubscriptionFormat, clash, clash_legacy,
+        SING_BOX_VERSION_PROFILES, SubscriptionFormat, SubscriptionRoute, clash, clash_legacy,
         client_subscription_matrix, generated_artifacts, latest_version_profile, regenerate,
-        shadowrocket, sing_box, sing_box_full, uri,
+        route_url, shadowrocket, sing_box, sing_box_full, uri,
     };
     use crate::config::{
         DeploymentConfig, DeploymentStore, ManagedProtocol, ProtocolPorts, SubscriptionMode,
@@ -2878,6 +2902,45 @@ mod tests {
             sing_box_row.formats.len(),
             SING_BOX_VERSION_PROFILES.len() + 1,
             "the sing-box row must recommend one format per supported version"
+        );
+    }
+
+    #[test]
+    fn an_ipv6_host_is_bracketed_only_where_a_uri_authority_requires_it() {
+        let config = DeploymentConfig::new_with_ports(
+            SubscriptionMode::IpFallback,
+            "2001:db8::1".into(),
+            None,
+            Some(2080),
+            "ens3".into(),
+            vec![ManagedProtocol::Hysteria2],
+            Some("www.cloudflare.com".into()),
+            ProtocolPorts::default(),
+        )
+        .expect("an IPv6 no-domain deployment is valid");
+        let nodes = crate::canonical::nodes(&config);
+
+        let uri = uri(&config, &nodes).expect("uri artifacts generate");
+        assert!(
+            uri.contains("@[2001:db8::1]:"),
+            "an unbracketed IPv6 authority is not a parseable URI: {uri}"
+        );
+        let url = route_url(&config, SubscriptionRoute::Format(SubscriptionFormat::Uri))
+            .expect("the subscription URL builds");
+        assert!(
+            url.starts_with("http://[2001:db8::1]:2080/sub/"),
+            "the share link must bracket the IPv6 host: {url}"
+        );
+
+        let clash = clash(&config, &nodes).expect("clash artifacts generate");
+        assert!(
+            !clash.contains("[2001:db8::1]"),
+            "configuration fields take a bare address; brackets leak into server fields"
+        );
+        let sing_box = sing_box(&config, &nodes).expect("sing-box artifacts generate");
+        assert!(
+            !sing_box.contains("[2001:db8::1]"),
+            "sing-box `server` must carry the bare address"
         );
     }
 

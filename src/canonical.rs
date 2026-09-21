@@ -21,6 +21,17 @@ fn vless_public_key_from_private(private_key: &str, fallback: &str) -> String {
     }
 }
 
+/// The host as it must appear inside a URI authority. RFC 3986 requires an
+/// IPv6 address to be bracketed there — and an unbracketed IPv6 is not a valid
+/// authority at all, because its colons collide with the port separator — while
+/// every configuration field that holds an address keeps it bare.
+pub fn uri_host(host: &str) -> String {
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(_)) => format!("[{host}]"),
+        _ => host.to_owned(),
+    }
+}
+
 /// A single enabled Managed protocol rendered from the persisted deployment.
 /// Every generated artifact derives its node set, host, port, credentials and
 /// TLS fields from this one canonical model, so the sing-box server
@@ -66,6 +77,22 @@ pub enum CanonicalNode {
 }
 
 impl CanonicalNode {
+    /// The same node with its host ready for a URI authority. Only the URI
+    /// renderers use this: the sing-box server configuration and the Clash
+    /// `server:` field must carry the bare address.
+    pub fn with_bracketed_host(&self) -> CanonicalNode {
+        let bracketed = uri_host(self.host());
+        let mut node = self.clone();
+        match &mut node {
+            Self::VlessReality { host, .. }
+            | Self::VmessWebsocket { host, .. }
+            | Self::Hysteria2 { host, .. }
+            | Self::Tuic { host, .. }
+            | Self::Anytls { host, .. } => *host = bracketed,
+        }
+        node
+    }
+
     pub fn protocol(&self) -> ManagedProtocol {
         match self {
             Self::VlessReality { .. } => ManagedProtocol::VlessReality,

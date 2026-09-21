@@ -177,48 +177,81 @@ fn managed_units(direct: bool) -> Vec<&'static str> {
     units
 }
 
-/// The health check phase of an installation: verifies that every unit the
-/// transaction enabled reports active. The ownership marker is written only
-/// after this passes, so a unit that starts but immediately fails keeps the
-/// installation rolled back instead of leaving a misleading deployment.
+/// The health check phase of an installation: every unit the transaction
+/// enabled must report active for the whole observation window. The ownership
+/// marker is written only after this passes, so a unit that starts but
+/// immediately fails keeps the installation rolled back instead of leaving a
+/// misleading deployment.
 pub fn check_service_health(root: &Path, direct: bool) -> Result<(), String> {
-    // `Type=simple` units report active the instant the process is forked, so
-    // a single is-active probe can race a daemon that crashes right after
-    // startup. A short bounded wait lets a fast-failing unit surface its
-    // failure before the installation is committed.
-    const HEALTH_CHECK_ATTEMPTS: usize = 5;
-    const HEALTH_CHECK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
     for unit in managed_units(direct) {
-        let mut failure = None;
-        for attempt in 0..HEALTH_CHECK_ATTEMPTS {
-            match systemctl(root, &["is-active", "--quiet", unit]) {
-                Ok(()) => {
-                    failure = None;
-                    break;
-                }
-                Err(error) => {
-                    failure = Some(error);
-                    if attempt + 1 < HEALTH_CHECK_ATTEMPTS {
-                        std::thread::sleep(HEALTH_CHECK_RETRY_DELAY);
-                    }
-                }
-            }
-        }
-        if let Some(error) = failure {
+        wait_for_stable_activation(root, unit)?;
+    }
+    Ok(())
+}
+
+/// Probes a unit repeatedly and fails if it is ever seen not active.
+///
+/// `Type=simple` units report active the moment the process forks, and
+/// `Restart=on-failure` brings them back after `RestartSec=2`, so a single
+/// `is-active` probe commits a configuration whose daemon dies a second later
+/// — the crash loop then looks healthy. Probing every 1.1s guarantees at least
+/// one sample lands inside the ≥2s window during which a crashed unit is
+/// failed or activating, which is what catches a fast-failing daemon.
+fn wait_for_stable_activation(root: &Path, unit: &str) -> Result<(), String> {
+    const PROBES: usize = 3;
+    const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1100);
+    for probe in 0..PROBES {
+        if let Err(error) = systemctl(root, &["is-active", "--quiet", unit]) {
             return Err(format!(
-                "unit {unit} did not reach active state: {error}; \
-                 run `systemctl status {unit}` and `journalctl -u {unit} -n 50` for details"
+                "unit {unit} is not staying active: {error}; run `systemctl status {unit}` \
+                 and `journalctl -u {unit} -n 50` for details"
             ));
+        }
+        if probe + 1 < PROBES {
+            std::thread::sleep(PROBE_INTERVAL);
         }
     }
     Ok(())
+}
+
+/// Which persistent state already existed when a fresh install started.
+///
+/// Preflight refuses an install over either of these, so in practice both are
+/// false. The rollback keeps asking anyway: it is the one step that deletes
+/// credentials and accounting history irreversibly, and a hostile or racing
+/// writer that creates them mid-install must not turn a rollback into the
+/// destruction of somebody else's deployment.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PreexistingState {
+    pub config: bool,
+    pub data_directory: bool,
+}
+
+pub fn preexisting_state(root: &Path) -> PreexistingState {
+    PreexistingState {
+        config: root.join("etc/sbctl/config.toml").exists(),
+        data_directory: root.join("var/lib/sbctl").exists(),
+    }
+}
+
+/// True for paths owned by a deployment that predates the transaction being
+/// rolled back, which the rollback must leave alone.
+fn predates_transaction(relative: &str, preexisting: PreexistingState) -> bool {
+    (preexisting.config && relative == "etc/sbctl/config.toml")
+        || (preexisting.data_directory && relative.starts_with("var/lib/sbctl"))
 }
 
 /// Removes only files created by a failed fresh installation. Preflight has
 /// already established that no sing-box deployment existed at these paths.
 /// Failures are collected and reported instead of silently swallowed, so an
 /// incomplete rollback is visible to the administrator.
-pub fn rollback_fresh_installation(root: &Path) {
+pub fn rollback_fresh_installation(root: &Path, preexisting: PreexistingState) {
+    if preexisting.config || preexisting.data_directory {
+        eprintln!(
+            "warning: sbctl configuration or state predates this install, so the rollback left \
+             it in place; run `sbctl uninstall --purge` first to start from a clean slate"
+        );
+    }
     let _ = systemctl(
         root,
         &[
@@ -252,6 +285,9 @@ pub fn rollback_fresh_installation(root: &Path) {
         "var/lib/sbctl/artifacts/subscription-shadowrocket.txt",
         "var/lib/sbctl/state.json",
     ] {
+        if predates_transaction(relative, preexisting) {
+            continue;
+        }
         if let Err(error) = fs::remove_file(root.join(relative))
             && error.kind() != std::io::ErrorKind::NotFound
         {
@@ -263,12 +299,16 @@ pub fn rollback_fresh_installation(root: &Path) {
     // artifacts, and the operation lock), so it can be removed wholesale.
     // etc/sbctl is only pruned when empty: administrator override templates
     // under etc/sbctl/overrides predate the install and must survive.
-    if let Err(error) = fs::remove_dir_all(root.join("var/lib/sbctl"))
+    if !preexisting.data_directory
+        && let Err(error) = fs::remove_dir_all(root.join("var/lib/sbctl"))
         && error.kind() != std::io::ErrorKind::NotFound
     {
         warnings.push(format!("var/lib/sbctl: {error}"));
     }
     for directory in ["var/lib/sbctl", "etc/sing-box"] {
+        if preexisting.data_directory && directory == "var/lib/sbctl" {
+            continue;
+        }
         if let Err(error) = fs::remove_dir(root.join(directory))
             && error.kind() != std::io::ErrorKind::NotFound
         {
@@ -384,8 +424,11 @@ fn unit_has_marker(root: &Path, relative: &str, marker: &str) -> Result<bool, St
 
 pub fn restart_services(root: &Path) -> Result<(), String> {
     systemctl(root, &["restart", "sing-box.service", "sbctl.service"])?;
+    // A configuration change has to survive the same observation window as an
+    // install, or the caller's rollback never triggers for a daemon that dies
+    // just after `restart` returned.
     for unit in ["sing-box.service", "sbctl.service"] {
-        systemctl(root, &["is-active", "--quiet", unit])?;
+        wait_for_stable_activation(root, unit)?;
     }
     Ok(())
 }
@@ -832,4 +875,62 @@ fn grant_certificate_storage(root: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rollback_only_deletes_what_the_failed_install_created() {
+        let root = tempfile::tempdir().expect("fixture root");
+        // Persistent state a previous deployment left behind, e.g. on purpose
+        // via a non-purge uninstall.
+        let state = root.path().join("var/lib/sbctl/state.json");
+        fs::create_dir_all(state.parent().expect("state has a parent"))
+            .expect("fixture state directory");
+        fs::write(&state, "accumulated traffic").expect("fixture state");
+        let config = root.path().join("etc/sbctl/config.toml");
+        fs::create_dir_all(config.parent().expect("config has a parent"))
+            .expect("fixture configuration directory");
+        fs::write(&config, "subscription_credential = 'keep me'").expect("fixture configuration");
+        // And the unit this install did create.
+        let unit = root.path().join("etc/systemd/system/sbctl.service");
+        fs::create_dir_all(unit.parent().expect("unit has a parent"))
+            .expect("fixture unit directory");
+        fs::write(&unit, "[Unit]\n").expect("fixture unit");
+
+        rollback_fresh_installation(
+            root.path(),
+            PreexistingState {
+                config: true,
+                data_directory: true,
+            },
+        );
+
+        assert!(
+            state.is_file(),
+            "a rollback must not delete accounting state it did not create"
+        );
+        assert!(
+            config.is_file(),
+            "a rollback must not delete credentials it did not create"
+        );
+        assert!(
+            !unit.is_file(),
+            "a rollback must still remove what the install created"
+        );
+    }
+
+    #[test]
+    fn a_rollback_of_a_fresh_install_clears_the_data_directory() {
+        let root = tempfile::tempdir().expect("fixture root");
+        let artifacts = root.path().join("var/lib/sbctl/artifacts");
+        fs::create_dir_all(&artifacts).expect("fixture artifact directory");
+        fs::write(artifacts.join("subscription-uri.txt"), "link").expect("fixture artifact");
+
+        rollback_fresh_installation(root.path(), PreexistingState::default());
+
+        assert!(!root.path().join("var/lib/sbctl").exists());
+    }
 }

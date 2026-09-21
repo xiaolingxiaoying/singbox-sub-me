@@ -98,10 +98,10 @@ impl TrafficState {
     pub fn accumulate(mut self, boot_id: &str, rx: u64, tx: u64) -> Self {
         if self.boot_id == boot_id {
             if rx >= self.baseline_rx {
-                self.accumulated_rx += rx - self.baseline_rx;
+                self.accumulated_rx = self.accumulated_rx.saturating_add(rx - self.baseline_rx);
             }
             if tx >= self.baseline_tx {
-                self.accumulated_tx += tx - self.baseline_tx;
+                self.accumulated_tx = self.accumulated_tx.saturating_add(tx - self.baseline_tx);
             }
         }
         self.baseline_rx = rx;
@@ -140,8 +140,8 @@ impl TrafficState {
             0
         };
         (
-            self.accumulated_rx + delta_rx,
-            self.accumulated_tx + delta_tx,
+            self.accumulated_rx.saturating_add(delta_rx),
+            self.accumulated_tx.saturating_add(delta_tx),
         )
     }
 
@@ -154,7 +154,7 @@ impl TrafficState {
                 CorrectionRecord::TotalAdjustment { bytes, .. } => *bytes,
                 CorrectionRecord::SetDirection { .. } => 0,
             })
-            .sum()
+            .fold(0u64, u64::saturating_add)
     }
 }
 
@@ -171,7 +171,12 @@ pub struct TrafficReport {
 
 impl TrafficReport {
     pub fn total(&self) -> u64 {
-        self.received + self.transmitted + self.total_adjustment
+        // An administrator-supplied correction is arbitrary, and this runs
+        // inside the subscription request path: saturating keeps a wild value
+        // from panicking the daemon instead of just reporting nonsense.
+        self.received
+            .saturating_add(self.transmitted)
+            .saturating_add(self.total_adjustment)
     }
 
     pub fn summary(&self) -> String {

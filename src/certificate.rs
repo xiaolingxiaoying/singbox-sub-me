@@ -154,6 +154,24 @@ pub fn load_pinned(
     load_directory_at(&pinned_directory(store, config), config, Utc::now())
 }
 
+/// The modification times of the pinned certificate material. The TLS listener
+/// compares this pair to reload only when Certbot actually replaced the files,
+/// instead of reading, parsing and rebuilding a server configuration for every
+/// accepted connection. Each element is `None` when that file is missing, which
+/// keeps "deleted" distinguishable from "unchanged".
+pub fn pinned_material_stamp(
+    store: &DeploymentStore,
+    config: &DeploymentConfig,
+) -> (Option<std::time::SystemTime>, Option<std::time::SystemTime>) {
+    let directory = pinned_directory(store, config);
+    let stamp = |name: &str| {
+        fs::metadata(directory.join(name))
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    };
+    (stamp("fullchain.pem"), stamp("privkey.pem"))
+}
+
 fn load_directory_at(
     directory: &Path,
     config: &DeploymentConfig,

@@ -418,6 +418,10 @@ pub fn run_topic<C: Prompts>(
             // an unchanged selection does not rewrite the generated node list.
             enabled_protocols =
                 merge_protocol_order(Some(existing.enabled_protocols.as_slice()), &selected);
+            // A protocol the user just switched off still carries its old port
+            // from the prefill above, and validation rejects a port for a
+            // disabled protocol — which would fail the entire edit.
+            clear_ports_for_disabled(&mut ports, &enabled_protocols);
             certificate_mode = ask_required(
                 prompts,
                 "协议证书（1 domain / 2 self-signed）",
@@ -618,6 +622,23 @@ fn merge_protocol_order(
         }
     }
     merged
+}
+
+/// Drops the listener port of every protocol the edit disabled, so a
+/// deselected protocol cannot keep the port it was prefilled with.
+fn clear_ports_for_disabled(ports: &mut ProtocolPorts, enabled: &[ManagedProtocol]) {
+    let requested = [
+        (ManagedProtocol::VlessReality, &mut ports.vless_reality),
+        (ManagedProtocol::VmessWebsocket, &mut ports.vmess_websocket),
+        (ManagedProtocol::Hysteria2, &mut ports.hysteria2),
+        (ManagedProtocol::Tuic, &mut ports.tuic),
+        (ManagedProtocol::Anytls, &mut ports.anytls),
+    ];
+    for (protocol, port) in requested {
+        if !enabled.contains(&protocol) {
+            *port = None;
+        }
+    }
 }
 
 /// Asks a required value, re-prompting until a valid answer is supplied.
@@ -996,6 +1017,44 @@ mod tests {
             outcome,
             WizardOutcome::Unchanged,
             "keeping every protocol enabled must not reorder the node list"
+        );
+    }
+
+    #[test]
+    fn disabling_a_protocol_through_the_topic_clears_its_prefilled_port() {
+        let config = DeploymentConfig::new(
+            SubscriptionMode::IpFallback,
+            "203.0.113.7".into(),
+            None,
+            Some(2080),
+            "ens3".into(),
+            vec![ManagedProtocol::VlessReality, ManagedProtocol::Tuic],
+            Some("www.cloudflare.com".into()),
+        )
+        .expect("a two-protocol deployment is valid");
+        assert!(
+            config
+                .protocol_listener_port(&ManagedProtocol::Tuic)
+                .is_some(),
+            "the fixture needs a persisted TUIC listener to disable"
+        );
+        // Canonical question order is VLESS, VMess, Hysteria2, TUIC, AnyTLS.
+        let answers = ["y", "n", "n", "n", "n"];
+        let mut prompts = ScriptPrompts::new(&answers, &[true]);
+
+        let outcome = run_topic(&config, ConfigurationTopic::Protocols, &mut prompts)
+            .expect("disabling a protocol must not fail validation");
+
+        let WizardOutcome::Changed(updated) = outcome else {
+            panic!("switching TUIC off must produce a changed configuration");
+        };
+        assert_eq!(
+            updated.enabled_protocols,
+            vec![ManagedProtocol::VlessReality]
+        );
+        assert!(
+            updated.tuic.is_none(),
+            "a disabled protocol must not keep the port it was prefilled with"
         );
     }
 

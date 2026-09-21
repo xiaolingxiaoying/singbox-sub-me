@@ -115,6 +115,13 @@ fn existing_deployment_paths(root: &Path) -> Vec<String> {
         "opt/sing-box",
         "etc/systemd/system/sing-box.service",
         "lib/systemd/system/sing-box.service",
+        // sbctl's own persistent state, e.g. left behind on purpose by a
+        // non-purge uninstall. A fresh install regenerates the subscription
+        // credential, every protocol credential and the accounting state, and a
+        // failed install deletes everything under these paths, so leftover state
+        // has to stop the install before it touches anything.
+        "etc/sbctl/config.toml",
+        "var/lib/sbctl",
     ]
     .into_iter()
     .filter(|path| root.join(path).exists())
@@ -293,6 +300,27 @@ mod tests {
         assert_eq!(
             fs::read_to_string(existing_config).expect("preflight preserves the existing config"),
             "administrator configuration"
+        );
+    }
+
+    #[test]
+    fn refuses_an_install_over_sbctl_s_own_leftover_state() {
+        let fixture = supported_systemd_host();
+        let existing_config = fixture.path().join("etc/sbctl/config.toml");
+        fs::create_dir_all(existing_config.parent().expect("config has a parent"))
+            .expect("fixture directory is created");
+        fs::write(&existing_config, "subscription_credential = 'keep me'")
+            .expect("fixture config is written");
+
+        assert_eq!(
+            preflight(fixture.path()),
+            Err(PreflightError::ExistingDeployment(
+                ExistingDeployment::from_artifacts(vec!["etc/sbctl/config.toml".into()])
+            ))
+        );
+        assert_eq!(
+            fs::read_to_string(existing_config).expect("preflight preserves the existing config"),
+            "subscription_credential = 'keep me'"
         );
     }
 
