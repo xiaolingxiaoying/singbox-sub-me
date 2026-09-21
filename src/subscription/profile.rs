@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::fmt;
 
-use super::{
+use super::artifacts::{
     BASE64_URI_ARTIFACT, CLASH_ARTIFACT, SHADOWROCKET_ARTIFACT, SING_BOX_ARTIFACT,
     SING_BOX_FULL_ARTIFACT, URI_ARTIFACT,
 };
