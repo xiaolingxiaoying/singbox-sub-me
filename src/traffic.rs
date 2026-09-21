@@ -250,6 +250,8 @@ pub enum TrafficError {
     Storage(#[from] ConfigError),
     #[error("invalid accounting schedule: {0}")]
     Schedule(&'static str),
+    #[error("no default-route interface was found; pass --interface explicitly")]
+    NoDefaultRoute,
     #[error("accounting state has not been established for the current period")]
     StateMissing,
     #[error(
@@ -533,9 +535,7 @@ pub fn detect_default_route_interface(root: &Path) -> Result<String, TrafficErro
                 && (u32::from_str_radix(columns[3], 16).ok()? & 2) != 0)
                 .then(|| columns[0].to_owned())
         })
-        .ok_or(TrafficError::Schedule(
-            "no default-route interface was found",
-        ))
+        .ok_or(TrafficError::NoDefaultRoute)
 }
 
 /// Whether the named interface is present on this host. The wizard validates
@@ -672,10 +672,11 @@ fn accounting_period(
 }
 
 /// Resolves one local wall-clock time in the accounting timezone. A DST fall
-/// back (ambiguous) resolves to the earlier instant, and a DST spring forward
-/// gap (nonexistent) resolves to the instant one hour later, so a timezone
-/// corner case degrades the reset instant by at most one hour instead of
-/// failing accounting for the entire period.
+/// back (ambiguous) resolves to the earlier instant. A spring-forward gap
+/// (nonexistent) walks forward hour by hour until the time does exist, because
+/// gaps are not all one hour: some zones shift by thirty minutes and a few
+/// changed by two. Degrading the reset instant by a bounded amount is better
+/// than failing accounting for the entire period.
 fn local_datetime(
     timezone: chrono_tz::Tz,
     year: i32,
@@ -684,24 +685,27 @@ fn local_datetime(
     hour: u32,
     minute: u32,
 ) -> Result<DateTime<chrono_tz::Tz>, TrafficError> {
-    match timezone.with_ymd_and_hms(year, month, day, hour, minute, 0) {
-        LocalResult::Single(value) => Ok(value),
-        LocalResult::Ambiguous(earliest, _) => Ok(earliest),
-        LocalResult::None => {
-            let shifted = NaiveDate::from_ymd_opt(year, month, day)
-                .and_then(|date| date.and_hms_opt(hour, minute, 0))
-                .and_then(|naive| naive.checked_add_signed(Duration::hours(1)))
-                .ok_or(TrafficError::Schedule(
-                    "reset time does not exist in the accounting timezone",
-                ))?;
-            timezone
-                .from_local_datetime(&shifted)
-                .earliest()
-                .ok_or(TrafficError::Schedule(
-                    "reset time cannot be resolved in the accounting timezone",
-                ))
+    let naive = NaiveDate::from_ymd_opt(year, month, day)
+        .and_then(|date| date.and_hms_opt(hour, minute, 0))
+        .ok_or(TrafficError::Schedule("reset time is not a valid date"))?;
+    match timezone.from_local_datetime(&naive) {
+        LocalResult::Single(value) => return Ok(value),
+        LocalResult::Ambiguous(earliest, _) => return Ok(earliest),
+        LocalResult::None => {}
+    }
+    for shift in 1..=3u32 {
+        let Some(shifted) = naive.checked_add_signed(Duration::hours(i64::from(shift))) else {
+            break;
+        };
+        if let LocalResult::Single(value) | LocalResult::Ambiguous(value, _) =
+            timezone.from_local_datetime(&shifted)
+        {
+            return Ok(value);
         }
     }
+    Err(TrafficError::Schedule(
+        "reset time does not exist in the accounting timezone",
+    ))
 }
 
 fn anchored_datetime(
@@ -712,12 +716,17 @@ fn anchored_datetime(
     hour: u32,
     minute: u32,
 ) -> Result<DateTime<chrono_tz::Tz>, TrafficError> {
-    let last_day = (NaiveDate::from_ymd_opt(year, month, 1)
+    // Checked, because a clock set near the chrono date limit made the
+    // throwaway `+ 32 days` overflow and panic the accounting path — which the
+    // subscription request path shares.
+    let last_day = NaiveDate::from_ymd_opt(year, month, 1)
         .ok_or(TrafficError::Schedule("invalid reset month"))?
-        + Duration::days(32))
-    .with_day(1)
-    .expect("first day exists")
-        - Duration::days(1);
+        .checked_add_signed(Duration::days(32))
+        .and_then(|crossed| crossed.with_day(1))
+        .and_then(|next_first| next_first.checked_sub_signed(Duration::days(1)))
+        .ok_or(TrafficError::Schedule(
+            "reset month is outside the supported date range",
+        ))?;
     local_datetime(
         timezone,
         year,
@@ -755,8 +764,9 @@ mod tests {
     };
 
     use super::{
-        CorrectionRecord, CorrectionTarget, TrafficState, accounting_period, format_gib,
-        parse_traffic_amount, report_at, reset_at, reset_with_runtime, set_used_at,
+        CorrectionRecord, CorrectionTarget, TrafficState, accounting_period, anchored_datetime,
+        format_gib, local_datetime, parse_traffic_amount, report_at, reset_at, reset_with_runtime,
+        set_used_at,
     };
     use crate::runtime::Runtime;
 
@@ -809,6 +819,23 @@ mod tests {
         let period = accounting_period(&config, now).unwrap();
         assert_eq!(period.identity(), "2024-01-31T09:30:00+00:00");
         assert_eq!(period.next_reset.to_rfc3339(), "2024-02-29T09:30:00+00:00");
+    }
+
+    #[test]
+    fn a_dst_gap_resolves_and_an_out_of_range_month_fails_without_panicking() {
+        let eastern: chrono_tz::Tz = "America/New_York".parse().expect("fixture zone");
+        // 2024-03-10 02:30 does not exist locally. The reset has to land on a
+        // real instant; failing the whole period is worse than a bounded shift,
+        // and zones that skip more than one hour must not error either.
+        let resolved = local_datetime(eastern, 2024, 3, 10, 2, 30).expect("a gap resolves forward");
+        assert_eq!(resolved.format("%H:%M").to_string(), "03:30");
+
+        // The month-end probe used to add 32 days unconditionally, which panicked
+        // inside the subscription request path on a clock set past chrono's
+        // representable range (its internal limit is year 262143, not the
+        // public NaiveDate::MAX of 9999).
+        assert!(anchored_datetime(eastern, 9999, 12, 1, 0, 0).is_ok());
+        assert!(anchored_datetime(eastern, 262143, 12, 1, 0, 0).is_err());
     }
 
     #[test]

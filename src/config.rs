@@ -578,10 +578,14 @@ impl DeploymentConfig {
         }
         if self.interface.is_empty()
             || self.interface.len() > 15
+            || self.interface.starts_with('.')
             || self.interface.bytes().any(|byte| {
                 !(byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-' || byte == b'.')
             })
         {
+            // `.` and `..` satisfy the character set but resolve out of
+            // /sys/class/net, so a typo would read some other device's counters
+            // and report them as this one's.
             return Err(ConfigError::InvalidValue(
                 "interface must be a Linux interface name",
             ));
