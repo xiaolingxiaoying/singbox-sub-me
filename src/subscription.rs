@@ -583,11 +583,42 @@ pub fn apply_config_transaction(
         restore_replaced(store, &prior_artifacts, prior_active.as_deref());
         return Err(SubscriptionError::Storage(error));
     }
+    if let Err(error) = remove_stale_artifacts(store, &artifacts) {
+        eprintln!("warning: superseded subscription artifacts could not be removed: {error}");
+    }
     Ok(DeploymentSnapshot {
         config: prior_config.unwrap_or_default(),
         artifacts: prior_artifacts,
         active_config: prior_active,
     })
+}
+
+/// Removes superseded subscription artifacts.
+///
+/// A skipped version profile — an AnyTLS-only deployment, or a minor later
+/// dropped from the registry — otherwise leaves its previous file on disk,
+/// still reachable at a valid URL and handing a client stale hosts and
+/// credentials with no way to tell it is out of date.
+fn remove_stale_artifacts(
+    store: &DeploymentStore,
+    current: &[(String, String)],
+) -> Result<(), std::io::Error> {
+    let Ok(entries) = fs::read_dir(store.root().join("var/lib/sbctl/artifacts")) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // Only names this generator owns are eligible; anything else an
+        // administrator placed in the directory is left alone.
+        if !(name.starts_with("subscription-") || name == SING_BOX_SERVER_ARTIFACT) {
+            continue;
+        }
+        if current.iter().any(|(kept, _)| *kept == name) {
+            continue;
+        }
+        fs::remove_file(entry.path())?;
+    }
+    Ok(())
 }
 
 /// Restores a previously captured deployment snapshot after a failed service
@@ -747,13 +778,20 @@ pub fn read_authorized(
     ) {
         return Err(SubscriptionError::InvalidCredential);
     }
-    Ok(String::from_utf8_lossy(&fs::read(
+    let contents = fs::read(
         store
             .root()
             .join("var/lib/sbctl/artifacts")
             .join(format.artifact_name().as_ref()),
-    )?)
-    .into_owned())
+    )?;
+    // A corrupted artifact must not go out with replacement characters silently
+    // spliced into a client's configuration; the caller turns this into the
+    // redacted 503.
+    String::from_utf8(contents).map_err(|_| {
+        SubscriptionError::Artifact(std::io::Error::other(
+            "the stored subscription artifact is not valid UTF-8",
+        ))
+    })
 }
 
 pub fn subscription_url(
@@ -1126,7 +1164,13 @@ fn subscription_http_response(
     store: &DeploymentStore,
     config: &DeploymentConfig,
 ) -> Response<Full<Bytes>> {
-    if request.method() != Method::GET || request.uri().query().is_some() {
+    if request.method() != Method::GET {
+        // A probe with HEAD or POST is a client asking about the route, not an
+        // attacker: answering 404 tells it the subscription disappeared, while
+        // 405 tells it to retry with GET.
+        return method_not_allowed_http_response();
+    }
+    if request.uri().query().is_some() {
         return not_found_http_response();
     }
     let Some((credential, route)) = parse_route(request.uri().path()) else {
@@ -1292,6 +1336,16 @@ fn not_found_http_response() -> Response<Full<Bytes>> {
         .header("Connection", "close")
         .body(Full::new(Bytes::new()))
         .expect("valid not-found response")
+}
+
+fn method_not_allowed_http_response() -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(StatusCode::METHOD_NOT_ALLOWED)
+        .header("Allow", "GET")
+        .header("Cache-Control", "no-store")
+        .header("Connection", "close")
+        .body(Full::new(Bytes::new()))
+        .expect("valid method-not-allowed response")
 }
 
 fn parse_route(target: &str) -> Option<(&str, SubscriptionRoute)> {

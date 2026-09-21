@@ -19,7 +19,21 @@ use crate::subscription::{
 /// be produced; the caller turns any failure into a redacted 503. Traffic
 /// reporting failures degrade to a "暂不可用" badge instead.
 pub fn render(store: &DeploymentStore, config: &DeploymentConfig) -> Result<String, String> {
-    let traffic = crate::traffic::report(store, config).ok();
+    let traffic = match crate::traffic::report(store, config) {
+        Ok(traffic) => Some(traffic),
+        Err(error) => {
+            // The page degrades to a "暂不可用" badge, but the reason still has
+            // to reach the journal or an administrator cannot diagnose it.
+            eprintln!(
+                "index page traffic unavailable: {}",
+                crate::subscription::redact_secret(
+                    &error.to_string(),
+                    &config.subscription_credential
+                )
+            );
+            None
+        }
+    };
     let mut client_rows = String::new();
     for row in client_subscription_matrix() {
         client_rows.push_str("<tr><th>");

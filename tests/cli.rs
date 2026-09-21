@@ -2637,6 +2637,10 @@ fn external_proxy_mode_rejects_a_managed_tcp_protocol_port_when_switching_modes(
 }
 
 fn http_get(port: u16, path: &str) -> String {
+    http_request("GET", port, path)
+}
+
+fn http_request(method: &str, port: u16, path: &str) -> String {
     let mut stream = (0..50)
         .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
             Ok(stream) => Some(stream),
@@ -2647,13 +2651,34 @@ fn http_get(port: u16, path: &str) -> String {
         })
         .expect("subscription service accepts connections");
     stream
-        .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+        .write_all(format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
         .expect("request is sent");
     let mut response = String::new();
     stream
         .read_to_string(&mut response)
         .expect("response is readable");
     response
+}
+
+#[test]
+fn a_non_get_subscription_request_is_asked_for_get_rather_than_a_missing_route() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let port = free_high_tcp_port();
+    let credential = initialize_ip_fallback_subscription(&fixture, port);
+    let stderr_log = fixture.path().join("serve.err");
+    let mut server = spawn_sbctl_serve(&fixture, port, 2, &stderr_log);
+
+    let response = http_request("POST", port, &format!("/sub/{credential}/uri"));
+    assert!(
+        response.starts_with("HTTP/1.1 405 Method Not Allowed"),
+        "a probe should learn the method is wrong, not that the subscription vanished: {response}"
+    );
+    assert!(response.contains("allow: GET"), "{response}");
+    assert!(
+        http_get(port, &format!("/sub/{credential}/uri")).starts_with("HTTP/1.1 200 OK"),
+        "the route itself must keep serving GET"
+    );
+    assert!(server.wait().expect("server exits").success());
 }
 
 #[test]
