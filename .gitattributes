@@ -1,1 +1,14 @@
 *.sh text eol=lf
+
+# Nothing below may survive newline translation: a rewritten byte turns an
+# image, binary or signed artefact into garbage that still opens.
+*.png binary
+*.jpg binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.msi binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.wxs text eol=lf

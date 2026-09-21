@@ -137,8 +137,10 @@ TODO：
 - [ ] 若验收失败，按本计划保留 `systemctl status sbctl.service`、`journalctl -u sbctl.service`、
   `ss -ltnp`、脱敏后的 `/etc/sbctl/config.toml` 和各安装/卸载步骤退出状态；修复后重新运行
   三个发行版验收。
-- [ ] 确认候选版本命名。现有 `v0.1.14` tag 已占用且指向旧提交；建议将包版本更新为 `0.1.15`，
-  从通过全部门禁的精确 commit 创建 `v0.1.15` 候选 tag。
+- [ ] 确认候选版本命名。`v0.1.26` 是当前已发布的 tag，其 manifest 仍由公开的开发者密钥签名，
+  且该 release 没有附带 `install.sh`；下一个候选 tag 必须从配置了生产密钥
+  （`vars.SBCTL_RELEASE_PUBLIC_KEY_HEX` 与 `secrets.SBCTL_SIGNING_SEED`）的精确 commit 创建，
+  并确认 `install.sh` 出现在 release 资产里。
 - [ ] 运行 Release workflow，确认 amd64/arm64 build、acceptance 和 package job 全部成功；记录
   tag、commit SHA、Actions 链接、工件 SHA-256 及 sing-box 版本。
 - [ ] 下载同一候选 tag 的 sbctl、sing-box 和 signed manifest，验证 manifest 签名、工件摘要及

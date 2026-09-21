@@ -19,10 +19,16 @@ Thumbs.db
 .kilo/
 .zcode/
 
-# Local artifacts never committed
-sbctl-linux-amd64
+# Local build artefacts, whatever target triple they were built for
+/sbctl-linux-*
+/sbctl-darwin-*
+/sbtui-*
+/ly-*
+*.exe
+*.msi
 .scratch/vps-connectivity-hardening/ssh_run.py
 
 # Local build output and design tooling
 dist/
 .impeccable/
+/.zcodeignore

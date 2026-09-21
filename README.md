@@ -72,12 +72,19 @@ target/release/sbctl
 
 ## 一键安装
 
-在 Debian/Ubuntu VPS 上，首次安装只需一行命令；脚本会先校验发布 manifest 和两个
+在 Debian/Ubuntu VPS 上首次安装只需两条命令；脚本会先校验发布 manifest 和两个
 二进制，再以中文菜单引导选择订阅模式、域名/IP、网卡和协议：
 
 ```bash
-bash <(wget -qO- https://github.com/xiaolingxiaoying/singbox-sub-me/releases/latest/download/install.sh)
+curl -fL -o /tmp/sbctl-install.sh \
+  https://github.com/xiaolingxiaoying/singbox-sub-me/releases/latest/download/install.sh
+test -s /tmp/sbctl-install.sh && bash /tmp/sbctl-install.sh
 ```
+
+不要写成 `bash <(wget -qO- …)`：`wget -q` 在 404 时输出空内容，`bash` 读完空输入
+以 0 退出，安装看起来成功其实什么都没发生。先落盘再 `test -s` 才能把取不到脚本
+和取到空脚本都变成显式失败。`install.sh` 从带生产密钥的那个 release 起才作为资产
+发布；更早的 release 没有它，上面的 `curl -fL` 会直接报错。
 
 脚本默认从最新 GitHub Release 取得与系统架构匹配的 manifest；可通过
 `SBCTL_MANIFEST_URL` 固定到指定版本。保留传递 `sbctl install` 参数的非交互入口，适合
