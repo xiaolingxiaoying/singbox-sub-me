@@ -3,12 +3,19 @@
 //! by the non-interactive install path live in `cli::prompt`, not here.
 
 use crate::cli::args::{CliSubscriptionMode, InstallOptions, SingBoxCommand};
+use crate::cli::commands::{
+    install::install,
+    serve::{print_subscription_qr, print_subscription_urls},
+    status::{
+        format_local_time, print_nodes, print_status, print_traffic, run_accounting_reset,
+        traffic_set_used,
+    },
+    update::{sing_box, uninstall, update},
+};
 use crate::cli::prompt::ConsolePrompts;
 use crate::{
-    commit_config_change, format_local_time, install, print_nodes, print_status,
-    print_subscription_qr, print_subscription_urls, print_traffic, regenerate, restart,
-    rotate_subscription_credential, run_accounting_reset, run_config_wizard, sing_box, system_info,
-    traffic_set_used, uninstall, update,
+    commit_config_change, regenerate, restart, rotate_subscription_credential, run_config_wizard,
+    system_info,
 };
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;

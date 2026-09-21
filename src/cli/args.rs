@@ -446,7 +446,7 @@ fn parse_cli_format(text: &str) -> Result<sbctl::subscription::SubscriptionForma
             }
             Err(format!(
                 "unknown subscription format '{other}'; expected sing-box, sing-box-full, \
-	sing-box-<version>, clash, clash-<version>, uri, base64-uri, or shadowrocket"
+sing-box-<version>, clash, clash-<version>, uri, base64-uri, or shadowrocket"
             ))
         }
     }
