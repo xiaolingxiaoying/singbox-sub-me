@@ -3,7 +3,9 @@
 
 mod connections;
 mod dashboard;
+pub(crate) mod logs;
 pub(crate) mod proxies;
+pub(crate) mod settings;
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
@@ -15,11 +17,11 @@ use crate::app::{App, InputGoal, Tab};
 use crate::format::human_bytes;
 use crate::style::{AMBER, CYAN, EDGE, MINT, MUTED, TEXT, panel, short_label, status_color};
 use crate::system_proxy::TrafficMode;
-use crate::tail_within_width;
 use crate::view::connections::draw_connections;
 use crate::view::dashboard::draw_dashboard;
+use crate::view::logs::{draw_logs, tail_within_width};
 use crate::view::proxies::{draw_proxies, selected_node};
-use crate::{draw_logs, draw_settings};
+use crate::view::settings::draw_settings;
 
 const TAB_TITLES: [&str; 5] = ["概览", "节点", "连接", "日志", "设置"];
 

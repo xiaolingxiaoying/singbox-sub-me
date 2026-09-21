@@ -8,10 +8,9 @@ use crate::ClientCommand;
 use crate::app::{App, ConnSort, InputGoal, Tab};
 use crate::clash_api::Connection;
 use crate::command::SettingsPatch;
-use crate::copy_to_clipboard_osc52;
-use crate::current_log_lines;
-use crate::log_query_matches;
 use crate::system_proxy::TrafficMode;
+use crate::view::logs::{current_log_lines, log_query_matches};
+use crate::view::settings::copy_to_clipboard_osc52;
 
 pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
     // A terminal reports the same `code` for Ctrl+S and for S, so without this

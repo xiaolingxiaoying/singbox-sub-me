@@ -318,3 +318,17 @@ impl App {
         let _ = self.controller.send(command);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tabs_cycle_in_both_directions() {
+        assert_eq!(Tab::Dashboard.next(), Tab::Proxies);
+        assert_eq!(Tab::Settings.next(), Tab::Dashboard);
+        assert_eq!(Tab::Dashboard.previous(), Tab::Settings);
+        assert_eq!(Tab::from_index(2), Some(Tab::Connections));
+        assert_eq!(Tab::from_index(9), None);
+    }
+}
