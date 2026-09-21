@@ -1,7 +1,7 @@
 //! The clap surface of the `sbctl` binary: every argument type, the subcommand
 //! enums, and the `--format` value parser shared by `sub` and `qr`.
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -21,45 +21,8 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Interactively install a fresh sbctl deployment.
     Install {
-        #[arg(long, value_enum, default_value_t = CliSubscriptionMode::Direct)]
-        mode: CliSubscriptionMode,
-        #[arg(long)]
-        subscription_host: Option<String>,
-        #[arg(long)]
-        proxy_host: Option<String>,
-        /// Public HTTP port used only by IP fallback subscription mode.
-        #[arg(long)]
-        http_port: Option<u16>,
-        #[arg(long)]
-        interface: Option<String>,
-        #[arg(long)]
-        reality_decoy_sni: Option<String>,
-        /// Fake TLS server name for the certificate-based protocols in a
-        /// no-domain deployment (defaults to www.bing.com).
-        #[arg(long)]
-        protocol_sni: Option<String>,
-        /// Explicitly omit a Managed protocol; all five are enabled by default.
-        #[arg(long, value_enum)]
-        disable_protocol: Vec<CliManagedProtocol>,
-        /// Optional listener ports for the five Managed protocols.
-        #[arg(long)]
-        vless_port: Option<u16>,
-        #[arg(long)]
-        vmess_port: Option<u16>,
-        #[arg(long)]
-        hysteria2_port: Option<u16>,
-        #[arg(long)]
-        tuic_port: Option<u16>,
-        #[arg(long)]
-        anytls_port: Option<u16>,
-        #[arg(long, value_name = "PATH")]
-        sing_box_bin: Option<PathBuf>,
-        /// Signed release manifest used to download and verify the data plane.
-        #[arg(long, value_name = "PATH")]
-        manifest: Option<PathBuf>,
-        /// Create units and configuration without starting services (acceptance fixture use).
-        #[arg(long, hide = true)]
-        no_start: bool,
+        #[command(flatten)]
+        options: InstallOptions,
     },
     /// Open the interactive management menu for an installed deployment.
     #[command(alias = "m")]
@@ -174,22 +137,49 @@ pub(crate) enum Command {
     },
 }
 
+/// The `install` command's arguments. They live here, flattened into
+/// [`Command::Install`], so the entry point hands them to the handler instead
+/// of destructuring sixteen fields on both sides.
+#[derive(Debug, Args)]
 pub(crate) struct InstallOptions {
+    #[arg(long, value_enum, default_value_t = CliSubscriptionMode::Direct)]
     pub(crate) mode: CliSubscriptionMode,
+    #[arg(long)]
     pub(crate) subscription_host: Option<String>,
+    #[arg(long)]
     pub(crate) proxy_host: Option<String>,
+    /// Public HTTP port used only by IP fallback subscription mode.
+    #[arg(long)]
     pub(crate) http_port: Option<u16>,
+    #[arg(long)]
     pub(crate) interface: Option<String>,
+    #[arg(long)]
     pub(crate) reality_decoy_sni: Option<String>,
+    /// Fake TLS server name for the certificate-based protocols in a
+    /// no-domain deployment (defaults to www.bing.com).
+    #[arg(long)]
     pub(crate) protocol_sni: Option<String>,
+    /// Explicitly omit a Managed protocol; all five are enabled by default.
+    #[arg(long, value_enum)]
     pub(crate) disable_protocol: Vec<CliManagedProtocol>,
+    /// Optional listener ports for the five Managed protocols.
+    #[arg(long)]
     pub(crate) vless_port: Option<u16>,
+    #[arg(long)]
     pub(crate) vmess_port: Option<u16>,
+    #[arg(long)]
     pub(crate) hysteria2_port: Option<u16>,
+    #[arg(long)]
     pub(crate) tuic_port: Option<u16>,
+    #[arg(long)]
     pub(crate) anytls_port: Option<u16>,
+    #[arg(long, value_name = "PATH")]
     pub(crate) sing_box_bin: Option<PathBuf>,
+    /// Signed release manifest used to download and verify the data plane.
+    #[arg(long, value_name = "PATH")]
     pub(crate) manifest: Option<PathBuf>,
+    /// Create units and configuration without starting services (acceptance fixture use).
+    #[arg(long, hide = true)]
     pub(crate) no_start: bool,
 }
 

@@ -5,7 +5,7 @@
 mod cli;
 
 use clap::Parser;
-use cli::args::{Cli, Command, InstallOptions, TrafficCommand};
+use cli::args::{Cli, Command, TrafficCommand};
 use cli::commands::{
     certificate::run_certificate,
     config::{regenerate, restart, run_config},
@@ -49,44 +49,7 @@ fn main() -> ExitCode {
         }
     };
     match command {
-        Command::Install {
-            mode,
-            subscription_host,
-            proxy_host,
-            http_port,
-            interface,
-            reality_decoy_sni,
-            protocol_sni,
-            disable_protocol,
-            vless_port,
-            vmess_port,
-            hysteria2_port,
-            tuic_port,
-            anytls_port,
-            sing_box_bin,
-            manifest,
-            no_start,
-        } => install(
-            root,
-            InstallOptions {
-                mode,
-                subscription_host,
-                proxy_host,
-                http_port,
-                interface,
-                reality_decoy_sni,
-                protocol_sni,
-                disable_protocol,
-                vless_port,
-                vmess_port,
-                hysteria2_port,
-                tuic_port,
-                anytls_port,
-                sing_box_bin,
-                manifest,
-                no_start,
-            },
-        ),
+        Command::Install { options } => install(root, options),
         Command::Menu => menu(root),
         Command::Status { json } => {
             if json {
