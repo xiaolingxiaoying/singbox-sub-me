@@ -11,6 +11,10 @@ use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
 
+/// Taken from the implementation so a moved rollback location fails the suite
+/// instead of quietly turning every "no rollback point" assertion into a tautology.
+use sbctl::update::ROLLBACK_ROOT;
+
 #[test]
 fn status_reports_an_unmanaged_host_before_installation() {
     Command::cargo_bin("sbctl")
@@ -87,7 +91,7 @@ fn update_rejects_an_artifact_that_does_not_match_the_fixed_manifest() {
             "does not match the pinned release manifest",
         ));
 
-    assert!(!fixture.path().join("var/lib/sbctl/rollback").exists());
+    assert!(!fixture.path().join(ROLLBACK_ROOT).exists());
     assert!(!fixture.path().join("usr/local/bin/sbctl").exists());
 }
 
@@ -155,7 +159,7 @@ fn failed_update_health_check_restores_the_known_good_binaries_and_keeps_a_rollb
         .expect("old artifact is restored"),
         old_artifact
     );
-    let rollback_root = fixture.path().join("var/lib/sbctl/rollback");
+    let rollback_root = fixture.path().join(ROLLBACK_ROOT);
     let rollback_point = fs::read_dir(&rollback_root)
         .expect("rollback directory is readable")
         .next()
@@ -218,7 +222,7 @@ fn failed_candidate_configuration_check_leaves_the_known_good_binaries_untouched
         fs::read(fixture.path().join("usr/local/bin/sing-box")).expect("old sing-box is preserved"),
         old_sing_box
     );
-    assert!(!fixture.path().join("var/lib/sbctl/rollback").exists());
+    assert!(!fixture.path().join(ROLLBACK_ROOT).exists());
 }
 
 #[test]
@@ -241,7 +245,7 @@ fn update_check_rejects_an_unsigned_manifest_without_trusting_its_urls_or_digest
         .code(2)
         .stderr(predicate::str::contains("unsigned"));
 
-    assert!(!fixture.path().join("var/lib/sbctl/rollback").exists());
+    assert!(!fixture.path().join(ROLLBACK_ROOT).exists());
     assert!(!fixture.path().join("usr/local/bin/sbctl").exists());
 }
 
@@ -266,7 +270,7 @@ fn update_rejects_a_corrupted_signature_before_any_download_or_replacement() {
         .stderr(predicate::str::contains("signature is invalid"))
         .stderr(predicate::str::contains("download").not());
 
-    assert!(!fixture.path().join("var/lib/sbctl/rollback").exists());
+    assert!(!fixture.path().join(ROLLBACK_ROOT).exists());
     assert!(!fixture.path().join("usr/local/bin/sbctl").exists());
 }
 
@@ -339,7 +343,7 @@ fn update_rejects_a_sing_box_outside_the_compatibility_matrix_before_replacement
         .code(2)
         .stderr(predicate::str::contains("outside the compatibility matrix"));
 
-    assert!(!fixture.path().join("var/lib/sbctl/rollback").exists());
+    assert!(!fixture.path().join(ROLLBACK_ROOT).exists());
     assert!(!fixture.path().join("usr/local/bin/sbctl").exists());
     assert!(!fixture.path().join("usr/local/bin/sing-box").exists());
 }

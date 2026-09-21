@@ -1368,6 +1368,39 @@ impl DeploymentStore {
         enforce_live_file_owner(&self.root, &path)
     }
 
+    /// Writes a copy that stays root-only. Rollback points contain every
+    /// credential in the deployment — the subscription credential, the data
+    /// plane's node credentials and the TLS private key — so they must not be
+    /// delegated to the unprivileged service account that owns the live file
+    /// they were copied from; the two accounts are separate on purpose.
+    pub fn write_root_only_locked(
+        &self,
+        relative: &str,
+        contents: &[u8],
+    ) -> Result<(), ConfigError> {
+        let path = safe_managed_path(&self.root, relative)?;
+        atomic_write(&path, contents)?;
+        if self.root != Path::new("/") {
+            return Ok(());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let status = std::process::Command::new("chown")
+                .args(["root:root", &path.to_string_lossy()])
+                .status()
+                .map_err(ConfigError::Storage)?;
+            if !status.success() {
+                return Err(ConfigError::Storage(io::Error::other(format!(
+                    "chown root:root exited with {status}"
+                ))));
+            }
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .map_err(ConfigError::Storage)?;
+        }
+        Ok(())
+    }
+
     fn write_artifact_unlocked(&self, name: &str, contents: &[u8]) -> Result<(), ConfigError> {
         if name.is_empty() || Path::new(name).components().count() != 1 {
             return Err(ConfigError::InvalidValue(

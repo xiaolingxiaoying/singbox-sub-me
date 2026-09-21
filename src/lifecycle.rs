@@ -578,7 +578,7 @@ fn remove_empty_directory_if_present(path: &Path) -> Result<(), String> {
     }
 }
 
-fn set_private_directory_permissions(path: &Path) -> Result<(), String> {
+pub(crate) fn set_private_directory_permissions(path: &Path) -> Result<(), String> {
     #[cfg(not(unix))]
     let _ = path;
     #[cfg(unix)]

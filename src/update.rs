@@ -467,7 +467,7 @@ pub fn install_candidate_sing_box(
     crate::subscription::check_sing_box_config(candidate, &server_config)
         .map_err(|error| UpdateError::SingBoxCheck(error.to_string()))?;
 
-    let rollback = rollback_directory(store.root());
+    let rollback = rollback_directory(store.root())?;
     let backup = backup(store, &rollback, &config)?;
     write_managed_binary(store, "usr/local/bin/sing-box", verified_contents)?;
     if let Err(error) = crate::lifecycle::restart_sing_box_service(store.root()) {
@@ -511,7 +511,7 @@ pub fn apply(
     crate::subscription::check_sing_box_config(sing_box_candidate, &server_config)
         .map_err(|error| UpdateError::SingBoxCheck(error.to_string()))?;
 
-    let rollback = rollback_directory(store.root());
+    let rollback = rollback_directory(store.root())?;
     let backup = backup(store, &rollback, &config)?;
     write_managed_binary(store, "usr/local/bin/sbctl", &sbctl_contents)?;
     if let Err(error) = write_managed_binary(store, "usr/local/bin/sing-box", &sing_box_contents) {
@@ -586,7 +586,7 @@ fn backup(
                     .expect("rollback path is inside the managed root")
                     .to_str()
                     .expect("managed rollback path is UTF-8");
-                store.write_relative_locked(backup_relative, &contents)?;
+                store.write_root_only_locked(backup_relative, &contents)?;
                 Some(contents)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -639,13 +639,53 @@ fn set_executable(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn rollback_directory(root: &Path) -> PathBuf {
+/// Rollback points live outside `var/lib/sbctl` on purpose: that whole tree is
+/// chowned to the unprivileged sbctl account by the daemon-storage preparation,
+/// and a rollback copy holds the data plane's credentials and the TLS private
+/// key. `var/backups/sbctl` is root-only and is what an uninstall already uses
+/// for the same reason. Public because failure messages point administrators at
+/// it, and the black-box suite asserts against it rather than a copy.
+pub const ROLLBACK_ROOT: &str = "var/backups/sbctl/rollback";
+
+/// Each generation copies every managed path, including two multi-megabyte
+/// binaries. Without a ceiling an update loop fills the disk, and every atomic
+/// write and accounting save then fails behind it.
+const ROLLBACK_GENERATIONS_KEPT: usize = 3;
+
+fn rollback_directory(root: &Path) -> Result<PathBuf, UpdateError> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    root.join("var/lib/sbctl/rollback")
-        .join(timestamp.to_string())
+    let destination = root.join(ROLLBACK_ROOT).join(timestamp.to_string());
+    fs::create_dir_all(&destination)?;
+    crate::lifecycle::set_private_directory_permissions(&destination)
+        .map_err(UpdateError::Operation)?;
+    prune_rollback_history(root)?;
+    Ok(destination)
+}
+
+/// Removes rollback points older than the kept window. Generation names are
+/// nanoseconds since the epoch, so the name sorts as the time.
+fn prune_rollback_history(root: &Path) -> Result<(), UpdateError> {
+    let Ok(entries) = fs::read_dir(root.join(ROLLBACK_ROOT)) else {
+        return Ok(());
+    };
+    let mut generations: Vec<_> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .collect();
+    generations.sort_by_key(|entry| entry.file_name());
+    let removable = generations.len().saturating_sub(ROLLBACK_GENERATIONS_KEPT);
+    for stale in generations.iter().take(removable) {
+        if let Err(error) = fs::remove_dir_all(stale.path()) {
+            eprintln!(
+                "warning: could not remove the old rollback point {}: {error}",
+                stale.path().display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn verify_artifact(name: &'static str, path: &Path, expected: &str) -> Result<(), UpdateError> {
@@ -688,6 +728,36 @@ fn check_sbctl_candidate(candidate: &Path) -> Result<(), UpdateError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rollback_history_keeps_only_the_newest_generations() {
+        let root = tempfile::tempdir().expect("fixture root");
+        let base = root.path().join(ROLLBACK_ROOT);
+        for generation in 1..=6 {
+            fs::create_dir_all(base.join(format!("{generation:020}"))).expect("fixture generation");
+        }
+
+        prune_rollback_history(root.path()).expect("pruning a fixture tree");
+
+        let kept: Vec<String> = fs::read_dir(&base)
+            .expect("rollback root")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            kept.len(),
+            ROLLBACK_GENERATIONS_KEPT,
+            "an unbounded history fills the disk behind every later write"
+        );
+        assert!(kept.contains(&"00000000000000000006".to_owned()));
+        assert!(!kept.contains(&"00000000000000000001".to_owned()));
+    }
+
+    #[test]
+    fn rollback_history_of_an_unupdated_host_is_not_an_error() {
+        let root = tempfile::tempdir().expect("fixture root");
+        prune_rollback_history(root.path()).expect("a missing rollback root is fine");
+    }
 
     #[cfg(unix)]
     #[test]
