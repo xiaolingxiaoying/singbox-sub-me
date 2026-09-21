@@ -3,4 +3,5 @@
 //! handlers that `main` dispatches to.
 
 pub(crate) mod args;
+pub(crate) mod menu;
 pub(crate) mod prompt;
