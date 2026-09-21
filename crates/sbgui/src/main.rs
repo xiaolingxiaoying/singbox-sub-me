@@ -90,7 +90,7 @@ const DATA_DIR: &str = "sbgui";
 /// the titlebar. The same file is compiled into the exe as the Win32 icon.
 const BRAND_ICON_PATH: &str = "serein.ico";
 
-struct SereinAssets;
+pub(crate) struct SereinAssets;
 
 impl AssetSource for SereinAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
@@ -107,7 +107,7 @@ impl AssetSource for SereinAssets {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Page {
+pub(crate) enum Page {
     Dashboard,
     Subscriptions,
     Proxies,
@@ -144,7 +144,7 @@ impl Page {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Tone {
+pub(crate) enum Tone {
     Accent,
     Neutral,
     Warning,
@@ -152,7 +152,7 @@ enum Tone {
 
 /// What the user chose to do with the OS proxy when closing the window.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ExitChoice {
+pub(crate) enum ExitChoice {
     /// Leave the OS proxy pointing at the local port.
     Keep,
     /// Restore the captured pre-install proxy state, then close.
@@ -161,7 +161,7 @@ enum ExitChoice {
 
 /// The text fields the window renders, indexing `Sbgui::inputs`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum InputField {
+pub(crate) enum InputField {
     ConnFilter,
     LogQuery,
     ProxySearch,
@@ -174,7 +174,7 @@ enum InputField {
     CoreVersion,
 }
 
-const INPUT_FIELDS: [InputField; 10] = [
+pub(crate) const INPUT_FIELDS: [InputField; 10] = [
     InputField::ConnFilter,
     InputField::LogQuery,
     InputField::ProxySearch,
@@ -192,23 +192,23 @@ const INPUT_FIELDS: [InputField; 10] = [
 /// the end — the same model the TUI's input overlay uses — and the typed
 /// character comes from the keystroke's `key_char`. IME composition (typing
 /// Chinese into a field) is not handled yet; filters and settings are ASCII.
-struct TextField {
-    focus: FocusHandle,
-    text: String,
+pub(crate) struct TextField {
+    pub(crate) focus: FocusHandle,
+    pub(crate) text: String,
 }
 
 /// The render-time identity of one field, bundled so field helpers stay
 /// readable (`text_field(spec, window, cx)`).
-struct FieldSpec {
-    field: InputField,
-    id: &'static str,
-    placeholder: &'static str,
-    width: f32,
+pub(crate) struct FieldSpec {
+    pub(crate) field: InputField,
+    pub(crate) id: &'static str,
+    pub(crate) placeholder: &'static str,
+    pub(crate) width: f32,
 }
 
 /// The logs-page level filter, mirroring the TUI's `info+`/`warn+`/`error`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum LogLevelFilter {
+pub(crate) enum LogLevelFilter {
     #[default]
     All,
     Debug,
@@ -231,7 +231,7 @@ impl LogLevelFilter {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum SettingsSection {
+pub(crate) enum SettingsSection {
     #[default]
     General,
     Network,
@@ -268,46 +268,46 @@ impl SettingsSection {
     }
 }
 
-struct Sbgui {
-    controller: ClientController,
-    data_dir: PathBuf,
-    snapshot: ClientSnapshot,
-    page: Page,
-    group_index: usize,
+pub(crate) struct Sbgui {
+    pub(crate) controller: ClientController,
+    pub(crate) data_dir: PathBuf,
+    pub(crate) snapshot: ClientSnapshot,
+    pub(crate) page: Page,
+    pub(crate) group_index: usize,
     /// Set while the exit confirmation overlay is visible.
-    confirm_exit: bool,
+    pub(crate) confirm_exit: bool,
     /// The exit decision, once made; a set choice lets the window close.
-    exit_choice: Option<ExitChoice>,
+    pub(crate) exit_choice: Option<ExitChoice>,
     /// Text fields, indexed by `InputField as usize`.
-    inputs: [TextField; INPUT_FIELDS.len()],
+    pub(crate) inputs: [TextField; INPUT_FIELDS.len()],
     /// The logs-page level filter.
-    log_level: LogLevelFilter,
-    settings_section: SettingsSection,
-    show_subscription_import: bool,
-    show_rule_sets: bool,
+    pub(crate) log_level: LogLevelFilter,
+    pub(crate) settings_section: SettingsSection,
+    pub(crate) show_subscription_import: bool,
+    pub(crate) show_rule_sets: bool,
     /// Rules pages are walls of text on a real subscription: the list starts
     /// capped and the user opens the rest on demand.
-    show_all_rules: bool,
+    pub(crate) show_all_rules: bool,
     /// Same cap for the connection list, which grows without bound.
-    show_all_connections: bool,
-    core_menu_open: bool,
-    node_card_view: bool,
-    paused_connections: Option<Vec<Connection>>,
-    selected_connection: Option<String>,
+    pub(crate) show_all_connections: bool,
+    pub(crate) core_menu_open: bool,
+    pub(crate) node_card_view: bool,
+    pub(crate) paused_connections: Option<Vec<Connection>>,
+    pub(crate) selected_connection: Option<String>,
     /// Scroll position of the log panel, so "自动滚动" can pin the view to the
     /// newest line instead of being a label that does nothing.
-    log_scroll: ScrollHandle,
+    pub(crate) log_scroll: ScrollHandle,
     /// Row count of the last rendered log panel; a change means new lines.
-    log_rows: std::cell::Cell<usize>,
+    pub(crate) log_rows: std::cell::Cell<usize>,
     /// Minute of the last repaint: `age_label` renders relative times from the
     /// wall clock at paint time, so a quiet snapshot still needs one repaint per
     /// minute or those labels freeze.
-    painted_minute: u64,
-    log_wrap: bool,
-    log_follow: bool,
-    confirm_close_all: bool,
+    pub(crate) painted_minute: u64,
+    pub(crate) log_wrap: bool,
+    pub(crate) log_follow: bool,
+    pub(crate) confirm_close_all: bool,
     /// A profile name whose delete button is armed waiting for a second click.
-    confirm_delete_profile: Option<String>,
+    pub(crate) confirm_delete_profile: Option<String>,
 }
 
 /// Visual-review seams read once at startup. Ordinary launches never set
