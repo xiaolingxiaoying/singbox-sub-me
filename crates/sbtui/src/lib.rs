@@ -16,7 +16,9 @@ pub use client_core::{ClientCommand, ClientController, ClientError, ClientEvent,
 /// reuse exactly the same clash_api client, core manager, settings store,
 /// subscription handling and OS-proxy integration. Re-exported at the crate
 /// root so existing `crate::clash_api::…` paths keep working.
-pub use client_core::{clash_api, command, core, settings, state, subscription, system_proxy};
+pub use client_core::{
+    clash_api, command, core, format, settings, state, subscription, system_proxy,
+};
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -35,8 +37,8 @@ use ratatui::widgets::{
 
 use crate::clash_api::{Connection, SELECTOR_TAG};
 use crate::command::SettingsPatch;
+use crate::format::{DelayLevel, age_label, delay_level, human_bytes, usage_label};
 use crate::state::{LogLevel, ProxyGroupSnapshot, TrafficPoint, log_level_shown};
-use crate::subscription::SubscriptionUserinfo;
 use crate::system_proxy::TrafficMode;
 
 const TAB_TITLES: [&str; 5] = ["概览", "节点", "连接", "日志", "设置"];
@@ -1452,11 +1454,11 @@ fn log_query_matches(query: &str, line: &str) -> bool {
 }
 
 fn delay_color(delay: Option<u64>) -> Color {
-    match delay {
-        Some(d) if d < 200 => MINT,
-        Some(d) if d < 500 => AMBER,
-        Some(_) => DANGER,
-        None => MUTED,
+    match delay_level(delay) {
+        DelayLevel::Fast => MINT,
+        DelayLevel::Slow => AMBER,
+        DelayLevel::Timeout => DANGER,
+        DelayLevel::Unknown => MUTED,
     }
 }
 
@@ -1623,7 +1625,7 @@ fn draw_dashboard(frame: &mut Frame, area: ratatui::prelude::Rect, app: &App) {
         Line::from(""),
         Line::from(Span::styled("订阅状态", Style::default().fg(MUTED))),
         Line::from(Span::styled(
-            usage_label(app.snapshot.subscription_usage),
+            usage_label(app.snapshot.subscription_usage.as_ref()),
             Style::default().fg(TEXT),
         )),
         Line::from(""),
@@ -2080,7 +2082,7 @@ fn draw_settings(frame: &mut Frame, area: ratatui::prelude::Rect, app: &mut App)
         Line::from(format!(
             "系统代理后端: {}   订阅用量: {}",
             system_proxy::platform_label(),
-            usage_label(app.snapshot.subscription_usage)
+            usage_label(app.snapshot.subscription_usage.as_ref())
         )),
         Line::from(""),
         Line::from("档案: n 新增 ｜ f 本地文件 ｜ e 改链接 ｜ Delete 删除 ｜ Enter 激活"),
@@ -2100,77 +2102,9 @@ fn copy_to_clipboard_osc52(text: &str) {
     let _ = std::io::stdout().flush();
 }
 
-fn human_bytes(value: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut value = value as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{value:.0} {}", UNITS[unit])
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
-}
-
-/// A one-line rendering of the subscription's traffic metadata.
-fn usage_label(usage: Option<SubscriptionUserinfo>) -> String {
-    let Some(usage) = usage else {
-        return "未知（更新订阅后显示）".to_owned();
-    };
-    let mut text = match usage.remaining() {
-        Some(remaining) => format!(
-            "已用 {} / {}（剩余 {}）",
-            human_bytes(usage.used()),
-            human_bytes(usage.total),
-            human_bytes(remaining)
-        ),
-        None => format!("已用 {}（未设配额）", human_bytes(usage.used())),
-    };
-    if let Some(expire) = usage.expire {
-        let now = now_epoch();
-        if expire > now {
-            text.push_str(&format!(" · {} 天后重置", (expire - now) / 86_400));
-        } else {
-            text.push_str(" · 已到期");
-        }
-    }
-    text
-}
-
-fn age_label(epoch_seconds: u64) -> String {
-    if epoch_seconds == 0 {
-        return "从未".to_owned();
-    }
-    let age = now_epoch().saturating_sub(epoch_seconds);
-    if age < 3600 {
-        format!("{} 分钟前", age / 60)
-    } else if age < 86_400 {
-        format!("{} 小时前", age / 3600)
-    } else {
-        format!("{} 天前", age / 86_400)
-    }
-}
-
-fn now_epoch() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn human_bytes_progresses_through_units() {
-        assert_eq!(human_bytes(512), "512 B");
-        assert_eq!(human_bytes(2048), "2.0 KiB");
-        assert_eq!(human_bytes(3 * 1024 * 1024), "3.0 MiB");
-    }
 
     #[test]
     fn tabs_cycle_in_both_directions() {
@@ -2179,13 +2113,6 @@ mod tests {
         assert_eq!(Tab::Dashboard.previous(), Tab::Settings);
         assert_eq!(Tab::from_index(2), Some(Tab::Connections));
         assert_eq!(Tab::from_index(9), None);
-    }
-
-    #[test]
-    fn age_label_distinguishes_never_from_recent() {
-        assert_eq!(age_label(0), "从未");
-        let now = now_epoch();
-        assert_eq!(age_label(now - 90), "1 分钟前");
     }
 
     #[test]
@@ -2224,23 +2151,6 @@ mod tests {
             "节点",
             "wide characters take two columns each"
         );
-    }
-
-    #[test]
-    fn usage_label_reports_the_reset_window() {
-        let usage = subscription::SubscriptionUserinfo {
-            upload: 0,
-            download: 0,
-            total: 1024,
-            expire: Some(now_epoch() + 3 * 86_400),
-        };
-        let label = usage_label(Some(usage));
-        assert!(label.contains("3 天后重置"), "unexpected label: {label}");
-        let expired = subscription::SubscriptionUserinfo {
-            expire: Some(now_epoch().saturating_sub(10)),
-            ..usage
-        };
-        assert!(usage_label(Some(expired)).contains("已到期"));
     }
 
     fn connection(host: &str, rule: &str) -> Connection {

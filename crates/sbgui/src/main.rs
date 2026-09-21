@@ -24,6 +24,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use client_core::clash_api::Connection;
 use client_core::command::SettingsPatch;
+use client_core::format::DelayLevel;
+use client_core::format::{age_label, delay_level, human_bytes, usage_label};
 use client_core::settings::{self, Profiles, Settings};
 use client_core::state::{ClientSnapshot, LogLevel, ProxyGroupSnapshot, RouteRuleSnapshot};
 use client_core::system_proxy;
@@ -1501,10 +1503,9 @@ impl Sbgui {
                                             .child(format!("{profile} · {current}")),
                                     ),
                             )
-                            .children(
-                                current_delay
-                                    .map(|delay| pill(format!("{delay} ms"), delay_color(delay))),
-                            ),
+                            .children(current_delay.map(|delay| {
+                                pill(format!("{delay} ms"), delay_color(Some(delay)))
+                            })),
                     )
                     // First-run guidance lives inside the same card rather than
                     // stacking a second one above the state it explains.
@@ -1926,11 +1927,7 @@ impl Sbgui {
                         .map(|d| format!("{d} ms"))
                         .unwrap_or_else(|| "测试".to_owned())
                 };
-                let color = if failed {
-                    DANGER
-                } else {
-                    delay.map(delay_color).unwrap_or(CYAN)
-                };
+                let color = if failed { DANGER } else { delay_color(delay) };
                 let group_name = group.name.clone();
                 let node_name = member.clone();
                 let test_name = member.clone();
@@ -3366,22 +3363,6 @@ fn tone_colors(tone: Tone) -> (u32, u32, u32) {
     }
 }
 
-fn usage_label(usage: Option<&client_core::subscription::SubscriptionUserinfo>) -> String {
-    let Some(usage) = usage else {
-        return "用量信息待更新".to_owned();
-    };
-    let used = usage.used();
-    match usage.remaining() {
-        Some(remaining) => format!(
-            "已用 {} / {} · 剩余 {}",
-            human_bytes(used),
-            human_bytes(usage.total),
-            human_bytes(remaining)
-        ),
-        None => format!("已用 {} · 未设置配额", human_bytes(used)),
-    }
-}
-
 fn pill(label: impl Into<String>, color: u32) -> impl IntoElement {
     div()
         .px(px(9.0))
@@ -4029,13 +4010,12 @@ fn level_color(line: &str) -> u32 {
     }
 }
 
-fn delay_color(delay: u64) -> u32 {
-    if delay < 200 {
-        MINT
-    } else if delay < 500 {
-        AMBER
-    } else {
-        DANGER
+fn delay_color(delay: Option<u64>) -> u32 {
+    match delay_level(delay) {
+        DelayLevel::Fast => MINT,
+        DelayLevel::Slow => AMBER,
+        DelayLevel::Timeout => DANGER,
+        DelayLevel::Unknown => CYAN,
     }
 }
 
@@ -4073,39 +4053,6 @@ fn connection_chain(connection: &Connection) -> String {
             .map(|value| clean_proxy_label(value))
             .collect::<Vec<_>>()
             .join(" → ")
-    }
-}
-
-fn human_bytes(value: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut value = value as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{value:.0} {}", UNITS[unit])
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
-}
-
-fn age_label(epoch_seconds: u64) -> String {
-    if epoch_seconds == 0 {
-        return "从未更新".to_owned();
-    }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let age = now.saturating_sub(epoch_seconds);
-    if age < 3600 {
-        format!("{} 分钟前", age / 60)
-    } else if age < 86_400 {
-        format!("{} 小时前", age / 3600)
-    } else {
-        format!("{} 天前", age / 86_400)
     }
 }
 

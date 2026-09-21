@@ -11,6 +11,7 @@ pub mod command;
 pub mod controller;
 pub mod core;
 pub mod event;
+pub mod format;
 pub mod settings;
 pub mod state;
 pub mod subscription;

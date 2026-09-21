@@ -9,12 +9,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
 use crate::clash_api::ClashApi;
+use crate::format::now_epoch;
 use crate::settings::{self, Profiles, Settings};
 use crate::state::{ClientSnapshot, ProfileSummary, ProxyGroupSnapshot};
 use crate::system_proxy::{self, TrafficMode};
@@ -1284,13 +1285,6 @@ fn unique_profile_name<'a>(base: &str, existing: impl Iterator<Item = &'a str>) 
         }
     }
     unreachable!("an index always frees the name")
-}
-
-fn now_epoch() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 /// Removes ANSI escape sequences (sing-box colors its log lines) so the
