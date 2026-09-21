@@ -984,6 +984,7 @@ async fn serve_tls_listener(
     let counter = Arc::new(AtomicUsize::new(0));
     let mut tls = None;
     let mut tls_stamp = None;
+    let mut tls_failure: Option<(String, std::time::Instant)> = None;
     loop {
         if max_requests.is_some_and(|max| counter.load(Ordering::Acquire) >= max) {
             break;
@@ -1005,10 +1006,24 @@ async fn serve_tls_listener(
                     // the last known-good configuration keeps serving until a
                     // valid certificate is pinned again.
                     tls_stamp = None;
-                    eprintln!(
-                        "Direct HTTPS certificate unavailable; connection dropped: {}",
-                        redact_secret(&error.to_string(), &config.subscription_credential)
-                    )
+                    let message =
+                        redact_secret(&error.to_string(), &config.subscription_credential);
+                    // One line per accepted connection turns a broken
+                    // certificate into a flood that buries everything else, so
+                    // repeat at most once a minute — or at once when the reason
+                    // changes.
+                    let due = match &tls_failure {
+                        None => true,
+                        Some((previous, at)) => {
+                            *previous != message || at.elapsed() >= Duration::from_secs(60)
+                        }
+                    };
+                    if due {
+                        eprintln!(
+                            "Direct HTTPS certificate unavailable; connection dropped: {message}"
+                        );
+                        tls_failure = Some((message, std::time::Instant::now()));
+                    }
                 }
             }
         }
@@ -2199,10 +2214,10 @@ fn certificate_tls_config(
 }
 
 /// Generates and pins a long-lived self-signed certificate for the subscription
-/// host, or reuses the pinned copy. The certificate stays valid for 36500 days,
-/// matching the sing-box-yg default, so the proxy listeners never break on an
-/// expired administrator-managed certificate. Files are created private
-/// (directory 0750, key and certificate 0640) so the TLS private key is never
+/// host, or reuses the pinned copy. rcgen's default validity window (1975 to
+/// 4096) is left in place, so a no-domain deployment never breaks on an expired
+/// administrator-managed certificate. Files are created private (directory
+/// 0750, key and certificate 0640) so the TLS private key is never
 /// world-readable, even before the daemon-storage preparation runs.
 fn ensure_self_signed_certificate(
     config: &DeploymentConfig,

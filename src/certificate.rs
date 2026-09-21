@@ -33,6 +33,9 @@ use crate::runtime::Runtime;
 /// the sbctl daemon and the sing-box data plane are members.
 pub const CERTIFICATE_GROUP: &str = "sbctl-cert";
 
+/// Certbot's own ceiling on each ACME HTTP request (`--http-timeout`).
+const HTTP_TIMEOUT_SECONDS: &str = "30";
+
 #[derive(Debug, Error)]
 pub enum CertificateError {
     #[error("certificates are managed only in direct subscription mode")]
@@ -59,12 +62,14 @@ pub enum CertificateError {
     KeyMismatch { host: String },
     #[error("private key file for the subscription host {host} is invalid or missing")]
     KeyInvalid { host: String },
+    #[error("could not build the TLS configuration for the subscription host {host}: {detail}")]
+    TlsConfiguration { host: String, detail: String },
     #[error("could not store the managed certificate copy: {0}")]
     Storage(String),
 }
 
 /// A certificate that passed every loading check. The parsed chain and key are
-/// kept so the TLS acceptor can be built once per connection.
+/// kept so the TLS acceptor can be rebuilt when the pinned material changes.
 #[derive(Debug)]
 pub struct ValidatedCertificate {
     pub host: String,
@@ -84,9 +89,13 @@ impl ValidatedCertificate {
     /// or mismatched SNI is rejected at handshake time, before any HTTP request.
     pub fn server_config(&self) -> Result<std::sync::Arc<rustls::ServerConfig>, CertificateError> {
         let provider = rustls::ServerConfig::builder().crypto_provider().clone();
+        // The key/chain pair was already compared while loading, so a failure
+        // here is a rustls problem, not a mismatch: report the real cause
+        // instead of sending the administrator down the wrong path.
         let certified = CertifiedKey::from_der(self.chain.clone(), self.key.clone_key(), &provider)
-            .map_err(|_| CertificateError::KeyMismatch {
+            .map_err(|error| CertificateError::TlsConfiguration {
                 host: self.host.clone(),
+                detail: error.to_string(),
             })?;
         let resolver = SubscriptionHostResolver {
             host: self.host.clone(),
@@ -109,7 +118,12 @@ struct SubscriptionHostResolver {
 
 impl ResolvesServerCert for SubscriptionHostResolver {
     fn resolve(&self, client_hello: ClientHello<'_>) -> Option<std::sync::Arc<CertifiedKey>> {
-        (client_hello.server_name() == Some(self.host.as_str()))
+        // DNS names are case-insensitive and the stored host keeps whatever
+        // capitalisation the administrator typed, so an exact comparison would
+        // fail every handshake with no diagnosable reason.
+        client_hello
+            .server_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case(&self.host))
             .then(|| std::sync::Arc::clone(&self.certified))
     }
 }
@@ -292,7 +306,16 @@ pub fn obtain_with_runtime<C: crate::runtime::Clock>(
         }
         None => args.push("--register-unsafely-without-email"),
     }
-    args.extend_from_slice(&["--agree-tos", "--non-interactive", "--keep-until-expiring"]);
+    args.extend_from_slice(&[
+        "--agree-tos",
+        "--non-interactive",
+        "--keep-until-expiring",
+        // Bound the ACME round trips: sbctl calls certbot synchronously from
+        // the menu and from the update path, and an unreachable ACME endpoint
+        // must not sit there until systemd kills the unit.
+        "--http-timeout",
+        HTTP_TIMEOUT_SECONDS,
+    ]);
     let (status, output) = runtime
         .run_command_output("certbot", &args)
         .map_err(|error| CertificateError::Certbot(error.to_string()))?;
@@ -301,8 +324,8 @@ pub fn obtain_with_runtime<C: crate::runtime::Clock>(
 }
 
 /// Renews certificates with Certbot and re-validates and re-pins them. The
-/// daemon loads the pinned copy before every TLS handshake, so a successful
-/// renewal takes effect on the next connection without a service restart.
+/// daemon reloads the pinned copy as soon as its files change, so a successful
+/// renewal takes effect on the next handshake without a service restart.
 pub fn renew(
     store: &DeploymentStore,
     config: &DeploymentConfig,
@@ -319,7 +342,14 @@ pub fn renew_with_runtime<C: crate::runtime::Clock>(
     let (status, output) = runtime
         .run_command_output(
             "certbot",
-            &["renew", "--cert-name", &config.subscription_host],
+            &[
+                "renew",
+                "--cert-name",
+                &config.subscription_host,
+                "--non-interactive",
+                "--http-timeout",
+                HTTP_TIMEOUT_SECONDS,
+            ],
         )
         .map_err(|error| CertificateError::Certbot(error.to_string()))?;
     certbot_result(status, output)?;
@@ -469,26 +499,54 @@ pub struct CertificateStatus {
 
 /// Reports certificate state without failing: a missing or invalid certificate
 /// becomes an `error` state so the rest of the status report stays available.
+///
+/// Both copies are checked. The service handshakes with the pinned copy, so
+/// reporting only Certbot's live directory would tell an administrator
+/// "ok — renews in 80 days" while sbctl is still serving a certificate that
+/// failed to pin.
 pub fn status(store: &DeploymentStore, config: &DeploymentConfig) -> CertificateStatus {
-    match load(store, config) {
-        Ok(validated) => CertificateStatus {
-            host: validated.host.clone(),
+    let live = match load(store, config) {
+        Ok(live) => live,
+        Err(error) => return failed_status(config, error.to_string()),
+    };
+    match load_pinned(store, config) {
+        Err(error) => CertificateStatus {
+            error: Some(format!("pinned copy the service serves: {error}")),
+            ..failed_status(config, error.to_string())
+        },
+        Ok(pinned) if pinned.fingerprint == live.fingerprint => CertificateStatus {
+            host: live.host.clone(),
             state: "ok",
-            not_after: Some(validated.not_after),
-            not_before: Some(validated.not_before),
-            san: validated.san.clone(),
-            fingerprint: Some(validated.fingerprint.clone()),
+            not_after: Some(live.not_after),
+            not_before: Some(live.not_before),
+            san: live.san.clone(),
+            fingerprint: Some(live.fingerprint.clone()),
             error: None,
         },
-        Err(error) => CertificateStatus {
-            host: config.subscription_host.clone(),
-            state: "error",
-            not_after: None,
-            not_before: None,
-            san: Vec::new(),
-            fingerprint: None,
-            error: Some(error.to_string()),
+        Ok(pinned) => CertificateStatus {
+            host: live.host.clone(),
+            state: "pinned drift",
+            not_after: Some(live.not_after),
+            not_before: Some(live.not_before),
+            san: live.san.clone(),
+            fingerprint: Some(pinned.fingerprint.clone()),
+            error: Some(format!(
+                "the service is still serving {} while the renewed certificate is {}",
+                pinned.fingerprint, live.fingerprint
+            )),
         },
+    }
+}
+
+fn failed_status(config: &DeploymentConfig, error: String) -> CertificateStatus {
+    CertificateStatus {
+        host: config.subscription_host.clone(),
+        state: "error",
+        not_after: None,
+        not_before: None,
+        san: Vec::new(),
+        fingerprint: None,
+        error: Some(error),
     }
 }
 
@@ -557,15 +615,18 @@ fn certificate_names(certificate: &X509Certificate) -> Vec<String> {
 }
 
 /// Matches a host name against a certificate name, supporting a single leftmost
-/// wildcard label (`*.example.test` covers `sub.example.test`).
+/// wildcard label (`*.example.test` covers `sub.example.test`). DNS names are
+/// case-insensitive, and the stored host keeps the administrator's
+/// capitalisation, so every comparison here ignores case.
 fn dns_name_matches(name: &str, host: &str) -> bool {
-    if name == host {
+    if name.eq_ignore_ascii_case(host) {
         return true;
     }
     let Some(suffix) = name.strip_prefix("*.") else {
         return false;
     };
-    let Some(prefix) = host.strip_suffix(suffix) else {
+    let host = host.to_ascii_lowercase();
+    let Some(prefix) = host.strip_suffix(&suffix.to_ascii_lowercase()) else {
         return false;
     };
     prefix.ends_with('.') && !prefix[..prefix.len() - 1].contains('.')
@@ -823,6 +884,11 @@ mod tests {
         assert!(!dns_name_matches("*.example.test", "a.b.example.test"));
         assert!(!dns_name_matches("*.example.test", "example.test"));
         assert!(!dns_name_matches("sub.example.test", "other.example.test"));
+        // The stored host keeps whatever capitalisation the administrator
+        // typed, while certificates present lowercase names.
+        assert!(dns_name_matches("sub.example.test", "Sub.Example.TEST"));
+        assert!(dns_name_matches("*.example.test", "Sub.Example.TEST"));
+        assert!(!dns_name_matches("*.example.test", "A.B.Example.TEST"));
     }
 
     #[test]
