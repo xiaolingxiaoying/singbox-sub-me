@@ -17,6 +17,9 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod state;
+mod theme;
+
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,71 +27,30 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use client_core::clash_api::Connection;
 use client_core::command::SettingsPatch;
-use client_core::format::DelayLevel;
-use client_core::format::{age_label, delay_level, human_bytes, usage_label};
-use client_core::settings::{self, Profiles, Settings};
+use client_core::format::{DelayLevel, age_label, delay_level, human_bytes, usage_label};
+use client_core::settings::{Profiles, Settings};
 use client_core::state::{ClientSnapshot, LogLevel, ProxyGroupSnapshot, RouteRuleSnapshot};
-use client_core::system_proxy;
 use client_core::system_proxy::TrafficMode;
-use client_core::{ClientCommand, ClientController};
+use client_core::{ClientCommand, ClientController, settings, system_proxy};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, AppContext as _, AssetSource, Bounds, ClickEvent, ClipboardItem, Context, FocusHandle,
-    FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, ScrollHandle,
+    App, AppContext as _, AssetSource, Bounds, ClickEvent, ClipboardItem, Context,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, ScrollHandle,
     SharedString, StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBounds,
     WindowControlArea, WindowOptions, div, img, px, rgb, rgba, size, svg,
 };
 use gpui_platform::application;
 
-// Serein's desktop palette: a quiet neutral canvas, white working surfaces,
-// and a cool teal reserved for active state and primary actions.
-const BG: u32 = 0xf7f8fa;
-const SURFACE: u32 = 0xffffff;
-const SURFACE_2: u32 = 0xf2f4f7;
-const BORDER: u32 = 0xe4e7ec;
-const TEXT: u32 = 0x101828;
-const MUTED: u32 = 0x667085;
-const FAINT: u32 = 0x98a2b3;
-const CYAN: u32 = 0x0f766e;
-const CYAN_DARK: u32 = 0x0b5f59;
-const BLUE_2: u32 = 0xecf7f5;
-const NAV_ACTIVE: u32 = 0xe7f3f1;
-const EDGE: u32 = 0x0a514c;
-const MINT: u32 = 0x15803d;
-const AMBER: u32 = 0xb45309;
-const DANGER: u32 = 0xdc2626;
-
-// Type scale. Five sizes, each with one job, and nothing below 11px: the old
-// mix of 10/11/12/13/15/28px runs is what made every page read as crowded.
-const TITLE: f32 = 20.0;
-const SECTION: f32 = 14.0;
-const BODY: f32 = 13.0;
-const LABEL: f32 = 12.0;
-const META: f32 = 11.0;
-const WEIGHT_NORMAL: FontWeight = FontWeight(400.0);
-const WEIGHT_MEDIUM: FontWeight = FontWeight(500.0);
-const WEIGHT_SEMIBOLD: FontWeight = FontWeight(600.0);
-
-// Spacing scale. Blocks are separated by whitespace first and by a hairline
-// only where a surface boundary is real, so the same content needs less ink.
-const RADIUS: f32 = 12.0;
-const WINDOW_RADIUS: f32 = 16.0;
-const CONTENT_PAD: f32 = 28.0;
-const GAP_SECTION: f32 = 20.0;
-const GAP_ITEM: f32 = 12.0;
-const PAD_CARD: f32 = 20.0;
-const ROW_X: f32 = 20.0;
-const ROW_Y: f32 = 13.0;
-const TITLEBAR_H: f32 = 46.0;
-const SIDEBAR_W: f32 = 216.0;
-const CONTENT_MAX: f32 = 1120.0;
-/// How many rows the rules and connections lists draw before asking.
-const LIST_PAGE: usize = 120;
-
-const DATA_DIR: &str = "sbgui";
-/// The window's own artwork, served to GPUI by [`SereinAssets`] and drawn in
-/// the titlebar. The same file is compiled into the exe as the Win32 icon.
-const BRAND_ICON_PATH: &str = "serein.ico";
+use crate::state::{
+    ExitChoice, FieldSpec, INPUT_FIELDS, InputField, LogLevelFilter, Page, Sbgui, SettingsSection,
+    TextField, Tone, env_page, env_show_exit_confirm, env_window_size,
+};
+use crate::theme::{
+    AMBER, BG, BLUE_2, BODY, BORDER, BRAND_ICON_PATH, CONTENT_MAX, CONTENT_PAD, CYAN, CYAN_DARK,
+    DANGER, DATA_DIR, FAINT, GAP_ITEM, GAP_SECTION, LABEL, LIST_PAGE, META, MINT, MUTED,
+    NAV_ACTIVE, PAD_CARD, RADIUS, ROW_X, ROW_Y, SECTION, SIDEBAR_W, SURFACE, SURFACE_2, TEXT,
+    TITLE, TITLEBAR_H, WEIGHT_MEDIUM, WEIGHT_NORMAL, WEIGHT_SEMIBOLD, WINDOW_RADIUS, tone_colors,
+};
 
 pub(crate) struct SereinAssets;
 
@@ -104,248 +66,6 @@ impl AssetSource for SereinAssets {
     fn list(&self, _path: &str) -> Result<Vec<SharedString>> {
         Ok(vec![BRAND_ICON_PATH.into()])
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Page {
-    Dashboard,
-    Subscriptions,
-    Proxies,
-    Rules,
-    Connections,
-    Logs,
-    Settings,
-}
-
-impl Page {
-    fn title(self) -> &'static str {
-        match self {
-            Self::Dashboard => "概览",
-            Self::Subscriptions => "订阅",
-            Self::Proxies => "节点",
-            Self::Rules => "规则",
-            Self::Connections => "连接",
-            Self::Logs => "日志",
-            Self::Settings => "设置",
-        }
-    }
-
-    fn all() -> [Self; 7] {
-        [
-            Self::Dashboard,
-            Self::Subscriptions,
-            Self::Proxies,
-            Self::Rules,
-            Self::Connections,
-            Self::Logs,
-            Self::Settings,
-        ]
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Tone {
-    Accent,
-    Neutral,
-    Warning,
-}
-
-/// What the user chose to do with the OS proxy when closing the window.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ExitChoice {
-    /// Leave the OS proxy pointing at the local port.
-    Keep,
-    /// Restore the captured pre-install proxy state, then close.
-    Restore,
-}
-
-/// The text fields the window renders, indexing `Sbgui::inputs`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum InputField {
-    ConnFilter,
-    LogQuery,
-    ProxySearch,
-    RuleSearch,
-    SubUrl,
-    Mirror,
-    MixedPort,
-    TestUrl,
-    AutoUpdateMinutes,
-    CoreVersion,
-}
-
-pub(crate) const INPUT_FIELDS: [InputField; 10] = [
-    InputField::ConnFilter,
-    InputField::LogQuery,
-    InputField::ProxySearch,
-    InputField::RuleSearch,
-    InputField::SubUrl,
-    InputField::Mirror,
-    InputField::MixedPort,
-    InputField::TestUrl,
-    InputField::AutoUpdateMinutes,
-    InputField::CoreVersion,
-];
-
-/// A minimal single-line text field: click to focus, type to edit, Enter to
-/// commit, Esc to reset. Editing is append/backspace with the caret always at
-/// the end — the same model the TUI's input overlay uses — and the typed
-/// character comes from the keystroke's `key_char`. IME composition (typing
-/// Chinese into a field) is not handled yet; filters and settings are ASCII.
-pub(crate) struct TextField {
-    pub(crate) focus: FocusHandle,
-    pub(crate) text: String,
-}
-
-/// The render-time identity of one field, bundled so field helpers stay
-/// readable (`text_field(spec, window, cx)`).
-pub(crate) struct FieldSpec {
-    pub(crate) field: InputField,
-    pub(crate) id: &'static str,
-    pub(crate) placeholder: &'static str,
-    pub(crate) width: f32,
-}
-
-/// The logs-page level filter, mirroring the TUI's `info+`/`warn+`/`error`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum LogLevelFilter {
-    #[default]
-    All,
-    Debug,
-    Info,
-    Warn,
-    Error,
-}
-
-impl LogLevelFilter {
-    fn label(self) -> &'static str {
-        match self {
-            Self::All => "全部",
-            // The chips are thresholds, matching the terminal client.
-            Self::Debug => "Debug+",
-            Self::Info => "Info+",
-            Self::Warn => "Warn+",
-            Self::Error => "Error",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum SettingsSection {
-    #[default]
-    General,
-    Network,
-    Core,
-    Tun,
-    Automation,
-    Appearance,
-    Advanced,
-}
-
-impl SettingsSection {
-    fn all() -> [Self; 7] {
-        [
-            Self::General,
-            Self::Network,
-            Self::Core,
-            Self::Tun,
-            Self::Automation,
-            Self::Appearance,
-            Self::Advanced,
-        ]
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::General => "常规",
-            Self::Network => "网络与端口",
-            Self::Core => "内核",
-            Self::Tun => "TUN",
-            Self::Automation => "自动化",
-            Self::Appearance => "外观",
-            Self::Advanced => "高级",
-        }
-    }
-}
-
-pub(crate) struct Sbgui {
-    pub(crate) controller: ClientController,
-    pub(crate) data_dir: PathBuf,
-    pub(crate) snapshot: ClientSnapshot,
-    pub(crate) page: Page,
-    pub(crate) group_index: usize,
-    /// Set while the exit confirmation overlay is visible.
-    pub(crate) confirm_exit: bool,
-    /// The exit decision, once made; a set choice lets the window close.
-    pub(crate) exit_choice: Option<ExitChoice>,
-    /// Text fields, indexed by `InputField as usize`.
-    pub(crate) inputs: [TextField; INPUT_FIELDS.len()],
-    /// The logs-page level filter.
-    pub(crate) log_level: LogLevelFilter,
-    pub(crate) settings_section: SettingsSection,
-    pub(crate) show_subscription_import: bool,
-    pub(crate) show_rule_sets: bool,
-    /// Rules pages are walls of text on a real subscription: the list starts
-    /// capped and the user opens the rest on demand.
-    pub(crate) show_all_rules: bool,
-    /// Same cap for the connection list, which grows without bound.
-    pub(crate) show_all_connections: bool,
-    pub(crate) core_menu_open: bool,
-    pub(crate) node_card_view: bool,
-    pub(crate) paused_connections: Option<Vec<Connection>>,
-    pub(crate) selected_connection: Option<String>,
-    /// Scroll position of the log panel, so "自动滚动" can pin the view to the
-    /// newest line instead of being a label that does nothing.
-    pub(crate) log_scroll: ScrollHandle,
-    /// Row count of the last rendered log panel; a change means new lines.
-    pub(crate) log_rows: std::cell::Cell<usize>,
-    /// Minute of the last repaint: `age_label` renders relative times from the
-    /// wall clock at paint time, so a quiet snapshot still needs one repaint per
-    /// minute or those labels freeze.
-    pub(crate) painted_minute: u64,
-    pub(crate) log_wrap: bool,
-    pub(crate) log_follow: bool,
-    pub(crate) confirm_close_all: bool,
-    /// A profile name whose delete button is armed waiting for a second click.
-    pub(crate) confirm_delete_profile: Option<String>,
-}
-
-/// Visual-review seams read once at startup. Ordinary launches never set
-/// them; automated screenshot review uses them instead of synthesized mouse
-/// input, which cannot reach the window on a locked desktop session.
-///
-/// - `SBGUI_PAGE=<dashboard|subscriptions|proxies|rules|connections|logs|settings>`
-///   opens the window directly on that page.
-/// - `SBGUI_SIZE=<width>x<height>` overrides the window size in logical px.
-/// - `SBGUI_SHOW_EXIT_CONFIRM=1` renders the exit-confirmation overlay
-///   without enabling the OS proxy.
-fn env_page() -> Option<Page> {
-    let name = std::env::var("SBGUI_PAGE").ok()?;
-    Some(match name.to_ascii_lowercase().as_str() {
-        "dashboard" | "概览" => Page::Dashboard,
-        "subscriptions" | "订阅" => Page::Subscriptions,
-        "proxies" | "节点" => Page::Proxies,
-        "rules" | "规则" => Page::Rules,
-        "connections" | "连接" => Page::Connections,
-        "logs" | "日志" => Page::Logs,
-        "settings" | "设置" => Page::Settings,
-        _ => return None,
-    })
-}
-
-fn env_window_size() -> (f32, f32) {
-    std::env::var("SBGUI_SIZE")
-        .ok()
-        .and_then(|text| {
-            let (w, h) = text.split_once('x')?;
-            Some((w.trim().parse::<f32>().ok()?, h.trim().parse::<f32>().ok()?))
-        })
-        .filter(|(w, h)| *w >= 400.0 && *h >= 300.0)
-        .unwrap_or((1080.0, 760.0))
-}
-
-fn env_show_exit_confirm() -> bool {
-    std::env::var("SBGUI_SHOW_EXIT_CONFIRM").is_ok_and(|value| value == "1")
 }
 
 impl Sbgui {
@@ -3353,14 +3073,6 @@ fn side_rate(label: &str, value: u64, color: u32) -> impl IntoElement {
                 .text_color(rgb(color))
                 .child(format!("{}/s", human_bytes(value))),
         )
-}
-
-fn tone_colors(tone: Tone) -> (u32, u32, u32) {
-    match tone {
-        Tone::Accent => (0xffffff, CYAN, EDGE),
-        Tone::Neutral => (TEXT, SURFACE_2, BORDER),
-        Tone::Warning => (0x985c08, 0xfff5e5, 0xf2dfbf),
-    }
 }
 
 fn pill(label: impl Into<String>, color: u32) -> impl IntoElement {
