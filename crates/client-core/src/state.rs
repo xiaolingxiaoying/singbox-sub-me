@@ -342,6 +342,75 @@ impl ClientSnapshot {
             .max()
             .unwrap_or(0)
     }
+
+    /// The download peak alone: labelling this as the download peak when it is
+    /// `max(up, down)` overstates the download axis whenever upload leads.
+    pub fn download_peak(&self) -> u64 {
+        self.traffic_history
+            .iter()
+            .map(|point| point.down)
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub fn upload_peak(&self) -> u64 {
+        self.traffic_history
+            .iter()
+            .map(|point| point.up)
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// How insistent a published log line is. Both clients filter and colour on
+/// this so the same line is treated identically in either UI.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LogLevel {
+    #[default]
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl LogLevel {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Debug => "Debug",
+            Self::Info => "Info",
+            Self::Warn => "Warn",
+            Self::Error => "Error",
+        }
+    }
+}
+
+/// The severity of one log line.
+///
+/// Kernel lines carry sing-box's own marker; the client's own events are plain
+/// Chinese sentences, and those are informational rather than debug — a filter
+/// of "Info and above" must keep them, which is what the two clients disagreed
+/// on while each classified them its own way.
+pub fn log_level_of(line: &str) -> LogLevel {
+    let lower = line.to_lowercase();
+    if lower.contains("error")
+        || lower.contains("fatal")
+        || line.contains("失败")
+        || line.contains("错误")
+    {
+        LogLevel::Error
+    } else if lower.contains("warn") || line.contains("警告") {
+        LogLevel::Warn
+    } else if lower.contains("trace") || lower.contains("debug") {
+        LogLevel::Debug
+    } else {
+        LogLevel::Info
+    }
+}
+
+/// Whether `line` belongs in a view that shows `minimum` and above; `None`
+/// shows everything.
+pub fn log_level_shown(minimum: Option<LogLevel>, line: &str) -> bool {
+    minimum.is_none_or(|minimum| log_level_of(line) >= minimum)
 }
 
 #[cfg(test)]
@@ -431,5 +500,38 @@ mod tests {
             parse_route_rules(r#"{"route":{}}"#),
             (Vec::new(), Vec::new())
         );
+    }
+
+    #[test]
+    fn log_levels_order_by_marker_and_keep_unmarked_client_events() {
+        assert_eq!(log_level_of("ERROR[0001] inbound broken"), LogLevel::Error);
+        assert_eq!(log_level_of("导入订阅失败: timeout"), LogLevel::Error);
+        assert_eq!(log_level_of("写入配置错误"), LogLevel::Error);
+        assert_eq!(log_level_of("WARN[0002] slow dial"), LogLevel::Warn);
+        assert_eq!(log_level_of("level=warning msg=x"), LogLevel::Warn);
+        assert_eq!(log_level_of("DEBUG[0000] cache miss"), LogLevel::Debug);
+        assert_eq!(
+            log_level_of("内核已启动"),
+            LogLevel::Info,
+            "the client's own events are informational, not debug"
+        );
+
+        assert!(log_level_shown(Some(LogLevel::Info), "内核已启动"));
+        assert!(!log_level_shown(Some(LogLevel::Info), "TRACE trace detail"));
+        assert!(log_level_shown(
+            Some(LogLevel::Error),
+            "导入订阅失败: timeout"
+        ));
+        assert!(log_level_shown(None, "TRACE trace detail"));
+    }
+
+    #[test]
+    fn direction_peaks_stay_below_the_combined_peak() {
+        let mut snapshot = ClientSnapshot::default();
+        snapshot.push_traffic(100, 40);
+        snapshot.push_traffic(10, 90);
+        assert_eq!(snapshot.upload_peak(), 100);
+        assert_eq!(snapshot.download_peak(), 90);
+        assert_eq!(snapshot.traffic_peak(), 100);
     }
 }

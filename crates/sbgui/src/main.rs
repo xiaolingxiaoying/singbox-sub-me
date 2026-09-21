@@ -24,7 +24,7 @@ use anyhow::Result;
 use client_core::clash_api::Connection;
 use client_core::command::SettingsPatch;
 use client_core::settings::{self, Profiles, Settings};
-use client_core::state::{ClientSnapshot, ProxyGroupSnapshot, RouteRuleSnapshot};
+use client_core::state::{ClientSnapshot, LogLevel, ProxyGroupSnapshot, RouteRuleSnapshot};
 use client_core::system_proxy;
 use client_core::system_proxy::TrafficMode;
 use client_core::{ClientCommand, ClientController};
@@ -206,9 +206,10 @@ impl LogLevelFilter {
     fn label(self) -> &'static str {
         match self {
             Self::All => "全部",
-            Self::Debug => "Debug",
-            Self::Info => "Info",
-            Self::Warn => "Warn",
+            // The chips are thresholds, matching the terminal client.
+            Self::Debug => "Debug+",
+            Self::Info => "Info+",
+            Self::Warn => "Warn+",
             Self::Error => "Error",
         }
     }
@@ -281,6 +282,8 @@ struct Sbgui {
     log_wrap: bool,
     log_follow: bool,
     confirm_close_all: bool,
+    /// A profile name whose delete button is armed waiting for a second click.
+    confirm_delete_profile: Option<String>,
 }
 
 /// Visual-review seams read once at startup. Ordinary launches never set
@@ -349,6 +352,7 @@ impl Sbgui {
             log_wrap: true,
             log_follow: true,
             confirm_close_all: false,
+            confirm_delete_profile: None,
         }
     }
 
@@ -398,6 +402,20 @@ impl Sbgui {
             || keystroke.modifiers.alt
             || keystroke.modifiers.platform
             || keystroke.modifiers.function;
+        if keystroke.modifiers.control || keystroke.modifiers.platform {
+            // These fields have no menu and no right-click, so Ctrl+V is the
+            // only way to paste a subscription link copied elsewhere; every
+            // other modified key stays ignored rather than inserting control
+            // characters.
+            if keystroke.key.as_str() == "v"
+                && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+            {
+                self.field_mut(field)
+                    .text
+                    .push_str(&text.replace(['\r', '\n'], ""));
+            }
+            return;
+        }
         if !modifier_held {
             if let Some(typed) = keystroke
                 .key_char
@@ -637,6 +655,11 @@ impl Sbgui {
     /// still enabled. Nothing is restored silently: the user picks.
     fn exit_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            // A hitbox only exists for an identified element; without this the
+            // overlay looks modal while the buttons underneath still answer
+            // clicks.
+            .id("exit-modal")
+            .occlude()
             .absolute()
             .top(px(0.0))
             .left(px(0.0))
@@ -1378,12 +1401,6 @@ impl Sbgui {
     fn dashboard(&self, _cx: &mut Context<Self>) -> gpui::Div {
         let snapshot = &self.snapshot;
         let current = clean_proxy_label(snapshot.current_node.as_deref().unwrap_or("尚未选择节点"));
-        let upload_peak = snapshot
-            .traffic_history
-            .iter()
-            .map(|point| point.up)
-            .max()
-            .unwrap_or(0);
         let current_delay = self.selected_group().as_ref().and_then(|group| {
             group
                 .delays
@@ -1526,13 +1543,13 @@ impl Sbgui {
                     .child(metric_card(
                         "下载",
                         format!("{} /s", human_bytes(snapshot.download_speed)),
-                        format!("5 分钟峰值  {} /s", human_bytes(snapshot.traffic_peak())),
+                        format!("5 分钟峰值  {} /s", human_bytes(snapshot.download_peak())),
                         false,
                     ))
                     .child(metric_card(
                         "上传",
                         format!("{} /s", human_bytes(snapshot.upload_speed)),
-                        format!("5 分钟峰值  {} /s", human_bytes(upload_peak)),
+                        format!("5 分钟峰值  {} /s", human_bytes(snapshot.upload_peak())),
                         false,
                     ))
                     .child(metric_card(
@@ -1872,7 +1889,11 @@ impl Sbgui {
                                 ClientCommand::UpdateSubscription,
                             )
                         }))
-                        .child(
+                        .child({
+                            let armed = self
+                                .confirm_delete_profile
+                                .as_deref()
+                                .is_some_and(|pending| pending == name_for_remove);
                             div()
                                 .id(format!("remove-{index}"))
                                 .px(px(10.0))
@@ -1882,13 +1903,23 @@ impl Sbgui {
                                 .text_color(rgb(DANGER))
                                 .hover(|style| style.bg(rgb(0xffecee)))
                                 .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
-                                    view.send(ClientCommand::RemoveProfile(
-                                        name_for_remove.clone(),
-                                    ));
+                                    // Deleting also drops the cached node list,
+                                    // so the first click only arms the button —
+                                    // the same shape as 关闭全部.
+                                    if view.confirm_delete_profile.as_deref()
+                                        == Some(name_for_remove.as_str())
+                                    {
+                                        view.send(ClientCommand::RemoveProfile(
+                                            name_for_remove.clone(),
+                                        ));
+                                        view.confirm_delete_profile = None;
+                                    } else {
+                                        view.confirm_delete_profile = Some(name_for_remove.clone());
+                                    }
                                     cx.notify();
                                 }))
-                                .child("删除"),
-                        ),
+                                .child(if armed { "确认删除？" } else { "删除" })
+                        }),
                 )
         });
         root.child(
@@ -2681,11 +2712,22 @@ impl Sbgui {
                 return false;
             }
             match level {
-                LogLevelFilter::All => true,
-                LogLevelFilter::Debug => log_level_rank(line) == 0,
-                LogLevelFilter::Info => log_level_rank(line) == 1,
-                LogLevelFilter::Warn => log_level_rank(line) == 2,
-                LogLevelFilter::Error => log_level_rank(line) == 3,
+                // Threshold semantics shared with the terminal client: "Info"
+                // keeps the client's own unmarked events rather than hiding
+                // them, and "Debug" is the whole buffer.
+                LogLevelFilter::All => client_core::state::log_level_shown(None, line),
+                LogLevelFilter::Debug => {
+                    client_core::state::log_level_shown(Some(LogLevel::Debug), line)
+                }
+                LogLevelFilter::Info => {
+                    client_core::state::log_level_shown(Some(LogLevel::Info), line)
+                }
+                LogLevelFilter::Warn => {
+                    client_core::state::log_level_shown(Some(LogLevel::Warn), line)
+                }
+                LogLevelFilter::Error => {
+                    client_core::state::log_level_shown(Some(LogLevel::Error), line)
+                }
             }
         };
         let kernel: Vec<String> = self
@@ -3213,7 +3255,9 @@ impl Sbgui {
                 ))
                 .child(setting_line(
                     "设置文件",
-                    &format!("{}\\settings.toml", DATA_DIR),
+                    // The real path: joining DATA_DIR with a Windows separator
+                    // was wrong on Linux and was never an absolute path.
+                    &self.data_dir.join("settings.toml").display().to_string(),
                 ))
                 .child(
                     div()
@@ -3978,15 +4022,13 @@ fn empty_state(
 }
 
 fn level_color(line: &str) -> u32 {
-    let upper = line.to_ascii_uppercase();
-    if upper.contains("ERROR") || upper.contains("FATAL") {
-        DANGER
-    } else if upper.contains("WARN") {
-        AMBER
-    } else if upper.contains("DEBUG") {
-        FAINT
-    } else {
-        TEXT
+    // Derived from the shared level judgement, so a Chinese client event that
+    // the filter treats as an error is not painted as plain info text.
+    match client_core::state::log_level_of(line) {
+        LogLevel::Error => DANGER,
+        LogLevel::Warn => AMBER,
+        LogLevel::Debug => FAINT,
+        LogLevel::Info => TEXT,
     }
 }
 
@@ -4208,22 +4250,6 @@ fn parse_count(text: &str) -> Option<u64> {
     text.trim().parse::<u64>().ok()
 }
 
-/// Ranks a log line by its level marker: 0 = no marker, 1 = info, 2 = warn,
-/// 3 = error. Kernel lines carry sing-box's `INFO`/`WARN`/`ERROR` prefixes;
-/// client events embed Chinese words like 失败.
-fn log_level_rank(line: &str) -> u8 {
-    let lower = line.to_lowercase();
-    if lower.contains("error") || line.contains("失败") || line.contains("错误") {
-        3
-    } else if lower.contains("warn") {
-        2
-    } else if lower.contains("info") {
-        1
-    } else {
-        0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4247,11 +4273,18 @@ mod tests {
     }
 
     #[test]
-    fn log_level_rank_orders_lines_by_marker() {
-        assert_eq!(log_level_rank("ERROR[0001] inbound broken"), 3);
-        assert_eq!(log_level_rank("导入订阅失败: timeout"), 3);
-        assert_eq!(log_level_rank("WARN[0002] slow dial"), 2);
-        assert_eq!(log_level_rank("INFO[0003] started"), 1);
-        assert_eq!(log_level_rank("内核已启动"), 0);
+    fn the_info_chip_keeps_unmarked_client_events() {
+        assert!(client_core::state::log_level_shown(
+            Some(LogLevel::Info),
+            "内核已启动"
+        ));
+        assert!(!client_core::state::log_level_shown(
+            Some(LogLevel::Info),
+            "TRACE detail"
+        ));
+        assert!(client_core::state::log_level_shown(
+            Some(LogLevel::Error),
+            "导入订阅失败: timeout"
+        ));
     }
 }

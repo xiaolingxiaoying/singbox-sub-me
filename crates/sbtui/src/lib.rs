@@ -23,10 +23,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -35,7 +35,7 @@ use ratatui::widgets::{
 
 use crate::clash_api::{Connection, SELECTOR_TAG};
 use crate::command::SettingsPatch;
-use crate::state::{ProxyGroupSnapshot, TrafficPoint};
+use crate::state::{LogLevel, ProxyGroupSnapshot, TrafficPoint, log_level_shown};
 use crate::subscription::SubscriptionUserinfo;
 use crate::system_proxy::TrafficMode;
 
@@ -140,10 +140,13 @@ impl ConnSort {
     }
 }
 
-/// Kernel log level filter, cycled with `l` on the Logs tab.
+/// Log level filter, cycled with `l` on the Logs tab. The threshold semantics
+/// come from `client_core::state::log_level_shown`, which both clients share so
+/// the same line passes or is hidden identically in either UI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LogFilter {
     All,
+    Debug,
     Info,
     Warn,
     Error,
@@ -152,7 +155,8 @@ enum LogFilter {
 impl LogFilter {
     fn next(self) -> Self {
         match self {
-            Self::All => Self::Info,
+            Self::All => Self::Debug,
+            Self::Debug => Self::Info,
             Self::Info => Self::Warn,
             Self::Warn => Self::Error,
             Self::Error => Self::All,
@@ -162,24 +166,25 @@ impl LogFilter {
     fn label(self) -> &'static str {
         match self {
             Self::All => "全部",
+            Self::Debug => "debug+",
             Self::Info => "info+",
             Self::Warn => "warn+",
             Self::Error => "error",
         }
     }
 
-    /// Whether a kernel log line passes the filter. Lines are matched on the
-    /// uppercase level token sing-box emits (`INFO`/`WARN`/`ERROR`).
-    fn matches(self, line: &str) -> bool {
-        let upper = line.to_ascii_uppercase();
+    fn minimum(self) -> Option<LogLevel> {
         match self {
-            Self::All => true,
-            Self::Info => {
-                upper.contains("INFO") || upper.contains("WARN") || upper.contains("ERROR")
-            }
-            Self::Warn => upper.contains("WARN") || upper.contains("ERROR"),
-            Self::Error => upper.contains("ERROR"),
+            Self::All => None,
+            Self::Debug => Some(LogLevel::Debug),
+            Self::Info => Some(LogLevel::Info),
+            Self::Warn => Some(LogLevel::Warn),
+            Self::Error => Some(LogLevel::Error),
         }
+    }
+
+    fn matches(self, line: &str) -> bool {
+        log_level_shown(self.minimum(), line)
     }
 }
 
@@ -417,7 +422,7 @@ async fn run_app(
                                 break;
                             }
                         } else {
-                            handle_key(&mut app, key.code);
+                            handle_key(&mut app, key);
                         }
                     }
                     Ok(_) => {}
@@ -451,7 +456,18 @@ async fn run_app(
     }
 }
 
-fn handle_key(app: &mut App, key: KeyCode) {
+fn handle_key(app: &mut App, event: KeyEvent) {
+    // A terminal reports the same `code` for Ctrl+S and for S, so without this
+    // guard a stray Ctrl+S silently stops the core, and Ctrl+U used to inject a
+    // control character into the search box. Ctrl+C is consumed by the event
+    // loop before it gets here.
+    if event
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+    {
+        return;
+    }
+    let key = event.code;
     if app.show_help {
         if matches!(key, KeyCode::Esc | KeyCode::Char('?')) {
             app.show_help = false;
@@ -1290,10 +1306,15 @@ fn draw_input_overlay(frame: &mut Frame, app: &App) {
         .input
         .as_ref()
         .expect("input overlay requires an input goal");
+    // Editing a long subscription URL blind is the usual way people lose a
+    // link, so the box keeps the tail visible and puts a real caret after it.
+    let room = area.width.saturating_sub(3) as usize;
+    let shown = tail_within_width(&app.input_text, room);
+    let caret_x = 1 + Line::from(shown.clone()).width();
     let body = vec![
         Line::from(input_label(goal)).style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
         Line::from(""),
-        Line::from(app.input_text.clone()).style(Style::default().fg(TEXT)),
+        Line::from(shown).style(Style::default().fg(TEXT)),
         Line::from(""),
         Line::from("Enter 保存  ·  Esc 取消").style(Style::default().fg(MUTED)),
     ];
@@ -1304,6 +1325,23 @@ fn draw_input_overlay(frame: &mut Frame, app: &App) {
             .block(panel("输入")),
         area,
     );
+    // Row 2 of the body, inside the panel's top border.
+    frame.set_cursor_position(Position::new(area.left() + caret_x as u16, area.top() + 3));
+}
+
+/// The end of `text` that fits in `width` display columns.
+fn tail_within_width(text: &str, width: usize) -> String {
+    let mut used = 0usize;
+    let mut taken = String::new();
+    for ch in text.chars().rev() {
+        let columns = Line::from(ch.to_string()).width();
+        if used + columns > width {
+            break;
+        }
+        used += columns;
+        taken.push(ch);
+    }
+    taken.chars().rev().collect()
 }
 
 fn draw_help_overlay(frame: &mut Frame, app: &App) {
@@ -2161,6 +2199,31 @@ mod tests {
         assert!(log_query_matches("DNS", "[123] inbound/dns: lookup"));
         assert!(!log_query_matches("DNS", "[123] outbound/tcp: connect"));
         assert!(log_query_matches("", "anything"));
+    }
+
+    #[test]
+    fn the_log_filter_keeps_unmarked_client_events_at_info_and_above() {
+        assert!(
+            LogFilter::Info.matches("内核已启动"),
+            "the client's own events are informational, not debug"
+        );
+        assert!(LogFilter::Info.matches("ERROR boom"));
+        assert!(!LogFilter::Info.matches("DEBUG detail"));
+        assert!(LogFilter::Error.matches("导入订阅失败: timeout"));
+        assert!(LogFilter::All.matches("DEBUG detail"));
+    }
+
+    #[test]
+    fn the_input_box_keeps_the_tail_of_a_long_value() {
+        let url = "https://sub.example.test/sub/credential-that-is-quite-long/sing-box.json";
+        assert_eq!(tail_within_width(url, 20), &url[url.len() - 20..]);
+        assert_eq!(tail_within_width("short", 40), "short");
+        assert!(tail_within_width("", 10).is_empty());
+        assert_eq!(
+            tail_within_width("节点节点节点", 4),
+            "节点",
+            "wide characters take two columns each"
+        );
     }
 
     #[test]
