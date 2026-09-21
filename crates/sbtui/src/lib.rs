@@ -21,6 +21,7 @@ pub use client_core::{
 };
 
 mod app;
+mod style;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -40,8 +41,12 @@ use ratatui::widgets::{
 use crate::app::{App, ConnSort, InputGoal, Tab};
 use crate::clash_api::{Connection, SELECTOR_TAG};
 use crate::command::SettingsPatch;
-use crate::format::{DelayLevel, age_label, delay_level, human_bytes, usage_label};
+use crate::format::{age_label, human_bytes, usage_label};
 use crate::state::TrafficPoint;
+use crate::style::{
+    AMBER, CYAN, DANGER, EDGE, MINT, MUTED, TEXT, delay_color, meter, panel, short_label,
+    status_color,
+};
 use crate::system_proxy::TrafficMode;
 
 const TAB_TITLES: [&str; 5] = ["概览", "节点", "连接", "日志", "设置"];
@@ -817,15 +822,6 @@ fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
-const PANEL: Color = Color::Rgb(11, 28, 42);
-const EDGE: Color = Color::Rgb(37, 92, 116);
-const TEXT: Color = Color::Rgb(217, 235, 242);
-const MUTED: Color = Color::Rgb(123, 157, 172);
-const CYAN: Color = Color::Rgb(42, 213, 235);
-const MINT: Color = Color::Rgb(101, 235, 157);
-const AMBER: Color = Color::Rgb(255, 190, 81);
-const DANGER: Color = Color::Rgb(255, 104, 97);
-
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(2)]).split(area);
     let state = if app.snapshot.core_running {
@@ -918,18 +914,6 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-fn panel<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(EDGE))
-        .style(Style::default().bg(PANEL))
-        .title(
-            title
-                .into()
-                .style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
-        )
-}
-
 fn selected_node(app: &App) -> String {
     app.snapshot
         .proxy_groups
@@ -938,45 +922,6 @@ fn selected_node(app: &App) -> String {
         .map(|group| group.current.clone())
         .or_else(|| app.snapshot.current_node.clone())
         .unwrap_or_else(|| "等待选择节点".to_owned())
-}
-
-fn short_label(value: &str, max: usize) -> String {
-    if value.chars().count() <= max {
-        value.to_owned()
-    } else {
-        format!(
-            "{}…",
-            value
-                .chars()
-                .take(max.saturating_sub(1))
-                .collect::<String>()
-        )
-    }
-}
-
-fn meter(value: u64, width: usize) -> String {
-    let filled = if value == 0 {
-        0
-    } else {
-        ((value.ilog10() as usize + 1) * width / 10).clamp(1, width)
-    };
-    format!(
-        "{}{}",
-        "█".repeat(filled),
-        "░".repeat(width.saturating_sub(filled))
-    )
-}
-
-fn status_color(status: &str) -> Color {
-    if status.contains("失败") || status.contains("错误") || status.contains("崩溃") {
-        DANGER
-    } else if status.contains("需要") || status.contains("未") {
-        AMBER
-    } else if status.contains("成功") || status.contains("启动") || status.contains("已") {
-        MINT
-    } else {
-        TEXT
-    }
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
@@ -1143,15 +1088,6 @@ fn input_label(goal: &InputGoal) -> &'static str {
 /// Whether a kernel log line contains the active keyword filter.
 fn log_query_matches(query: &str, line: &str) -> bool {
     query.is_empty() || line.to_lowercase().contains(&query.to_lowercase())
-}
-
-fn delay_color(delay: Option<u64>) -> Color {
-    match delay_level(delay) {
-        DelayLevel::Fast => MINT,
-        DelayLevel::Slow => AMBER,
-        DelayLevel::Timeout => DANGER,
-        DelayLevel::Unknown => MUTED,
-    }
 }
 
 fn draw_dashboard(frame: &mut Frame, area: ratatui::prelude::Rect, app: &App) {
@@ -1806,12 +1742,6 @@ mod tests {
         assert_eq!(Tab::Dashboard.previous(), Tab::Settings);
         assert_eq!(Tab::from_index(2), Some(Tab::Connections));
         assert_eq!(Tab::from_index(9), None);
-    }
-
-    #[test]
-    fn meter_keeps_the_requested_visual_width() {
-        assert_eq!(meter(0, 12).chars().count(), 12);
-        assert_eq!(meter(1024 * 1024, 12).chars().count(), 12);
     }
 
     #[test]
