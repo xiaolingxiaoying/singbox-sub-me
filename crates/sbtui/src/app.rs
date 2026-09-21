@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use ratatui::widgets::ListState;
 
-use crate::conn_sort_key;
+use crate::input::conn_sort_key;
 use crate::state::{LogLevel, ProxyGroupSnapshot, log_level_shown};
 use crate::{ClientCommand, ClientController, ClientSnapshot};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
