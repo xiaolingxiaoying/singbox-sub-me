@@ -39,6 +39,9 @@ const STABLE_RUN: Duration = Duration::from_secs(60);
 /// core child. Stopping is local (kill plus a registry write); sing-box's own
 /// graceful window is 10s and we never wait for a signal it cannot receive.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+/// Cap on how much of the core log one poll consumes, so a chatty core that is
+/// never restarted cannot grow the read buffer without limit.
+const CORE_LOG_READ_LIMIT: u64 = 256 * 1024;
 
 type Completion = Box<dyn FnOnce(&mut Engine) -> Result<()> + Send>;
 
@@ -95,8 +98,8 @@ impl ClientController {
     pub fn snapshot(&self) -> ClientSnapshot {
         self.shared
             .lock()
-            .map(|snapshot| snapshot.clone())
-            .unwrap_or_default()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Queues a command; safe to call from any thread and never blocks.
@@ -413,9 +416,14 @@ impl Engine {
     }
 
     fn publish(&self, shared: &Arc<Mutex<ClientSnapshot>>) {
-        if let Ok(mut guard) = shared.lock() {
-            *guard = self.snapshot.clone();
-        }
+        // A panic in some other task must not leave the interface frozen on a
+        // default snapshot while the core keeps running, so take the guard
+        // through the poison instead of skipping the publish.
+        let mut guard = shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = self.snapshot.clone();
+        drop(guard);
         // Skip the snapshot clone entirely when no consumer is draining the
         // event stream (the common case: UIs poll `snapshot()` instead).
         if self.event_tx.capacity() > 0 {
@@ -1198,25 +1206,33 @@ impl Engine {
             self.log_offset = 0;
             return;
         }
+        // Read a bounded slice per poll: a core that logs heavily without a
+        // restart would otherwise grow this buffer without limit.
         let mut bytes = Vec::new();
-        if file.read_to_end(&mut bytes).is_err() {
+        if file
+            .take(CORE_LOG_READ_LIMIT)
+            .read_to_end(&mut bytes)
+            .is_err()
+        {
             return;
         }
-        // Consume only complete lines: a partial trailing line is retried on
-        // the next poll, and the offset always lands on a character boundary.
-        let text = String::from_utf8_lossy(&bytes);
+        // Consume only complete lines, and split on the raw bytes. Decoding
+        // first would let an invalid sequence expand to a three-byte replacement
+        // character, pushing the recorded offset past the bytes actually read and
+        // silently skipping every later line.
         let mut consumed = 0usize;
-        for line in text.split_inclusive('\n') {
-            if !line.ends_with('\n') {
+        for chunk in bytes.split_inclusive(|byte| *byte == b'\n') {
+            if chunk.last() != Some(&b'\n') {
                 break;
             }
-            consumed += line.len();
-            let trimmed = line.trim_end_matches(['\n', '\r']);
-            if !trimmed.is_empty() {
+            consumed += chunk.len();
+            let line = String::from_utf8_lossy(&chunk[..chunk.len() - 1]);
+            let trimmed = line.trim_end_matches('\r');
+            if !trimmed.trim().is_empty() {
                 self.snapshot.push_log(strip_ansi(trimmed));
             }
         }
-        self.log_offset += consumed as u64;
+        self.log_offset = self.log_offset.saturating_add(consumed as u64);
     }
 
     fn auto_update_due(&mut self) -> bool {

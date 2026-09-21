@@ -279,6 +279,10 @@ struct Sbgui {
     log_scroll: ScrollHandle,
     /// Row count of the last rendered log panel; a change means new lines.
     log_rows: std::cell::Cell<usize>,
+    /// Minute of the last repaint: `age_label` renders relative times from the
+    /// wall clock at paint time, so a quiet snapshot still needs one repaint per
+    /// minute or those labels freeze.
+    painted_minute: u64,
     log_wrap: bool,
     log_follow: bool,
     confirm_close_all: bool,
@@ -349,6 +353,7 @@ impl Sbgui {
             selected_connection: None,
             log_scroll: ScrollHandle::default(),
             log_rows: std::cell::Cell::new(0),
+            painted_minute: 0,
             log_wrap: true,
             log_follow: true,
             confirm_close_all: false,
@@ -946,6 +951,12 @@ impl Sbgui {
                             })
                             .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
                                 view.page = item;
+                                // Armed one-click confirmations belong to the page
+                                // that shows them; carrying them over left a
+                                // button labelled 确认 without the user having
+                                // armed it on this page.
+                                view.confirm_close_all = false;
+                                view.confirm_delete_profile = None;
                                 cx.notify();
                             }))
                             .child(
@@ -4187,8 +4198,23 @@ fn main() {
                                     break;
                                 };
                                 entity.update(cx, |view: &mut Sbgui, cx| {
-                                    view.snapshot = view.controller.snapshot();
-                                    cx.notify();
+                                    let snapshot = view.controller.snapshot();
+                                    // Repainting unconditionally kept a window
+                                    // redrawing, decoding icons and resampling
+                                    // the graph four times a second while nothing
+                                    // had changed — and while it was hidden.
+                                    let changed = snapshot != view.snapshot;
+                                    if changed {
+                                        view.snapshot = snapshot;
+                                    }
+                                    let minute = SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .map(|elapsed| elapsed.as_secs() / 60)
+                                        .unwrap_or(view.painted_minute);
+                                    if changed || minute != view.painted_minute {
+                                        view.painted_minute = minute;
+                                        cx.notify();
+                                    }
                                 });
                             }
                         });

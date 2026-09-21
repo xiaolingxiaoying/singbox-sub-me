@@ -21,7 +21,6 @@ pub enum ClientEvent {
     /// The full state changed. Boxed because a snapshot is much larger than the
     /// other variants.
     SnapshotChanged(Box<ClientSnapshot>),
-    Log(String),
     OperationStarted(String),
     OperationFinished(String),
     Error(ClientError),

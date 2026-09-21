@@ -1972,14 +1972,26 @@ mod tests {
         assert!(matches!(result, Err(super::ConfigError::PortInUse(..))));
     }
 
+    /// Ports already handed out by this helper. The probe socket must be
+    /// released for the config under test to take the port, and Windows will
+    /// reissue a just-released ephemeral port to the next probe — which then
+    /// reads back as a duplicate protocol port and fails an otherwise valid
+    /// config.
     fn free_port() -> u16 {
+        use std::collections::HashSet;
+        use std::sync::{Mutex, OnceLock};
+        static RESERVED: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
+        let reserved = RESERVED.get_or_init(|| Mutex::new(HashSet::new()));
         loop {
             let listener = TcpListener::bind("127.0.0.1:0").expect("test port binds");
             let port = listener
                 .local_addr()
                 .expect("test port has an address")
                 .port();
-            if port >= 10000 {
+            if port < 10000 {
+                continue;
+            }
+            if reserved.lock().expect("reserved ports lock").insert(port) {
                 return port;
             }
         }
