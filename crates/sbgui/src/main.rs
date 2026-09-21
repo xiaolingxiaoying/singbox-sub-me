@@ -31,9 +31,9 @@ use client_core::{ClientCommand, ClientController};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, AppContext as _, AssetSource, Bounds, ClickEvent, ClipboardItem, Context, FocusHandle,
-    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBounds, WindowControlArea,
-    WindowOptions, div, px, rgb, rgba, size, svg,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, ScrollHandle,
+    SharedString, StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBounds,
+    WindowControlArea, WindowOptions, div, px, rgb, rgba, size, svg,
 };
 use gpui_platform::application;
 
@@ -273,8 +273,11 @@ struct Sbgui {
     node_card_view: bool,
     paused_connections: Option<Vec<Connection>>,
     selected_connection: Option<String>,
-    hidden_core_logs: usize,
-    hidden_events: usize,
+    /// Scroll position of the log panel, so "自动滚动" can pin the view to the
+    /// newest line instead of being a label that does nothing.
+    log_scroll: ScrollHandle,
+    /// Row count of the last rendered log panel; a change means new lines.
+    log_rows: std::cell::Cell<usize>,
     log_wrap: bool,
     log_follow: bool,
     confirm_close_all: bool,
@@ -341,8 +344,8 @@ impl Sbgui {
             node_card_view: false,
             paused_connections: None,
             selected_connection: None,
-            hidden_core_logs: 0,
-            hidden_events: 0,
+            log_scroll: ScrollHandle::default(),
+            log_rows: std::cell::Cell::new(0),
             log_wrap: true,
             log_follow: true,
             confirm_close_all: false,
@@ -527,21 +530,20 @@ impl Sbgui {
         self.field_mut(field).text = value;
     }
 
-    /// GPUI asks this before the window closes; both the custom close button
-    /// and Alt+F4 end up as `WM_CLOSE`, and a `false` return vetoes the close.
-    /// The window may close only once the exit decision is made: closing
-    /// kills the core with the process, and while the OS proxy is enabled it
-    /// would keep pointing at a dead local port, silently breaking the
-    /// user's network.
+    /// The veto GPUI consults for `WM_CLOSE` (Alt+F4, taskbar close). A `false`
+    /// return keeps the window open so the exit decision can be asked for
+    /// first; the custom close button routes through [`Self::request_close`]
+    /// because a client-area click never reaches this hook.
     fn handle_close_request(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.exit_choice.is_some() || !self.snapshot.system_proxy_enabled {
-            return true;
+        if self.exit_choice.is_none() && self.snapshot.system_proxy_enabled {
+            if !self.confirm_exit {
+                self.confirm_exit = true;
+                cx.notify();
+            }
+            return false;
         }
-        if !self.confirm_exit {
-            self.confirm_exit = true;
-            cx.notify();
-        }
-        false
+        self.teardown();
+        true
     }
 
     fn choose_exit(&mut self, choice: ExitChoice, window: &mut Window) {
@@ -552,7 +554,17 @@ impl Sbgui {
             self.snapshot.system_proxy_enabled = false;
         }
         self.exit_choice = Some(choice);
+        self.teardown();
         window.remove_window();
+    }
+
+    /// Stops the core and waits for the engine to reap it, before the window
+    /// disappears. The engine's runtime is leaked for the process lifetime, so
+    /// nothing would ever drop the child handle and `kill_on_drop` would not
+    /// run: sing-box would outlive the client holding the mixed port and, in
+    /// TUN mode, the routes it took over.
+    fn teardown(&self) {
+        self.controller.shutdown();
     }
 
     fn selected_group(&self) -> Option<ProxyGroupSnapshot> {
@@ -800,22 +812,32 @@ impl Sbgui {
                 "minimize",
                 WindowControlArea::Min,
                 cx,
-                |window, _| window.minimize_window(),
+                |_, window, _| window.minimize_window(),
             ))
             .child(self.window_button(
                 "maximize",
                 maximize_icon,
                 WindowControlArea::Max,
                 cx,
-                |window, _| window.zoom_window(),
+                |_, window, _| window.zoom_window(),
             ))
             .child(self.window_button(
                 "close",
                 "close",
                 WindowControlArea::Close,
                 cx,
-                |window, _| window.remove_window(),
+                Self::request_close,
             ))
+    }
+
+    /// The custom close button is a click inside the client area, not a
+    /// `WM_CLOSE`, so `on_window_should_close` never vetoes it. It has to run
+    /// the same decision Alt+F4 goes through, or a click would drop the window
+    /// while the OS proxy still points at the dying core's mixed port.
+    fn request_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.handle_close_request(cx) {
+            window.remove_window();
+        }
     }
 
     fn window_button(
@@ -824,7 +846,7 @@ impl Sbgui {
         icon_name: &'static str,
         area: WindowControlArea,
         cx: &mut Context<Self>,
-        action: impl Fn(&mut Window, &mut App) + 'static,
+        action: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> impl IntoElement {
         let is_close = area == WindowControlArea::Close;
         div()
@@ -843,7 +865,7 @@ impl Sbgui {
                     style.bg(rgb(SURFACE_2)).text_color(rgb(TEXT))
                 }
             })
-            .on_click(cx.listener(move |_, _: &ClickEvent, window, cx| action(window, cx)))
+            .on_click(cx.listener(move |view, _: &ClickEvent, window, cx| action(view, window, cx)))
             .child(icon(icon_name, MUTED, 14.0))
     }
 
@@ -2670,7 +2692,6 @@ impl Sbgui {
             .snapshot
             .core_logs
             .iter()
-            .skip(self.hidden_core_logs.min(self.snapshot.core_logs.len()))
             .filter(|line| keep(line))
             .cloned()
             .collect();
@@ -2678,17 +2699,22 @@ impl Sbgui {
             .snapshot
             .events
             .iter()
-            .skip(self.hidden_events.min(self.snapshot.events.len()))
             .filter(|line| keep(line))
             .cloned()
             .collect();
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         for (index, line) in kernel.iter().rev().take(180).rev().enumerate() {
-            rows.push(log_row(index, "sing-box", line));
+            rows.push(log_row(index, "sing-box", line, self.log_wrap));
         }
         let event_offset = rows.len();
         for (index, line) in events.iter().rev().take(60).rev().enumerate() {
-            rows.push(log_row(event_offset + index, "客户端", line));
+            rows.push(log_row(event_offset + index, "客户端", line, self.log_wrap));
+        }
+        // "自动滚动" pins the view to the newest line whenever the panel grew;
+        // scrolling a list that did not change would fight the user's wheel.
+        let rows_seen = self.log_rows.replace(rows.len());
+        if self.log_follow && rows.len() > rows_seen {
+            self.log_scroll.scroll_to_item(rows.len() - 1);
         }
         let copy_text = kernel
             .iter()
@@ -2824,8 +2850,10 @@ impl Sbgui {
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(SURFACE_2)))
                             .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
-                                view.hidden_core_logs = view.snapshot.core_logs.len();
-                                view.hidden_events = view.snapshot.events.len();
+                                // The engine owns the buffers: hiding lines by
+                                // count stops working once the ring is full.
+                                view.send(ClientCommand::ClearLogs);
+                                view.log_rows.set(0);
                                 cx.notify();
                             }))
                             .child("清空"),
@@ -2900,6 +2928,7 @@ impl Sbgui {
                             .id("log-view")
                             .h(px(420.0))
                             .overflow_y_scroll()
+                            .track_scroll(&self.log_scroll)
                             .children(if rows.is_empty() {
                                 vec![
                                     empty_state(
@@ -3607,7 +3636,7 @@ fn log_table_header() -> impl IntoElement {
         .child(div().flex_1().child("内容"))
 }
 
-fn log_row(index: usize, source: &str, line: &str) -> gpui::AnyElement {
+fn log_row(index: usize, source: &str, line: &str, wrap: bool) -> gpui::AnyElement {
     let color = level_color(line);
     let level = if color == DANGER {
         "Error"
@@ -3647,6 +3676,9 @@ fn log_row(index: usize, source: &str, line: &str) -> gpui::AnyElement {
             div()
                 .flex_1()
                 .min_w(px(0.0))
+                .when(!wrap, |row| {
+                    row.whitespace_nowrap().overflow_hidden().text_ellipsis()
+                })
                 .text_color(rgb(if color == TEXT { TEXT } else { color }))
                 .child(line.to_owned()),
         )
@@ -4057,6 +4089,19 @@ fn main() {
             .expect("tokio runtime"),
     ));
     let dir = settings::data_dir_for(DATA_DIR).expect("data directory");
+    // The mixed port, the OS proxy and the runtime configuration are all
+    // per-directory or machine-global, so a second instance would fight the
+    // first over all three. Held for as long as the event loop runs.
+    let _instance = match settings::acquire_instance_lock(&dir) {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!("无法锁定数据目录: {error}");
+            return;
+        }
+    };
+    if _instance.is_none() {
+        return;
+    }
     let _ = load_settings(&dir);
     let _ = Profiles::load_or_create(&dir);
     let ui_data_dir = dir.clone();
@@ -4108,9 +4153,10 @@ fn main() {
                         refresh.detach();
                         view
                     });
-                    // One hook covers the custom close button and Alt+F4:
-                    // both arrive as WM_CLOSE, and a `false` return vetoes it
-                    // so the exit confirmation can be shown first.
+                    // Alt+F4 and the taskbar close arrive as WM_CLOSE and are
+                    // vetoed here; the custom close button is a client-area
+                    // click that bypasses this hook and calls
+                    // `Sbgui::request_close` instead.
                     let close_view = view.downgrade();
                     window.on_window_should_close(cx, move |_, cx| {
                         close_view

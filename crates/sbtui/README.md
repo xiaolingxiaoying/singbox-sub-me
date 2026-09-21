@@ -20,6 +20,9 @@ cargo build --release -p sbtui
 
 数据目录：Windows `%APPDATA%\sbtui`，Linux/macOS `~/.config/sbtui`。
 `settings.toml`（应用设置）与 `profiles.toml`（订阅档案）缺失时会自动创建。
+每个数据目录有单实例锁（`client.lock`），重复启动的第二个实例直接退出；退出时先停内核再
+关终端，上次非正常结束留下的系统代理设置会在下次启动时自动恢复原状。mixed 端口与系统代理
+是整机共享资源，与 `sbgui` 同时运行时需错开 mixed 端口。
 
 ## 安装与 `ly` 快捷方式
 

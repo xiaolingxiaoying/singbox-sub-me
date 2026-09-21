@@ -16,6 +16,9 @@ use tokio::process::{Child, Command};
 
 pub struct CoreHandle {
     pub child: Child,
+    /// Whether the operating system will reap this child if the client dies
+    /// without tearing it down cooperatively. See [`attach_orphan_guard`].
+    pub orphan_guard: bool,
 }
 
 pub struct StartedCore {
@@ -41,6 +44,17 @@ pub async fn start_managed(
 ) -> Result<StartedCore> {
     let reservation = std::net::TcpListener::bind("127.0.0.1:0")?;
     let address = reservation.local_addr()?;
+    // Fail before rewriting the runtime configuration when the data-plane port
+    // is already taken: the core would exit on its own bind and the readiness
+    // wait would only report it seconds later, after the config was clobbered.
+    if mode == crate::system_proxy::TrafficMode::SystemProxy
+        && std::net::TcpListener::bind(("127.0.0.1", mixed_port)).is_err()
+    {
+        bail!(
+            "mixed 端口 {mixed_port} 已被占用：可能是上一次未正常退出时残留的 sing-box 内核，\
+             或其他代理软件；结束残留进程或在设置中改用其他端口"
+        );
+    }
     let mut entropy = [0u8; 32];
     getrandom::fill(&mut entropy)
         .map_err(|error| anyhow::anyhow!("controller secret generation failed: {error}"))?;
@@ -230,7 +244,81 @@ pub async fn start(core: &Path, config: &Path, log_path: &Path) -> Result<CoreHa
         .kill_on_drop(true)
         .spawn()
         .context("spawning the sing-box core")?;
-    Ok(CoreHandle { child })
+    let orphan_guard = attach_orphan_guard(child.id());
+    Ok(CoreHandle {
+        child,
+        orphan_guard,
+    })
+}
+
+/// Arms the operating system to terminate the core when this process goes
+/// away. `kill_on_drop` is the crate's only cooperative teardown and it never
+/// runs when the process exits first — which is the normal GUI exit path, since
+/// the engine's runtime is deliberately leaked. Without a guard the client
+/// leaves an orphaned core holding the mixed port and, in TUN mode, the routes
+/// it took over.
+///
+/// A core cannot be asked to shut itself down over its control API: sing-box
+/// registers no shutdown route and only honours SIGINT/SIGTERM
+/// (`cmd/sing-box/cmd_run.go`), which a console-less Windows GUI parent cannot
+/// deliver. Hence the job object. A failure here is not fatal: it only means
+/// the guarantee is missing, which the caller surfaces.
+#[cfg(windows)]
+fn attach_orphan_guard(pid: Option<u32>) -> bool {
+    use std::sync::OnceLock;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
+
+    /// `HANDLE` wraps a raw pointer, so it is neither `Send` nor `Sync`, while
+    /// the job is process-wide and only ever crosses these syscalls.
+    struct Job(HANDLE);
+    unsafe impl Send for Job {}
+    unsafe impl Sync for Job {}
+
+    // One job per client process. Its handle is deliberately never closed,
+    // because closing the last handle is what terminates the members.
+    static JOB: OnceLock<Option<Job>> = OnceLock::new();
+
+    let Some(pid) = pid else { return false };
+    let job = JOB.get_or_init(|| {
+        let created = unsafe { CreateJobObjectW(None, windows::core::PCWSTR::null()) }.ok()?;
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                created,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&limits).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if configured.is_err() {
+            let _ = unsafe { CloseHandle(created) };
+            return None;
+        }
+        Some(Job(created))
+    });
+    let Some(job) = job else { return false };
+    let Ok(process) = (unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, pid) })
+    else {
+        return false;
+    };
+    let assigned = unsafe { AssignProcessToJobObject(job.0, process) };
+    let _ = unsafe { CloseHandle(process) };
+    assigned.is_ok()
+}
+
+#[cfg(not(windows))]
+fn attach_orphan_guard(_pid: Option<u32>) -> bool {
+    // Unix delivers SIGTERM to the core through the cooperative shutdown path,
+    // and a killed client leaves its core behind; tracked as a follow-up
+    // (PR_SET_PDEATHSIG) rather than a per-start warning.
+    true
 }
 
 /// Exponential backoff for automatic core restarts after a crash: 2s, 4s,

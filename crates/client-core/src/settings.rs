@@ -225,6 +225,43 @@ pub fn data_dir_for(app: &str) -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Held for the lifetime of the process; dropping it releases the lock.
+pub struct InstanceLock {
+    _file: fs::File,
+}
+
+/// Takes the single-instance lock for one data directory, or `None` when
+/// another instance already holds it. Both clients fight over global
+/// resources (the mixed port, the operating-system proxy, the active runtime
+/// configuration), so a second instance must not start. The lock is released by
+/// the operating system when the holder dies, so a crash cannot wedge a client
+/// out of its own directory.
+pub fn acquire_instance_lock(dir: &Path) -> Result<Option<InstanceLock>> {
+    use fs2::FileExt;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        // The lock is the whole content; never truncate a file another
+        // instance may be holding.
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(dir.join("client.lock"))
+        .context("opening the instance lock file")?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(Some(InstanceLock { _file: file })),
+        Err(error) if lock_is_held(&error) => Ok(None),
+        Err(error) => Err(anyhow::Error::new(error).context("locking the instance")),
+    }
+}
+
+/// A contended advisory lock surfaces as `WouldBlock` on Unix, but fs2 hands
+/// back the raw `ERROR_LOCK_VIOLATION` on Windows without normalizing it.
+fn lock_is_held(error: &std::io::Error) -> bool {
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error.raw_os_error() == Some(ERROR_LOCK_VIOLATION)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,6 +275,27 @@ mod tests {
         settings.save(&dir).expect("settings saved");
         let loaded = Settings::load_or_create(&dir).expect("settings loaded");
         assert_eq!(loaded.auto_update_minutes, 60);
+    }
+
+    #[test]
+    fn a_second_instance_of_one_data_directory_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = acquire_instance_lock(dir.path())
+            .expect("first lock")
+            .expect("the directory starts unlocked");
+        assert!(
+            acquire_instance_lock(dir.path())
+                .expect("second attempt")
+                .is_none(),
+            "two instances must not share the mixed port, the OS proxy and the runtime config"
+        );
+        drop(first);
+        assert!(
+            acquire_instance_lock(dir.path())
+                .expect("attempt after release")
+                .is_some(),
+            "the lock must die with its holder, not outlive it"
+        );
     }
 
     #[test]

@@ -1115,6 +1115,7 @@ dependencies = [
  "base64 0.22.1",
  "dirs",
  "flate2",
+ "fs2",
  "futures-util",
  "getrandom 0.3.4",
  "reqwest",
@@ -1125,6 +1126,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 0.8.23",
+ "windows 0.61.3",
  "winreg 0.52.0",
  "zip",
 ]

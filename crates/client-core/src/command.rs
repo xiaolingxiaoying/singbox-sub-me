@@ -89,6 +89,14 @@ pub enum ClientCommand {
     UpdateSettings(SettingsPatch),
     /// Forces an immediate state refresh from the core.
     Refresh,
+    /// Empties the published log and event buffers. Clearing has to happen in
+    /// the engine: a UI-side "hide the first N lines" marker breaks as soon as
+    /// the ring buffer is full, because the cap makes N permanent.
+    ClearLogs,
+    /// Ends the engine loop, which reaps the core child on its way out without
+    /// touching the operating-system proxy — the UI has already decided whether
+    /// to keep or restore it. See `ClientController::shutdown`.
+    Shutdown,
 }
 
 impl ClientCommand {
@@ -117,6 +125,9 @@ impl ClientCommand {
             Self::CloseAllConnections => "关闭全部连接".to_owned(),
             Self::UpdateSettings(_) => "保存设置".to_owned(),
             Self::Refresh => "刷新状态".to_owned(),
+            Self::ClearLogs => "清空日志".to_owned(),
+            // Never rendered: `Shutdown` is intercepted before `apply`.
+            Self::Shutdown => String::new(),
         }
     }
 }

@@ -15,20 +15,42 @@ pub const TARGET_FORMAT: &str = "sing-box-full.json";
 /// Rewrites any sbctl subscription URL (any `/sub/<cred>/<suffix>` form,
 /// including `qr/...` and `index`) into the same credential's
 /// `sing-box-full.json` link. Non-`/sub/` URLs are returned unchanged.
+///
+/// The rewrite works on the path only: a provider that authenticates with a
+/// query token (`/sub/abc?token=…`) must keep it, and folding the query into
+/// the last path segment produced a URL no server would recognise.
 pub fn normalize_url(input: &str) -> String {
     let trimmed = input.trim();
-    let Some(path_start) = trimmed.find("/sub/") else {
+    let Ok(mut url) = reqwest::Url::parse(trimmed) else {
         return trimmed.to_owned();
     };
-    let (base, rest) = trimmed.split_at(path_start + "/sub/".len());
-    // rest = "<credential>/<format...>"; drop QR prefixes and any extra
-    // segments, then swap the format suffix.
-    let mut segments = rest.split('/').filter(|s| !s.is_empty());
-    let Some(credential) = segments.next() else {
+    if !matches!(url.scheme(), "http" | "https") {
+        return trimmed.to_owned();
+    }
+    let Some((prefix, tail)) = url.path().rsplit_once("/sub/") else {
         return trimmed.to_owned();
     };
-    let credential = credential.trim_end_matches('/');
-    format!("{base}{credential}/{TARGET_FORMAT}")
+    let credential = tail.split('/').next().unwrap_or_default();
+    if credential.is_empty() {
+        return trimmed.to_owned();
+    }
+    url.set_path(&format!("{prefix}/sub/{credential}/{TARGET_FORMAT}"));
+    url.into()
+}
+
+/// The URL in a form that is safe for a status line or the event log: an sbctl
+/// subscription carries its credential in the path, so the credential segment
+/// is replaced. ADR-0013 applies to client diagnostics too.
+pub fn printable_url(url: &str) -> String {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return "[unparseable subscription url]".to_owned();
+    };
+    let host = parsed.host_str().unwrap_or_default();
+    if parsed.path().contains("/sub/") {
+        format!("{}://{host}/sub/[redacted]", parsed.scheme())
+    } else {
+        format!("{}://{host}{}", parsed.scheme(), parsed.path())
+    }
 }
 
 /// Builds the bare endpoint from a normalized sbctl full-profile route.
@@ -135,9 +157,14 @@ pub async fn fetch(url: &str, mirror: &str) -> Result<Fetched> {
         .get(&url)
         .send()
         .await
-        .with_context(|| format!("requesting {url}"))?
+        .with_context(|| format!("requesting {}", printable_url(&url)))?
         .error_for_status()
-        .with_context(|| format!("subscription endpoint returned an error for {url}"))?;
+        .with_context(|| {
+            format!(
+                "subscription endpoint returned an error for {}",
+                printable_url(&url)
+            )
+        })?;
     let userinfo = response
         .headers()
         .get("subscription-userinfo")
@@ -478,6 +505,48 @@ mod tests {
         assert_eq!(
             normalize_url("https://other/sub/xyz"),
             format!("https://other/sub/xyz/{TARGET_FORMAT}"),
+        );
+    }
+
+    #[test]
+    fn normalizing_rewrites_the_route_without_swallowing_a_query_or_fragment() {
+        let base = "https://sub.example.test";
+        assert_eq!(
+            normalize_url(&format!("{base}/sub/cred-abc?token=xyz")),
+            format!("{base}/sub/cred-abc/{TARGET_FORMAT}?token=xyz"),
+            "a provider token must survive the rewrite"
+        );
+        assert_eq!(
+            normalize_url(&format!("{base}/sub/cred-abc/uri#note")),
+            format!("{base}/sub/cred-abc/{TARGET_FORMAT}#note"),
+        );
+        assert_eq!(
+            normalize_url("not a url"),
+            "not a url",
+            "unparseable input is passed through untouched"
+        );
+        assert_eq!(
+            normalize_url("file:///tmp/keep/sub/toy"),
+            "file:///tmp/keep/sub/toy",
+            "only http(s) routes are rewritten"
+        );
+    }
+
+    #[test]
+    fn printable_urls_hide_the_subscription_credential() {
+        assert_eq!(
+            printable_url("https://sub.example.test/sub/super-secret-credential/uri"),
+            "https://sub.example.test/sub/[redacted]"
+        );
+        assert_eq!(
+            printable_url("https://example.test/api/feed?key=super-secret"),
+            "https://example.test/api/feed",
+            "a non-sbctl path is shown, minus its query"
+        );
+        assert!(
+            !printable_url("https://sub.example.test/sub/abc/sing-box.json?token=t")
+                .contains("abc"),
+            "neither the credential nor the token may reach a status line"
         );
     }
 

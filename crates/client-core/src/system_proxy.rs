@@ -77,6 +77,14 @@ fn backup_path(dir: &Path) -> std::path::PathBuf {
     dir.join("cache/system-proxy-backup.json")
 }
 
+/// Whether a previous session captured the operating-system proxy state and
+/// then died before restoring it. A leftover backup means the live proxy still
+/// points at a mixed port that no longer exists, which silently breaks the
+/// user's network while a fresh snapshot reports the proxy as off.
+pub fn has_residual_backup(dir: &Path) -> bool {
+    backup_path(dir).is_file()
+}
+
 /// Captures the pre-existing proxy state once (a later enable must not
 /// overwrite the user's original settings with the client's own).
 fn capture_backup(dir: &Path) {

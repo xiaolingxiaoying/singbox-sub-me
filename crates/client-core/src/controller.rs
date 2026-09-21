@@ -22,7 +22,10 @@ use crate::{ClientCommand, ClientError, ClientEvent, core, subscription};
 
 /// How often the engine wakes up to poll the core and check timers.
 const TICK: Duration = Duration::from_millis(500);
-const TRAFFIC_EVERY: Duration = Duration::from_secs(1);
+/// How often the engine samples core traffic. Published to the UIs: a window
+/// label computed from the render tick instead of this would misreport the
+/// span of `traffic_history` by the ratio of the two.
+pub const TRAFFIC_EVERY: Duration = Duration::from_secs(1);
 const PROXIES_EVERY: Duration = Duration::from_secs(3);
 const CONNECTIONS_EVERY: Duration = Duration::from_secs(2);
 /// Maximum number of undelivered push events. UIs poll, so this only needs to
@@ -32,6 +35,10 @@ const EVENT_BACKLOG: usize = 32;
 /// persistent cause (bad config, port conflict) needs an administrator.
 const MAX_AUTO_RESTARTS: u32 = 5;
 const STABLE_RUN: Duration = Duration::from_secs(60);
+/// How long [`ClientController::shutdown`] waits for the engine to reap its
+/// core child. Stopping is local (kill plus a registry write); sing-box's own
+/// graceful window is 10s and we never wait for a signal it cannot receive.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
 type Completion = Box<dyn FnOnce(&mut Engine) -> Result<()> + Send>;
 
@@ -52,6 +59,9 @@ pub struct ClientController {
     command_tx: mpsc::UnboundedSender<ClientCommand>,
     shared: Arc<Mutex<ClientSnapshot>>,
     events: tokio::sync::Mutex<mpsc::Receiver<ClientEvent>>,
+    /// Resolves once the engine loop has returned, which is after it reaped its
+    /// core child. `Disconnected` means the engine task is gone entirely.
+    stopped_rx: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
 }
 
 impl ClientController {
@@ -64,15 +74,20 @@ impl ClientController {
         let (event_tx, event_rx) = mpsc::channel(EVENT_BACKLOG);
         let shared = Arc::new(Mutex::new(ClientSnapshot::default()));
         let worker = shared.clone();
+        // Lets a UI wait for the engine to finish reaping its child instead of
+        // racing process exit against it; see [`Self::shutdown`].
+        let (stopped_tx, stopped_rx) = std::sync::mpsc::channel();
         tokio::spawn(async move {
             let mut engine = Engine::new(dir, event_tx).await;
             engine.publish(&worker);
             engine.run(command_rx, worker).await;
+            let _ = stopped_tx.send(());
         });
         Self {
             command_tx,
             shared,
             events: tokio::sync::Mutex::new(event_rx),
+            stopped_rx: std::sync::Mutex::new(stopped_rx),
         }
     }
 
@@ -89,6 +104,34 @@ impl ClientController {
         self.command_tx
             .send(command)
             .map_err(|_| anyhow::anyhow!("客户端控制器已停止"))
+    }
+
+    /// Stops the core and blocks (bounded by [`SHUTDOWN_GRACE`]) until the
+    /// engine task has reaped its child. The operating-system proxy is left
+    /// exactly as it is: the UI decides keep-or-restore before it calls here.
+    ///
+    /// UIs must call this on their exit path. The child is otherwise killed by
+    /// `kill_on_drop` when the engine loop ends, and a process that exits first
+    /// gives that task no chance to run — leaving sing-box holding the mixed
+    /// port and, in TUN mode, the routes it took over.
+    pub fn shutdown(&self) {
+        let _ = self.command_tx.send(ClientCommand::Shutdown);
+        let deadline = Instant::now() + SHUTDOWN_GRACE;
+        let stopped = self.stopped_rx.lock().ok();
+        loop {
+            let done = match &stopped {
+                Some(receiver) => !matches!(
+                    receiver.try_recv(),
+                    Err(std::sync::mpsc::TryRecvError::Empty)
+                ),
+                // A poisoned lock means no engine will ever report back.
+                None => true,
+            };
+            if done || Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// Receives the next push event. UIs that poll [`Self::snapshot`] can
@@ -123,12 +166,36 @@ struct Engine {
     event_tx: mpsc::Sender<ClientEvent>,
     pending: Option<PendingOperation>,
     healthy_since: Option<Instant>,
+    /// Why persisting is refused, if it is. See [`Engine::new`].
+    store_unreadable: Option<String>,
 }
 
 impl Engine {
     async fn new(dir: PathBuf, event_tx: mpsc::Sender<ClientEvent>) -> Self {
-        let settings = Settings::load_or_create(&dir).unwrap_or_default();
-        let profiles = Profiles::load_or_create(&dir).unwrap_or_default();
+        let settings = Settings::load_or_create(&dir);
+        let profiles = Profiles::load_or_create(&dir);
+        // A store that cannot be read must not be "repaired" by the next save:
+        // the in-memory copy is empty at that point, so writing it back would
+        // delete every subscription link the administrator imported. The engine
+        // keeps running and refuses to persist until the file is fixed.
+        let store_unreadable = [settings.as_ref().err(), profiles.as_ref().err()]
+            .into_iter()
+            .flatten()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("；");
+        let store_unreadable = (!store_unreadable.is_empty()).then_some(store_unreadable);
+        let settings = settings.unwrap_or_default();
+        let profiles = profiles.unwrap_or_default();
+        // A previous instance can die (crash, task manager, logoff) after
+        // pointing the operating-system proxy at its own mixed port. Nothing
+        // else would ever revisit that setting: the fresh snapshot reports the
+        // proxy as off, so the machine keeps a dead proxy and the user loses
+        // network access while the client looks idle. Restore before the core
+        // (and possibly the proxy) comes back up.
+        if system_proxy::has_residual_backup(&dir) {
+            let _ = system_proxy::disable(&dir);
+        }
         let core_path = settings::core_path(&dir);
         let core_installed = core_path.is_file();
         let core_version = core_installed
@@ -143,10 +210,10 @@ impl Engine {
             .active_profile()
             .map(|profile| ProfileSummary::from_profile(profile, true));
         snapshot.profiles = profile_summaries(&profiles);
-        snapshot.status = if snapshot.core_installed {
-            "就绪。按“启动内核”开始。".to_owned()
-        } else {
-            "就绪。先下载 sing-box 内核，再导入订阅。".to_owned()
+        snapshot.status = match &store_unreadable {
+            Some(reason) => format!("本地存储无法读取，改动不会被保存：{reason}"),
+            None if snapshot.core_installed => "就绪。按“启动内核”开始。".to_owned(),
+            None => "就绪。先下载 sing-box 内核，再导入订阅。".to_owned(),
         };
         // The active configuration from a previous run is still the rules
         // source until the next start rewrites it.
@@ -176,6 +243,7 @@ impl Engine {
             event_tx,
             pending: None,
             healthy_since: None,
+            store_unreadable,
         }
     }
 
@@ -216,6 +284,11 @@ impl Engine {
             let Some(command) = command else {
                 break;
             };
+            // Exit skips the operation gate entirely: shutting down must never
+            // wait for a download it is free to cancel.
+            if matches!(command, ClientCommand::Shutdown) {
+                break;
+            }
             if self.pending.is_some()
                 && !matches!(
                     command,
@@ -249,6 +322,28 @@ impl Engine {
         self.cancel_operation().await;
         if let Some(mut child) = self.child.take() {
             let _ = child.child.kill().await;
+        }
+    }
+
+    /// Persists the profile table, unless the on-disk store was unreadable at
+    /// startup — in which case the in-memory table is empty and saving it would
+    /// delete the subscription links the failure made invisible.
+    fn save_profiles(&self) -> Result<()> {
+        self.store_writable()?;
+        self.profiles.save(&self.dir)
+    }
+
+    fn save_settings(&self) -> Result<()> {
+        self.store_writable()?;
+        self.settings.save(&self.dir)
+    }
+
+    fn store_writable(&self) -> Result<()> {
+        match &self.store_unreadable {
+            None => Ok(()),
+            Some(reason) => anyhow::bail!(
+                "本地存储不可写（{reason}）；请先修复数据目录内的配置文件，本次改动未保存"
+            ),
         }
     }
 
@@ -367,7 +462,7 @@ impl Engine {
                     anyhow::bail!("切换流量模式前请先停止内核");
                 }
                 self.settings.traffic_mode = mode;
-                self.settings.save(&self.dir)?;
+                self.save_settings()?;
                 self.snapshot.traffic_mode = mode;
                 self.snapshot.settings.traffic_mode = mode;
                 self.note(format!("流量模式: {}", mode.label()));
@@ -394,7 +489,7 @@ impl Engine {
                 self.profiles
                     .activate(&name)
                     .ok_or_else(|| anyhow::anyhow!("订阅档案不存在: {name}"))?;
-                self.profiles.save(&self.dir)?;
+                self.save_profiles()?;
                 self.snapshot.active_profile = self
                     .profiles
                     .active_profile()
@@ -490,10 +585,17 @@ impl Engine {
                     anyhow::bail!("切换流量模式或混合端口前请先停止内核");
                 }
                 patch.apply(&mut self.settings);
-                self.settings.save(&self.dir)?;
+                self.save_settings()?;
                 self.snapshot.settings = (&self.settings).into();
                 self.snapshot.traffic_mode = self.settings.traffic_mode;
                 self.note("设置已保存");
+                Ok(())
+            }
+            // The core-log reader keeps its file offset, so clearing shows only
+            // lines written from now on rather than replaying the tail.
+            ClientCommand::ClearLogs => {
+                self.snapshot.core_logs.clear();
+                self.snapshot.events.clear();
                 Ok(())
             }
             ClientCommand::Refresh => {
@@ -501,6 +603,11 @@ impl Engine {
                 self.last_proxies_at = Instant::now() - PROXIES_EVERY;
                 self.last_connections_at = Instant::now() - CONNECTIONS_EVERY;
                 Ok(())
+            }
+            // The engine loop intercepts this before `apply`, so reaching it
+            // means a caller invented an exit path that skips the teardown.
+            ClientCommand::Shutdown => {
+                anyhow::bail!("Shutdown is handled by the engine loop, not by a command")
             }
         }
     }
@@ -536,6 +643,11 @@ impl Engine {
             )?;
             let started = core::start_managed(&dir, &raw, mode, port).await?;
             Ok(Box::new(move |engine: &mut Engine| {
+                if !started.handle.orphan_guard {
+                    engine.note(
+                        "警告：无法为内核建立系统级回收保护；若本程序被强制结束，sing-box 可能残留",
+                    );
+                }
                 engine.child = Some(started.handle);
                 engine.api = started.api;
                 engine.snapshot.core_runtime_version = Some(started.version);
@@ -684,7 +796,7 @@ impl Engine {
                         stored.last_updated = now_epoch();
                     }
                 }
-                engine.profiles.save(&engine.dir)?;
+                engine.save_profiles()?;
                 engine.snapshot.subscription_usage = fetched.userinfo;
                 engine.snapshot.profiles = profile_summaries(&engine.profiles);
                 engine.snapshot.active_profile = engine
@@ -716,7 +828,7 @@ impl Engine {
             .map(|profile| profile.name.clone())
         {
             self.profiles.active = Some(existing.clone());
-            self.profiles.save(&self.dir)?;
+            self.save_profiles()?;
             self.snapshot.active_profile = self
                 .profiles
                 .active_profile()
@@ -754,7 +866,7 @@ impl Engine {
             last_updated: 0,
         });
         self.profiles.active = Some(name.clone());
-        self.profiles.save(&self.dir)?;
+        self.save_profiles()?;
         self.snapshot.profiles = profile_summaries(&self.profiles);
         self.snapshot.active_profile = self
             .profiles
@@ -792,7 +904,7 @@ impl Engine {
             last_updated: now_epoch(),
         });
         self.profiles.active = Some(name.clone());
-        self.profiles.save(&self.dir)?;
+        self.save_profiles()?;
         self.snapshot.profiles = profile_summaries(&self.profiles);
         self.snapshot.active_profile = self
             .profiles
@@ -822,7 +934,7 @@ impl Engine {
         };
         profile.url = normalized;
         profile.source = source;
-        self.profiles.save(&self.dir)?;
+        self.save_profiles()?;
         self.snapshot.profiles = profile_summaries(&self.profiles);
         self.note(format!("已更新档案 {name} 的订阅链接"));
         Ok(())
@@ -846,7 +958,7 @@ impl Engine {
                 .first()
                 .map(|profile| profile.name.clone());
         }
-        self.profiles.save(&self.dir)?;
+        self.save_profiles()?;
         let cache = settings::profile_cache_path(&self.dir, name);
         if tokio::fs::try_exists(&cache).await.unwrap_or(false) {
             tokio::fs::remove_file(cache).await?;
@@ -1112,7 +1224,9 @@ impl Engine {
         if minutes == 0 || self.profiles.active.is_none() {
             return false;
         }
-        let interval = Duration::from_secs(minutes * 60);
+        // The interval comes straight from a text field, so a huge value must
+        // degrade to "effectively never" rather than overflow.
+        let interval = Duration::from_secs(minutes.saturating_mul(60));
         let due = match self.last_auto_update {
             Some(last) => last.elapsed() >= interval,
             None => true,
@@ -1246,6 +1360,49 @@ mod tests {
                 .is_err()
         );
         assert!(engine.pending.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_waits_for_the_engine_to_acknowledge_instead_of_timing_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let controller = ClientController::start(dir.path().to_path_buf());
+        let began = Instant::now();
+        controller.shutdown();
+        assert!(
+            began.elapsed() < SHUTDOWN_GRACE / 2,
+            "an exit that the engine acknowledged should not spend the grace window"
+        );
+        // The loop is gone, so a late command must be refused rather than
+        // silently queued behind a task that no longer runs.
+        assert!(controller.send(ClientCommand::Refresh).is_err());
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_store_is_reported_and_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("cache")).unwrap();
+        std::fs::write(
+            dir.path().join("profiles.toml"),
+            "not a valid profile table [[",
+        )
+        .unwrap();
+        let engine = test_engine(dir.path()).await;
+        assert!(
+            engine.snapshot.status.contains("本地存储无法读取"),
+            "the failure has to be visible: {}",
+            engine.snapshot.status
+        );
+        assert!(
+            engine.save_profiles().is_err(),
+            "an empty in-memory table must never replace an unreadable store"
+        );
+        assert!(engine.save_settings().is_err());
+        assert!(
+            std::fs::read_to_string(dir.path().join("profiles.toml"))
+                .unwrap()
+                .contains("not a valid profile table"),
+            "the refused save still wrote to disk"
+        );
     }
 
     #[tokio::test]

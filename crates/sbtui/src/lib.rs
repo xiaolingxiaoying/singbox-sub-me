@@ -202,9 +202,10 @@ struct App {
     /// the user put it instead of snapping back to the running node.
     proxies_synced_group: Option<usize>,
     // Connections tab.
-    /// Highlighted row in the connection table (independent from the proxy
-    /// member highlight).
-    selected_connection: usize,
+    /// The highlighted connection, tracked by id: the engine re-sorts the table
+    /// on every refresh, so a row index would drift onto a different connection
+    /// and `x` would close the wrong one.
+    selected_connection_id: Option<String>,
     conn_sort: ConnSort,
     /// Case-insensitive substring filter for the connection table.
     conn_filter: String,
@@ -212,6 +213,10 @@ struct App {
     /// Toggle between the live log tail (default) and a rendering of the
     /// active configuration's routing rules.
     show_rules: bool,
+    /// Rows scrolled back from the newest line; 0 follows the tail.
+    log_scroll: usize,
+    /// Inner text height of the last rendered log panel, used to page.
+    log_view_height: u16,
     /// Freeze the log tail so the view can be inspected while lines stream.
     paused_logs: Option<Vec<String>>,
     log_filter: LogFilter,
@@ -250,10 +255,12 @@ impl App {
             selected_member: 0,
             group_list: ListState::default(),
             proxies_synced_group: None,
-            selected_connection: 0,
+            selected_connection_id: None,
             conn_sort: ConnSort::Download,
             conn_filter: String::new(),
             show_rules: false,
+            log_scroll: 0,
+            log_view_height: 0,
             paused_logs: None,
             log_filter: LogFilter::All,
             log_query: String::new(),
@@ -356,6 +363,15 @@ pub async fn run() -> Result<()> {
         println!("{}", dir.display());
         return Ok(());
     }
+    // The mixed port and the OS proxy are machine-global, so a second instance
+    // would fight the first over both. Held for the whole function.
+    let _instance = match settings::acquire_instance_lock(&dir)? {
+        Some(lock) => lock,
+        None => {
+            eprintln!("另一个 sbtui 实例正在使用 {}，请先退出它。", dir.display());
+            return Ok(());
+        }
+    };
     let mut terminal = ratatui::init();
     // The engine starts here (including the `auto_start` bring-up), so the
     // terminal client and the desktop client boot the core identically.
@@ -373,6 +389,9 @@ async fn run_app(
     let mut app = App::new(controller, dir);
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
+    // Every exit path (including a failed read or draw) has to reach the
+    // teardown below, so the loop records the error and breaks instead.
+    let mut loop_error: Option<anyhow::Error> = None;
 
     loop {
         tokio::select! {
@@ -402,23 +421,34 @@ async fn run_app(
                         }
                     }
                     Ok(_) => {}
-                    Err(error) => return Err(error.into()),
+                    Err(error) => {
+                        loop_error = Some(error.into());
+                        break;
+                    }
                 }
             }
             _ = tick.tick() => {
                 app.refresh_snapshot();
             }
         }
-        terminal.draw(|frame| draw(frame, &mut app))?;
+        if let Err(error) = terminal.draw(|frame| draw(frame, &mut app)) {
+            loop_error = Some(error.into());
+            break;
+        }
     }
-    // Dropping the controller stops the engine, and the engine's `kill_on_drop`
-    // child tears the core down with it. The OS proxy, however, is an
-    // OS-wide setting: clear it unless the user explicitly chose to keep it.
+    // The OS proxy is a machine-wide setting: clear it unless the user
+    // explicitly chose to keep it. Then wait for the engine to reap the core —
+    // `kill_on_drop` only fires if that task is scheduled again, and returning
+    // from here ends the process.
     app.refresh_snapshot();
     if app.snapshot.system_proxy_enabled && !app.confirm_quit {
         let _ = system_proxy::disable(&app.dir);
     }
-    Ok(())
+    app.controller.shutdown();
+    match loop_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 fn handle_key(app: &mut App, key: KeyCode) {
@@ -462,6 +492,9 @@ fn handle_key(app: &mut App, key: KeyCode) {
         }
         KeyCode::Down | KeyCode::Char('j') => move_cursor(app, 1),
         KeyCode::Up | KeyCode::Char('k') => move_cursor(app, -1),
+        KeyCode::PageDown => page_logs(app, 1),
+        KeyCode::PageUp => page_logs(app, -1),
+        KeyCode::End => app.log_scroll = 0,
         KeyCode::Enter => select_current(app),
         KeyCode::Char('s') => {
             if app.snapshot.core_running || app.snapshot.starting || app.snapshot.busy.is_some() {
@@ -758,7 +791,7 @@ fn commit_input(app: &mut App, goal: InputGoal) {
         }
         InputGoal::ConnFilter => {
             app.conn_filter = text;
-            app.selected_connection = 0;
+            app.selected_connection_id = None;
             app.status = if app.conn_filter.is_empty() {
                 "已清除连接过滤".to_owned()
             } else {
@@ -780,13 +813,22 @@ fn move_cursor(app: &mut App, delta: isize) {
     match app.tab {
         Tab::Proxies => move_proxy_member(app, delta),
         Tab::Connections => {
-            let len = visible_connections(app).len();
-            if len > 0 {
-                app.selected_connection = ((app.selected_connection as isize + delta)
-                    .clamp(0, len as isize - 1)) as usize;
-            } else {
-                app.selected_connection = 0;
+            let rows = visible_connections(app);
+            if rows.is_empty() {
+                app.selected_connection_id = None;
+                return;
             }
+            let current = selected_connection_index(app) as isize;
+            let next = (current + delta).clamp(0, rows.len() as isize - 1) as usize;
+            app.selected_connection_id = Some(rows[next].id.clone());
+        }
+        Tab::Logs => {
+            // Down means towards the newest line, which is a smaller offset.
+            app.log_scroll = if delta > 0 {
+                app.log_scroll.saturating_sub(delta as usize)
+            } else {
+                app.log_scroll.saturating_add((-delta) as usize)
+            };
         }
         Tab::Settings if !app.snapshot.profiles.is_empty() => {
             let len = app.snapshot.profiles.len();
@@ -799,6 +841,16 @@ fn move_cursor(app: &mut App, delta: isize) {
         }
         _ => {}
     }
+}
+
+/// Pages the Logs panel by one screenful. Other tabs ignore the keys so they
+/// stay free for a future binding.
+fn page_logs(app: &mut App, direction: isize) {
+    if app.tab != Tab::Logs {
+        return;
+    }
+    let page = app.log_view_height.max(1) as isize;
+    move_cursor(app, direction * page);
 }
 
 /// Moves the member highlight inside the selected proxy group (`↑↓` / `j k`).
@@ -848,15 +900,23 @@ fn select_current(app: &mut App) {
             }
         }
         Tab::Proxies => {
-            if app.snapshot.core_running
-                && let Some(group) = app.selected_group_snapshot()
-                && let Some(member) = group.members.get(app.selected_member).cloned()
-            {
-                let group = group.name.clone();
-                app.send(ClientCommand::SwitchNode {
-                    group,
-                    node: member,
-                });
+            let selected = app.snapshot.core_running.then(|| {
+                app.selected_group_snapshot().map(|group| {
+                    (
+                        group.name.clone(),
+                        group.is_auto(),
+                        group.members.get(app.selected_member).cloned(),
+                    )
+                })
+            });
+            if let Some((group, automatic, Some(node))) = selected.flatten() {
+                if automatic {
+                    // A urltest group selects its own node; sending SwitchNode
+                    // to it always fails, and the desktop client refuses too.
+                    app.status = format!("「{group}」是自动选择组，不支持手动切换（按 t 可测速）");
+                } else {
+                    app.send(ClientCommand::SwitchNode { group, node });
+                }
             }
         }
         _ => {}
@@ -906,12 +966,37 @@ fn close_selected_connection(app: &mut App) {
         return;
     }
     let Some(connection) = visible_connections(app)
-        .get(app.selected_connection)
+        .get(selected_connection_index(app))
         .map(|connection| (*connection).clone())
     else {
         return;
     };
     app.send(ClientCommand::CloseConnection(connection.id));
+}
+
+/// The row the connection highlight currently sits on. A stale id (the
+/// connection closed, or the filter changed) falls back to the first row.
+fn selected_connection_index(app: &App) -> usize {
+    let rows = visible_connections(app);
+    app.selected_connection_id
+        .as_ref()
+        .and_then(|id| rows.iter().position(|row| &row.id == id))
+        .unwrap_or(0)
+        .min(rows.len().saturating_sub(1))
+}
+
+/// The window of log rows shown by the Logs panel: the newest `height` lines by
+/// default, walked back `scroll` rows at the user's request. The engine keeps a
+/// 500-line ring, so rendering the whole list from the top would leave the
+/// recent lines permanently below the screen.
+fn log_window(lines: &[String], height: u16, scroll: usize) -> &[String] {
+    let height = (height as usize).min(lines.len()).max(1);
+    if lines.len() <= height {
+        return lines;
+    }
+    let max_scroll = lines.len() - height;
+    let end = lines.len() - scroll.min(max_scroll);
+    &lines[end - height..end]
 }
 
 fn close_all_connections(app: &mut App) {
@@ -1098,7 +1183,9 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         Tab::Dashboard => "s 启动/停止  ·  u 更新订阅  ·  p 系统代理  ·  m 切换模式",
         Tab::Proxies => "↑↓ 选节点  ·  ←→ 切组  ·  Enter 切换  ·  t 测当前  ·  T 测全组",
         Tab::Connections => "↑↓ 选择  ·  x 关闭连接  ·  X 关闭全部  ·  S 排序  ·  / 过滤",
-        Tab::Logs => "Space 暂停  ·  l 级别  ·  / 关键字  ·  c 复制  ·  r 分流规则",
+        Tab::Logs => {
+            "↑↓/PgUp PgDn 回看  ·  End 回到最新  ·  Space 暂停  ·  l 级别  ·  / 关键字  ·  c 复制  ·  r 分流规则"
+        }
         Tab::Settings => "n 新增  ·  e 编辑  ·  Delete 删除  ·  d 下载内核  ·  a/P/U 选项",
     };
     let line = Line::from(vec![
@@ -1224,7 +1311,9 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         Tab::Dashboard => "s 启动/停止 · u 更新订阅 · p 开/关系统代理 · m 切换模式",
         Tab::Proxies => "↑↓ 选节点 · ←→ 切组 · Enter 切换 · t 测当前 · T 测全组",
         Tab::Connections => "↑↓ 选择 · x 关闭连接 · X 关闭全部 · S 切换排序 · / 关键字过滤",
-        Tab::Logs => "Space 暂停 · l 切换级别 · / 关键字过滤 · c 复制 · r 查看规则",
+        Tab::Logs => {
+            "↑↓/PgUp PgDn 回看 · End 回到最新 · Space 暂停 · l 切换级别 · / 关键字过滤 · c 复制 · r 查看规则"
+        }
         Tab::Settings => "n 新增 · e 编辑 · Delete 删除 · d 下载内核 · a/P/U/g/y 选项",
     };
     let body = vec![
@@ -1544,7 +1633,8 @@ fn draw_traffic_panel(frame: &mut Frame, area: Rect, app: &App) {
         .max(1);
     let block = panel(format!(
         "实时流量 · 近 {} 秒",
-        history.len() as u64 * TICK_MS / 1000
+        // One sample per engine traffic poll, not per render tick.
+        history.len() as u64 * client_core::controller::TRAFFIC_EVERY.as_secs()
     ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1777,7 +1867,7 @@ fn draw_connections(frame: &mut Frame, area: ratatui::prelude::Rect, app: &App) 
             connection.rule.clone()
         };
         Row::new(vec![
-            Cell::from(if index == app.selected_connection {
+            Cell::from(if index == selected_connection_index(app) {
                 "●"
             } else {
                 ""
@@ -1831,7 +1921,10 @@ fn draw_connections(frame: &mut Frame, area: ratatui::prelude::Rect, app: &App) 
     frame.render_widget(table, area);
 }
 
-fn draw_logs(frame: &mut Frame, area: ratatui::prelude::Rect, app: &App) {
+fn draw_logs(frame: &mut Frame, area: ratatui::prelude::Rect, app: &mut App) {
+    // The bordered panel leaves its inner rows to the text.
+    let inner_height = area.height.saturating_sub(2);
+    app.log_view_height = inner_height;
     if app.show_rules {
         let lines: Vec<Line> = rules_lines(app).into_iter().map(Line::from).collect();
         frame.render_widget(
@@ -1840,8 +1933,12 @@ fn draw_logs(frame: &mut Frame, area: ratatui::prelude::Rect, app: &App) {
         );
         return;
     }
-    let lines: Vec<Line> = log_page_lines(app).into_iter().map(Line::from).collect();
-    let title = format!(
+    let all = log_page_lines(app);
+    let lines: Vec<Line> = log_window(&all, inner_height, app.log_scroll)
+        .iter()
+        .map(|line| Line::from(line.clone()))
+        .collect();
+    let mut title = format!(
         "日志 [{}]{}（Space 暂停，l 级别，/ 关键字，c 复制，r 规则）",
         app.log_filter.label(),
         if app.paused_logs.is_some() {
@@ -1850,11 +1947,12 @@ fn draw_logs(frame: &mut Frame, area: ratatui::prelude::Rect, app: &App) {
             ""
         }
     );
-    let title = if app.log_query.is_empty() {
-        title
-    } else {
-        format!("{title} · 关键字「{}」", app.log_query)
-    };
+    if app.log_scroll > 0 {
+        title.push_str(&format!(" · 已回看 {} 行（End 回到最新）", app.log_scroll));
+    }
+    if !app.log_query.is_empty() {
+        title = format!("{title} · 关键字「{}」", app.log_query);
+    }
     frame.render_widget(Paragraph::new(lines).block(panel(title)), area);
 }
 
@@ -2123,7 +2221,7 @@ mod tests {
         move_proxy_member(&mut app, -1);
         assert_eq!(app.selected_member, 1);
 
-        app.selected_connection = 0;
+        app.selected_connection_id = None;
         assert_eq!(app.selected_member, 1, "connection state is separate");
     }
 
@@ -2167,6 +2265,70 @@ mod tests {
 
         app.conn_filter.clear();
         assert_eq!(visible_connections(&app).len(), 2);
+    }
+
+    #[test]
+    fn the_log_window_keeps_the_newest_rows_and_pages_backwards() {
+        fn first(rows: &[String]) -> Option<&str> {
+            rows.first().map(String::as_str)
+        }
+        fn last(rows: &[String]) -> Option<&str> {
+            rows.last().map(String::as_str)
+        }
+
+        let lines: Vec<String> = (1..=500).map(|number| format!("line {number}")).collect();
+        assert_eq!(
+            last(log_window(&lines, 10, 0)),
+            Some("line 500"),
+            "the newest line has to be on screen without any scrolling"
+        );
+        assert_eq!(first(log_window(&lines, 10, 0)), Some("line 491"));
+        assert_eq!(last(log_window(&lines, 10, 5)), Some("line 495"));
+        assert_eq!(
+            first(log_window(&lines, 10, 10_000)),
+            Some("line 1"),
+            "paging past the top clamps at the oldest line"
+        );
+
+        let few: Vec<String> = (1..=3).map(|number| format!("line {number}")).collect();
+        assert_eq!(log_window(&few, 10, 0).len(), 3, "a short list shows whole");
+        assert!(log_window(&[], 10, 0).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_connection_highlight_follows_the_connection_across_reordering() {
+        let tempdir = tempfile::tempdir().expect("temporary data directory");
+        let mut app = App::new(
+            ClientController::start(tempdir.path().to_path_buf()),
+            tempdir.path().to_path_buf(),
+        );
+        app.tab = Tab::Connections;
+        app.snapshot.connections.connections = vec![
+            connection("api.github.com", "Proxy"),
+            connection("cdn.example.net", "DIRECT"),
+        ];
+
+        move_cursor(&mut app, 1);
+        assert_eq!(selected_connection_index(&app), 1);
+
+        // The engine re-sorts the table on its next publish.
+        app.snapshot.connections.connections.reverse();
+        assert_eq!(
+            selected_connection_index(&app),
+            0,
+            "the highlight stays on the same connection, not its old row"
+        );
+        assert_eq!(
+            visible_connections(&app)[selected_connection_index(&app)].id,
+            "cdn.example.net"
+        );
+
+        app.selected_connection_id = Some("closed".to_owned());
+        assert_eq!(
+            selected_connection_index(&app),
+            0,
+            "a vanished connection falls back to the first row"
+        );
     }
 
     #[tokio::test]

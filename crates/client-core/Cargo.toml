@@ -10,6 +10,7 @@ anyhow = "1.0.99"
 base64 = "0.22.1"
 dirs = "6.0.0"
 flate2 = "1.0"
+fs2 = "0.4.3"
 futures-util = "0.3.31"
 getrandom = "0.3.3"
 reqwest = { version = "0.12.23", default-features = false, features = ["native-tls", "json"] }
@@ -22,7 +23,14 @@ toml = "0.8.20"
 zip = { version = "4.3", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
+# Keep this on the same major as sbgui's so the workspace links one copy.
 winreg = "0.52.0"
+windows = { version = "0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3.23.0"
