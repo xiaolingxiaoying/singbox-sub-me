@@ -572,6 +572,13 @@ impl DeploymentConfig {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_deployment_identity()?;
+        self.validate_protocols()?;
+        self.validate_secret_and_accounting()?;
+        self.validate_subscription_mode()
+    }
+
+    fn validate_deployment_identity(&self) -> Result<(), ConfigError> {
         validate_host("subscription host", &self.subscription_host)?;
         if let Some(proxy_host) = &self.proxy_host {
             validate_host("proxy host", proxy_host)?;
@@ -609,6 +616,10 @@ impl DeploymentConfig {
                 return Err(ConfigError::InvalidValue(message));
             }
         }
+        Ok(())
+    }
+
+    fn validate_protocols(&self) -> Result<(), ConfigError> {
         if self.enabled_protocols.is_empty() {
             return Err(ConfigError::InvalidValue(
                 "at least one Managed protocol must be enabled",
@@ -691,6 +702,10 @@ impl DeploymentConfig {
         if let Some(sni) = &self.protocol_sni {
             validate_hostname("protocol SNI", sni)?;
         }
+        Ok(())
+    }
+
+    fn validate_secret_and_accounting(&self) -> Result<(), ConfigError> {
         if self.subscription_credential.len() < 43
             || self
                 .subscription_credential
@@ -732,6 +747,10 @@ impl DeploymentConfig {
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    fn validate_subscription_mode(&self) -> Result<(), ConfigError> {
         match self.subscription_mode {
             SubscriptionMode::IpFallback => {
                 if self.subscription_listen_port.is_some() {
