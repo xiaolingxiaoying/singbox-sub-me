@@ -5,12 +5,16 @@ use std::path::Path;
 use std::process::Command;
 use thiserror::Error;
 
-use super::{
-    CLASH_LEGACY_VERSION, DeploymentConfig, DeploymentStore, ManagedProtocol,
-    SING_BOX_VERSION_PROFILES, SubscriptionFormat, SubscriptionMode, SubscriptionRoute, base64_uri,
-    clash, clash_legacy, constant_time_eq, ensure_subscription_nodes, latest_version_profile,
-    shadowrocket, sing_box, sing_box_full, sing_box_server, uri,
+use super::profile::{
+    CLASH_LEGACY_VERSION, SING_BOX_VERSION_PROFILES, SubscriptionFormat, SubscriptionRoute,
+    latest_version_profile,
 };
+use super::render::{
+    clash, clash_legacy, ensure_subscription_nodes, shadowrocket, sing_box, sing_box_full,
+    sing_box_server, uri,
+};
+use super::{base64_uri, constant_time_eq};
+use crate::config::{DeploymentConfig, DeploymentStore, ManagedProtocol, SubscriptionMode};
 
 pub(super) const SING_BOX_ARTIFACT: &str = "subscription-sing-box.json";
 pub(super) const SING_BOX_FULL_ARTIFACT: &str = "subscription-sing-box-full.json";

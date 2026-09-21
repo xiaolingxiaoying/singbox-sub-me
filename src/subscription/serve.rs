@@ -21,7 +21,8 @@ use super::profile::{
     CLASH_LEGACY_VERSION, ClientVersion, SING_BOX_VERSION_PROFILES, SubscriptionFormat,
     SubscriptionRoute,
 };
-use super::{DeploymentConfig, DeploymentStore, SubscriptionMode, ensure_subscription_nodes};
+use super::render::ensure_subscription_nodes;
+use crate::config::{DeploymentConfig, DeploymentStore, SubscriptionMode};
 
 pub async fn serve(
     store: &DeploymentStore,
