@@ -1797,6 +1797,7 @@ fn copy_to_clipboard_osc52(text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::LogFilter;
 
     #[test]
     fn tabs_cycle_in_both_directions() {
