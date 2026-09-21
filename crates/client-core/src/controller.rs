@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
-use crate::clash_api::ClashApi;
+use crate::clash_api::{ClashApi, OutboundMode};
+use crate::command::SettingsPatch;
 use crate::format::now_epoch;
 use crate::settings::{self, Profiles, Settings};
 use crate::state::{ClientSnapshot, ProfileSummary, ProxyGroupSnapshot};
@@ -466,64 +467,10 @@ impl Engine {
                 self.start_core().await
             }
             ClientCommand::ToggleSystemProxy => self.toggle_system_proxy(),
-            ClientCommand::SetTrafficMode(mode) => {
-                if self.snapshot.core_running {
-                    anyhow::bail!("切换流量模式前请先停止内核");
-                }
-                self.settings.traffic_mode = mode;
-                self.save_settings()?;
-                self.snapshot.traffic_mode = mode;
-                self.snapshot.settings.traffic_mode = mode;
-                self.note(format!("流量模式: {}", mode.label()));
-                Ok(())
-            }
-            ClientCommand::SetOutboundMode(mode) => {
-                if self.snapshot.core_running {
-                    let api = self.api.clone();
-                    self.spawn_operation(async move {
-                        api.set_mode(mode).await?;
-                        Ok(Box::new(move |engine: &mut Engine| {
-                            engine.snapshot.outbound_mode = mode;
-                            engine.note(format!("出站模式: {}", mode.label()));
-                            Ok(())
-                        }) as Completion)
-                    });
-                } else {
-                    self.snapshot.outbound_mode = mode;
-                    self.note(format!("出站模式: {}", mode.label()));
-                }
-                Ok(())
-            }
-            ClientCommand::SwitchProfile(name) => {
-                self.profiles
-                    .activate(&name)
-                    .ok_or_else(|| anyhow::anyhow!("订阅档案不存在: {name}"))?;
-                self.save_profiles()?;
-                self.snapshot.active_profile = self
-                    .profiles
-                    .active_profile()
-                    .map(|profile| ProfileSummary::from_profile(profile, true));
-                self.snapshot.profiles = profile_summaries(&self.profiles);
-                self.note(format!("已激活档案 {name}"));
-                Ok(())
-            }
-            ClientCommand::SwitchNode { group, node } => {
-                let api = self.api.clone();
-                self.spawn_operation(async move {
-                    api.select(&group, &node).await?;
-                    Ok(Box::new(move |engine: &mut Engine| {
-                        for snapshot in &mut engine.snapshot.proxy_groups {
-                            if snapshot.name == group {
-                                snapshot.current = node.clone();
-                            }
-                        }
-                        engine.snapshot.current_node = Some(node.clone());
-                        engine.note(format!("{group} → {node}"));
-                        Ok(())
-                    }) as Completion)
-                });
-                Ok(())
-            }
+            ClientCommand::SetTrafficMode(mode) => self.set_traffic_mode(mode),
+            ClientCommand::SetOutboundMode(mode) => self.set_outbound_mode(mode),
+            ClientCommand::SwitchProfile(name) => self.switch_profile(name),
+            ClientCommand::SwitchNode { group, node } => self.switch_node(group, node),
             ClientCommand::TestNode(node) => self.test_nodes(vec![node]),
             ClientCommand::TestGroup(group) => {
                 let group = self
@@ -545,23 +492,7 @@ impl Engine {
                 });
                 Ok(())
             }
-            ClientCommand::CloseAllConnections => {
-                let api = self.api.clone();
-                self.spawn_operation(async move {
-                    let current = api.connections().await?;
-                    let mut closed = 0;
-                    for connection in current.connections {
-                        if api.close_connection(&connection.id).await.is_ok() {
-                            closed += 1;
-                        }
-                    }
-                    Ok(Box::new(move |engine: &mut Engine| {
-                        engine.note(format!("已关闭 {closed} 条连接"));
-                        Ok(())
-                    }) as Completion)
-                });
-                Ok(())
-            }
+            ClientCommand::CloseAllConnections => self.close_all_connections(),
             ClientCommand::UpdateSubscription => self.update_subscription().await,
             ClientCommand::ImportSubscription { name, url } => {
                 self.import_subscription(name, url).await
@@ -569,37 +500,8 @@ impl Engine {
             ClientCommand::ImportProfileFile(path) => self.import_profile_file(path).await,
             ClientCommand::SetProfileUrl { name, url } => self.set_profile_url(name, url).await,
             ClientCommand::RemoveProfile(name) => self.remove_profile(&name).await,
-            ClientCommand::DownloadCore => {
-                if self.snapshot.core_running {
-                    anyhow::bail!("下载内核前请先停止内核");
-                }
-                let version = self.settings.core_version.clone();
-                let mirror = self.settings.mirror.clone();
-                let target = self.dir.join("core");
-                self.spawn_operation(async move {
-                    let download = core::download_core(&target, &version, &mirror).await?;
-                    Ok(Box::new(move |engine: &mut Engine| {
-                        engine.snapshot.core_installed = true;
-                        engine.snapshot.core_version = core::detect_version(&download.path).ok();
-                        engine.note("内核已安装");
-                        Ok(())
-                    }) as Completion)
-                });
-                Ok(())
-            }
-            ClientCommand::UpdateSettings(patch) => {
-                if self.snapshot.core_running
-                    && (patch.traffic_mode.is_some() || patch.mixed_port.is_some())
-                {
-                    anyhow::bail!("切换流量模式或混合端口前请先停止内核");
-                }
-                patch.apply(&mut self.settings);
-                self.save_settings()?;
-                self.snapshot.settings = (&self.settings).into();
-                self.snapshot.traffic_mode = self.settings.traffic_mode;
-                self.note("设置已保存");
-                Ok(())
-            }
+            ClientCommand::DownloadCore => self.download_core(),
+            ClientCommand::UpdateSettings(patch) => self.update_settings(patch),
             // The core-log reader keeps its file offset, so clearing shows only
             // lines written from now on rather than replaying the tail.
             ClientCommand::ClearLogs => {
@@ -619,6 +521,119 @@ impl Engine {
                 anyhow::bail!("Shutdown is handled by the engine loop, not by a command")
             }
         }
+    }
+
+    fn set_traffic_mode(&mut self, mode: TrafficMode) -> Result<()> {
+        if self.snapshot.core_running {
+            anyhow::bail!("切换流量模式前请先停止内核");
+        }
+        self.settings.traffic_mode = mode;
+        self.save_settings()?;
+        self.snapshot.traffic_mode = mode;
+        self.snapshot.settings.traffic_mode = mode;
+        self.note(format!("流量模式: {}", mode.label()));
+        Ok(())
+    }
+
+    fn set_outbound_mode(&mut self, mode: OutboundMode) -> Result<()> {
+        if self.snapshot.core_running {
+            let api = self.api.clone();
+            self.spawn_operation(async move {
+                api.set_mode(mode).await?;
+                Ok(Box::new(move |engine: &mut Engine| {
+                    engine.snapshot.outbound_mode = mode;
+                    engine.note(format!("出站模式: {}", mode.label()));
+                    Ok(())
+                }) as Completion)
+            });
+        } else {
+            self.snapshot.outbound_mode = mode;
+            self.note(format!("出站模式: {}", mode.label()));
+        }
+        Ok(())
+    }
+
+    fn switch_profile(&mut self, name: String) -> Result<()> {
+        self.profiles
+            .activate(&name)
+            .ok_or_else(|| anyhow::anyhow!("订阅档案不存在: {name}"))?;
+        self.save_profiles()?;
+        self.snapshot.active_profile = self
+            .profiles
+            .active_profile()
+            .map(|profile| ProfileSummary::from_profile(profile, true));
+        self.snapshot.profiles = profile_summaries(&self.profiles);
+        self.note(format!("已激活档案 {name}"));
+        Ok(())
+    }
+
+    fn switch_node(&mut self, group: String, node: String) -> Result<()> {
+        let api = self.api.clone();
+        self.spawn_operation(async move {
+            api.select(&group, &node).await?;
+            Ok(Box::new(move |engine: &mut Engine| {
+                for snapshot in &mut engine.snapshot.proxy_groups {
+                    if snapshot.name == group {
+                        snapshot.current = node.clone();
+                    }
+                }
+                engine.snapshot.current_node = Some(node.clone());
+                engine.note(format!("{group} → {node}"));
+                Ok(())
+            }) as Completion)
+        });
+        Ok(())
+    }
+
+    fn close_all_connections(&mut self) -> Result<()> {
+        let api = self.api.clone();
+        self.spawn_operation(async move {
+            let current = api.connections().await?;
+            let mut closed = 0;
+            for connection in current.connections {
+                if api.close_connection(&connection.id).await.is_ok() {
+                    closed += 1;
+                }
+            }
+            Ok(Box::new(move |engine: &mut Engine| {
+                engine.note(format!("已关闭 {closed} 条连接"));
+                Ok(())
+            }) as Completion)
+        });
+        Ok(())
+    }
+
+    fn download_core(&mut self) -> Result<()> {
+        if self.snapshot.core_running {
+            anyhow::bail!("下载内核前请先停止内核");
+        }
+        let version = self.settings.core_version.clone();
+        let mirror = self.settings.mirror.clone();
+        let target = self.dir.join("core");
+        self.spawn_operation(async move {
+            let download = core::download_core(&target, &version, &mirror).await?;
+            Ok(Box::new(move |engine: &mut Engine| {
+                engine.snapshot.core_installed = true;
+                engine.snapshot.core_version = core::detect_version(&download.path).ok();
+                engine.note("内核已安装");
+                Ok(())
+            }) as Completion)
+        });
+        Ok(())
+    }
+
+    fn update_settings(&mut self, patch: SettingsPatch) -> Result<()> {
+        if self.snapshot.core_running
+            && (patch.traffic_mode.is_some() || patch.mixed_port.is_some())
+        {
+            anyhow::bail!("切换流量模式或混合端口前请先停止内核");
+        }
+        patch.apply(&mut self.settings);
+        self.save_settings()?;
+        self.snapshot.settings = (&self.settings).into();
+        self.snapshot.traffic_mode = self.settings.traffic_mode;
+        self.note("设置已保存");
+        Ok(())
     }
 
     async fn start_core(&mut self) -> Result<()> {
