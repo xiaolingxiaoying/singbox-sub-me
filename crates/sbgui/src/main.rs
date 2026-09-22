@@ -88,7 +88,14 @@ fn main() {
     let _instance = match settings::acquire_instance_lock(&dir) {
         Ok(lock) => lock,
         Err(error) => {
-            eprintln!("无法锁定数据目录: {error}");
+            eprintln!(
+                "{}",
+                tr!(
+                    state::env_locale(),
+                    format!("无法锁定数据目录: {error}"),
+                    format!("Could not lock the data directory: {error}")
+                )
+            );
             return;
         }
     };
