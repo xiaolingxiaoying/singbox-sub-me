@@ -394,15 +394,23 @@ pub(crate) fn http_get(port: u16, path: &str) -> String {
 }
 
 pub(crate) fn http_request(method: &str, port: u16, path: &str) -> String {
-    let mut stream = (0..50)
-        .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(stream) => Some(stream),
-            Err(_) => {
-                thread::sleep(Duration::from_millis(10));
-                None
-            }
-        })
-        .expect("subscription service accepts connections");
+    // The service is spawned, not yet listening, when the first request fires.
+    // The old 50 x 10ms budget was enough on an idle machine and was not: under
+    // a loaded CI container the process can take longer than half a second to
+    // reach its accept loop, and the suite failed with a panic that looked like
+    // a product bug. Only the connect is retried, so a real 404/503 still
+    // arrives as soon as the server is up.
+    let mut attempts = 0;
+    let mut stream = loop {
+        attempts += 1;
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => break stream,
+            Err(_) if attempts < 200 => thread::sleep(Duration::from_millis(25)),
+            Err(error) => panic!(
+                "subscription service on port {port} never accepted a connection after {attempts} attempts: {error}"
+            ),
+        }
+    };
     stream
         .write_all(format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
         .expect("request is sent");
