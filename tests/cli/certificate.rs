@@ -218,6 +218,9 @@ fn certificate_obtain_runs_certbot_and_pins_the_renewed_certificate() {
 fn certificate_commands_refuse_non_direct_modes_without_touching_any_certificate_path() {
     let fixture = supported_systemd_host();
     write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    // External-proxy configuration checks the listener port is free, so two
+    // tests sharing one fixed port fail whenever the runner overlaps them.
+    let listen_port = crate::fixture::free_high_tcp_port().to_string();
     Command::cargo_bin("sbctl")
         .expect("sbctl binary is built")
         .args([
@@ -230,7 +233,7 @@ fn certificate_commands_refuse_non_direct_modes_without_touching_any_certificate
             "--subscription-host",
             "sub.example.test",
             "--listen-port",
-            "2080",
+            &listen_port,
             "--interface",
             "ens3",
             "--protocol",

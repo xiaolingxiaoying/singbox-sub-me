@@ -199,6 +199,9 @@ fn external_proxy_mode_serves_loopback_without_touching_public_ports_or_proxy_co
 #[test]
 fn external_proxy_mode_rejects_a_managed_tcp_protocol_port_when_switching_modes() {
     let fixture = TempDir::new().expect("temporary root is created");
+    // External-proxy configuration checks the listener port is free, so two
+    // tests sharing one fixed port fail whenever the runner overlaps them.
+    let listen_port = crate::fixture::free_high_tcp_port().to_string();
     Command::cargo_bin("sbctl")
         .expect("sbctl binary is built")
         .args([
@@ -211,7 +214,7 @@ fn external_proxy_mode_rejects_a_managed_tcp_protocol_port_when_switching_modes(
             "--subscription-host",
             "sub.example.test",
             "--listen-port",
-            "2080",
+            &listen_port,
             "--interface",
             "ens3",
             "--protocol",
@@ -248,7 +251,7 @@ fn external_proxy_mode_rejects_a_managed_tcp_protocol_port_when_switching_modes(
     assert!(
         fs::read_to_string(config_path)
             .expect("configuration remains readable")
-            .contains("subscription_listen_port = 2080")
+            .contains(&format!("subscription_listen_port = {listen_port}"))
     );
 }
 
