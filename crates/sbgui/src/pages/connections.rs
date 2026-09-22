@@ -9,13 +9,13 @@ use gpui::{
 };
 
 use crate::components::{
-    connection_chain, connection_header, connection_row, connection_target, empty_state, icon,
-    setting_line,
+    connection_chain, connection_header, connection_row, connection_target, inline_empty,
+    page_head, setting_line, status_dot, work_surface,
 };
-use crate::state::{FieldSpec, InputField, Sbgui};
+use crate::state::{FieldSpec, InputField, Sbgui, Tone};
 use crate::theme::{
-    BLUE_2, BORDER, CYAN, DANGER, GAP_SECTION, LABEL, LIST_PAGE, MUTED, PAD_CARD, RADIUS, SECTION,
-    SURFACE, SURFACE_2, TEXT, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD,
+    BLUE_2, BODY, BORDER, BORDER_STRONG, CYAN, FAINT, LABEL, LIST_PAGE, MINT, MUTED, PAD_CARD,
+    RADIUS_CONTROL, SECTION, SURFACE, SURFACE_2, TEXT, WEIGHT_SEMIBOLD,
 };
 
 impl Sbgui {
@@ -30,7 +30,11 @@ impl Sbgui {
         // The header advertises download-first ordering, so the rows must
         // actually follow it: the biggest current bandwidth users lead.
         connections.sort_by_key(|connection| std::cmp::Reverse(connection.download));
+        // The proxy/direct split is read from the same list the table draws, so
+        // the metric strip and the rows can never disagree.
         let total = connections.len();
+        let proxied = connections.iter().filter(|c| !c.chains.is_empty()).count();
+        let direct = total - proxied;
         if !query.is_empty() {
             connections.retain(|connection| connection.matches(&query));
         }
@@ -45,93 +49,108 @@ impl Sbgui {
             .enumerate()
             .map(|(index, connection)| connection_row(index, connection, cx))
             .collect();
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(GAP_SECTION))
+
+        // The kit gives a management page one working surface: the sentence and
+        // the tools on top, the table below. The count line and the filter share
+        // a row so the "how many" never competes with the search box.
+        work_surface()
+            .child(page_head("内核运行期间经过本机代理的连接，实时列在这里。"))
             .child(
                 div()
+                    .mt(px(18.0))
+                    .w_full()
                     .flex()
                     .flex_wrap()
                     .items_center()
-                    .gap(px(12.0))
+                    .justify_between()
+                    .gap(px(24.0))
                     .child(
                         div()
                             .flex_1()
-                            .min_w(px(200.0))
-                            .text_size(px(LABEL))
-                            .text_color(rgb(MUTED))
-                            .child(if query.is_empty() {
-                                format!("{total} 条活动连接 · 按下载流量排序")
-                            } else {
-                                format!("匹配 {} / {total} 条 · 按下载流量排序", connections.len())
-                            }),
+                            .min_w(px(220.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(status_dot(if total > 0 { MINT } else { FAINT }))
+                            .child(div().text_size(px(LABEL)).text_color(rgb(MUTED)).child(
+                                if query.is_empty() {
+                                    format!(
+                                        "{total} 条活动连接 · 代理 {proxied} · 直连 {direct} · 按下载流量排序"
+                                    )
+                                } else {
+                                    format!(
+                                        "匹配 {} / {total} 条 · 按下载流量排序",
+                                        connections.len()
+                                    )
+                                },
+                            )),
                     )
-                    .child(self.text_field(
-                        FieldSpec {
-                            field: InputField::ConnFilter,
-                            id: "conn-filter",
-                            placeholder: "按主机 / 目标 / 规则筛选…",
-                            width: 240.0,
-                        },
-                        window,
-                        cx,
-                    ))
-                    .child(self.utility_toggle(
-                        "pause-connections",
-                        if self.paused_connections.is_some() {
-                            "继续刷新"
-                        } else {
-                            "暂停刷新"
-                        },
-                        self.paused_connections.is_some(),
-                        cx,
-                        |view| {
-                            let paused = match view.paused_connections.take() {
-                                Some(_) => None,
-                                None => Some(view.snapshot.connections.connections.clone()),
-                            };
-                            view.paused_connections = paused;
-                        },
-                    ))
                     .child(
                         div()
-                            .id("close-all")
-                            .px(px(12.0))
-                            .py(px(8.0))
-                            .rounded(px(9.0))
-                            .bg(rgb(SURFACE))
-                            .border_1()
-                            .border_color(rgb(DANGER))
-                            .text_size(px(LABEL))
-                            .font_weight(WEIGHT_MEDIUM)
-                            .text_color(rgb(DANGER))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(0xfff1f1)))
-                            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
-                                if view.confirm_close_all {
-                                    view.send(ClientCommand::CloseAllConnections);
-                                    view.confirm_close_all = false;
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(10.0))
+                            .child(self.text_field(
+                                FieldSpec {
+                                    field: InputField::ConnFilter,
+                                    id: "conn-filter",
+                                    placeholder: "按主机 / 目标 / 规则筛选…",
+                                    width: 240.0,
+                                },
+                                window,
+                                cx,
+                            ))
+                            .child(self.utility_toggle(
+                                "pause-connections",
+                                if self.paused_connections.is_some() {
+                                    "继续刷新"
                                 } else {
-                                    view.confirm_close_all = true;
-                                }
-                                cx.notify();
-                            }))
-                            .child(if self.confirm_close_all {
-                                "再次点击确认"
-                            } else {
-                                "关闭全部"
-                            }),
+                                    "暂停刷新"
+                                },
+                                self.paused_connections.is_some(),
+                                cx,
+                                |view| {
+                                    let paused = match view.paused_connections.take() {
+                                        Some(_) => None,
+                                        None => Some(view.snapshot.connections.connections.clone()),
+                                    };
+                                    view.paused_connections = paused;
+                                },
+                            ))
+                            .child(self.button(
+                                "close-all",
+                                if self.confirm_close_all {
+                                    "再次点击确认"
+                                } else {
+                                    "关闭全部"
+                                },
+                                Tone::Danger,
+                                None,
+                                cx,
+                                |view, cx| {
+                                    // A first click only arms the button; the
+                                    // second one actually drops every socket.
+                                    if view.confirm_close_all {
+                                        view.send(ClientCommand::CloseAllConnections);
+                                        view.confirm_close_all = false;
+                                    } else {
+                                        view.confirm_close_all = true;
+                                    }
+                                    cx.notify();
+                                },
+                            )),
                     ),
             )
-            // With nothing to list there is no table: the empty-state card
-            // below carries the hint and the 启动内核 action.
-            .when(!connections.is_empty(), |page| {
-                page.child(
+            // With rows to list there is a table; with none there is a borderless
+            // note inside the same surface, so the two boxes never nest.
+            .when(!connections.is_empty(), |surface| {
+                surface.child(
                     div()
                         .id("connections-panel")
+                        .mt(px(18.0))
                         .w_full()
-                        .rounded(px(RADIUS))
+                        .rounded(px(RADIUS_CONTROL + 2.0))
                         .bg(rgb(SURFACE))
                         .border_1()
                         .border_color(rgb(BORDER))
@@ -178,11 +197,12 @@ impl Sbgui {
                     .find(|connection| &connection.id == selected)
                     .map(|connection| {
                         div()
+                            .mt(px(18.0))
                             .p(px(PAD_CARD))
-                            .rounded(px(RADIUS))
-                            .bg(rgb(SURFACE))
+                            .rounded(px(RADIUS_CONTROL + 2.0))
+                            .bg(rgb(SURFACE_2))
                             .border_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(BORDER_STRONG))
                             .child(
                                 div()
                                     .flex()
@@ -198,17 +218,20 @@ impl Sbgui {
                                     .child(
                                         div()
                                             .id("close-connection-detail")
-                                            .size(px(36.0))
+                                            .size(px(34.0))
                                             .flex()
                                             .items_center()
                                             .justify_center()
                                             .cursor_pointer()
-                                            .hover(|s| s.bg(rgb(SURFACE_2)))
+                                            .rounded(px(RADIUS_CONTROL))
+                                            .hover(|s| s.bg(rgb(BLUE_2)))
                                             .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
                                                 view.selected_connection = None;
                                                 cx.notify();
                                             }))
-                                            .child(icon("close", MUTED, 14.0)),
+                                            .child(crate::components::icon(
+                                                "close", MUTED, 14.0,
+                                            )),
                                     ),
                             )
                             .child(setting_line("远程目标", &connection_target(connection)))
@@ -240,26 +263,61 @@ impl Sbgui {
                             ))
                     })
             }))
-            .children(if total == 0 {
-                Some(empty_state(
-                    "暂无活动连接",
-                    "内核运行后，经过本机代理的连接会实时显示在这里。",
-                    if self.snapshot.core_running || self.snapshot.starting {
-                        None
-                    } else {
-                        Some("启动内核")
-                    },
-                    cx,
-                ))
-            } else if connections.is_empty() {
-                Some(empty_state(
-                    "无匹配连接",
-                    "换个关键字，或按 Esc 清空筛选。",
-                    None,
-                    cx,
-                ))
-            } else {
-                None
+            .when(connections.is_empty(), |surface| {
+                surface.child(
+                    div()
+                        .mt(px(18.0))
+                        .w_full()
+                        .min_h(px(220.0))
+                        .py(px(40.0))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(10.0))
+                        .when(total == 0, |block| {
+                            block
+                                .child(
+                                    div()
+                                        .text_size(px(SECTION))
+                                        .font_weight(WEIGHT_SEMIBOLD)
+                                        .text_color(rgb(TEXT))
+                                        .child("暂无活动连接"),
+                                )
+                                .child(
+                                    div()
+                                        .max_w(px(420.0))
+                                        .text_size(px(BODY))
+                                        .line_height(px(21.0))
+                                        .text_color(rgb(MUTED))
+                                        .child(
+                                            "内核运行后，经过本机代理的连接会实时显示在这里。",
+                                        ),
+                                )
+                                .when(
+                                    !(self.snapshot.core_running || self.snapshot.starting),
+                                    |block| {
+                                        block.child(self.button(
+                                            "start-core-from-connections",
+                                            "启动内核",
+                                            Tone::Accent,
+                                            Some("power"),
+                                            cx,
+                                            |view, cx| {
+                                                view.send(ClientCommand::StartCore);
+                                                cx.notify();
+                                            },
+                                        ))
+                                    },
+                                )
+                        })
+                        .when(total > 0, |block| {
+                            block.child(inline_empty(
+                                "无匹配连接",
+                                "换个关键字，或按 Esc 清空筛选。",
+                            ))
+                        }),
+                )
             })
     }
 
@@ -273,9 +331,10 @@ impl Sbgui {
     ) -> impl IntoElement {
         div()
             .id(id)
+            .min_h(px(34.0))
             .px(px(12.0))
             .py(px(8.0))
-            .rounded(px(9.0))
+            .rounded(px(RADIUS_CONTROL))
             .bg(rgb(if active { BLUE_2 } else { SURFACE }))
             .border_1()
             .border_color(rgb(if active { CYAN } else { BORDER }))

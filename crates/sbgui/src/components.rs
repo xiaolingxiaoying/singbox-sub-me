@@ -647,7 +647,7 @@ pub(crate) fn connection_row(
         .text_size(px(LABEL))
         .text_color(rgb(TEXT))
         .cursor_pointer()
-        .hover(|style| style.bg(rgb(BLUE_2)))
+        .hover(|style| style.bg(rgb(ROW_HOVER)))
         .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
             view.selected_connection = Some(detail_id.clone());
             cx.notify();
@@ -719,7 +719,7 @@ pub(crate) fn connection_row(
                 .w(px(48.0))
                 .flex_shrink_0()
                 .text_color(rgb(DANGER))
-                .hover(|style| style.text_color(rgb(0xffb0ab)))
+                .hover(|style| style.bg(rgb(ROW_HOVER)))
                 .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
                     cx.stop_propagation();
                     view.send(ClientCommand::CloseConnection(id.clone()));
