@@ -15,6 +15,7 @@ Source: `@phosphor-icons/react`. Default rendering is 18 px, regular outline, `c
 | `Translate` | Language switcher | 18 px |
 | `Power` | Core lifecycle | 15 px action; 22 px dialog |
 | `ArrowsClockwise` | Refresh / resume | 16–18 px |
+| `Pause` | Log stream pause | 17 px, bold, white on teal |
 | `CaretRight` | Disclosure and row navigation | 17–18 px |
 | `CheckCircle` | Selected node / healthy state | 15–18 px, teal or green |
 | `MagnifyingGlass` | Search inputs | 17 px, muted |

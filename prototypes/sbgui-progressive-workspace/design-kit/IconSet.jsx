@@ -1,12 +1,12 @@
 import {
   ArrowsClockwise, CaretRight, CheckCircle, CirclesThreePlus, Database, FileText,
-  GearSix, House, Info, MagnifyingGlass, MapPin, Network, Plus, Power, ShieldCheck,
+  GearSix, House, Info, MagnifyingGlass, MapPin, Network, Pause, Plus, Power, ShieldCheck,
   Stack, Translate, Trash, TrendDown, TrendUp,
 } from "@phosphor-icons/react";
 
 export const iconRegistry = {
   ArrowsClockwise, CaretRight, CheckCircle, CirclesThreePlus, Database, FileText,
-  GearSix, House, Info, MagnifyingGlass, MapPin, Network, Plus, Power, ShieldCheck,
+  GearSix, House, Info, MagnifyingGlass, MapPin, Network, Pause, Plus, Power, ShieldCheck,
   Stack, Translate, Trash, TrendDown, TrendUp,
 };
 
