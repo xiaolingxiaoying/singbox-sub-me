@@ -6,10 +6,11 @@ use gpui::{
     StatefulInteractiveElement, Styled, div, px, rgb, rgba,
 };
 
+use crate::components::icon;
 use crate::state::{ExitChoice, Sbgui, Tone};
 use crate::theme::{
-    BODY, BORDER, CYAN_DARK, DANGER, LABEL, MUTED, RADIUS, RADIUS_CONTROL, SURFACE, SURFACE_2,
-    TEXT, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD, tone_colors,
+    AMBER, BODY, BORDER, CYAN_DARK, DANGER, LABEL, MUTED, RADIUS, RADIUS_CONTROL, SURFACE,
+    SURFACE_2, TEXT, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD, tone_colors,
 };
 
 impl Sbgui {
@@ -145,7 +146,7 @@ impl Sbgui {
     /// with the system proxy on, other applications lose their outlet too.
     pub(crate) fn stop_core_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let detail = if self.snapshot.system_proxy_enabled {
-            "系统代理仍开着，其他应用会一起失去代理出口。"
+            "系统代理当前已启用，建议停止后及时关闭系统代理。"
         } else {
             "出站模式、节点与订阅设置都会保留，随时可以重新启动。"
         };
@@ -178,7 +179,7 @@ impl Sbgui {
                             .text_size(px(18.0))
                             .font_weight(WEIGHT_SEMIBOLD)
                             .text_color(rgb(TEXT))
-                            .child("停止内核？"),
+                            .child("停止 sing-box 内核？"),
                     )
                     .child(
                         div()
@@ -186,7 +187,18 @@ impl Sbgui {
                             .text_size(px(BODY))
                             .line_height(px(21.0))
                             .text_color(rgb(MUTED))
-                            .child(format!("停止会断开当前所有代理连接。{detail}")),
+                            .child("停止后，系统代理和 TUN 将无法继续工作，当前连接也会中断。"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .text_size(px(LABEL))
+                            .line_height(px(20.0))
+                            .text_color(rgb(AMBER))
+                            .child(icon("info", AMBER, 16.0))
+                            .child(detail),
                     )
                     .child(
                         div()
@@ -227,7 +239,7 @@ impl Sbgui {
                                     .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
                                         view.answer_stop_core(true, cx);
                                     }))
-                                    .child("停止内核"),
+                                    .child("确认停止"),
                             ),
                     ),
             )
