@@ -14,7 +14,7 @@ use crate::style::{CYAN, panel};
 pub(crate) fn draw_connections(frame: &mut Frame, area: ratatui::prelude::Rect, app: &App) {
     let visible = visible_connections(app);
     let rows = visible.iter().enumerate().map(|(index, connection)| {
-        let chains = if connection.chains.is_empty() {
+        let chains = if connection.is_direct() {
             "-".to_owned()
         } else {
             connection.chains.join(" → ")

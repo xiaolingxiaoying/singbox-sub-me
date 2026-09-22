@@ -971,7 +971,7 @@ pub(crate) fn connection_target(connection: &Connection) -> String {
 }
 
 pub(crate) fn connection_chain(connection: &Connection, locale: Locale) -> String {
-    if connection.chains.is_empty() {
+    if connection.is_direct() {
         tr!(locale, "直连", "Direct").to_owned()
     } else {
         connection

@@ -35,7 +35,7 @@ impl Sbgui {
         // The proxy/direct split is read from the same list the table draws, so
         // the metric strip and the rows can never disagree.
         let total = connections.len();
-        let proxied = connections.iter().filter(|c| !c.chains.is_empty()).count();
+        let proxied = connections.iter().filter(|c| !c.is_direct()).count();
         let direct = total - proxied;
         if !query.is_empty() {
             connections.retain(|connection| connection.matches(&query));

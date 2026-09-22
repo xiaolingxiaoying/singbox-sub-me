@@ -102,6 +102,17 @@ impl Connection {
         .to_lowercase();
         haystack.contains(&query)
     }
+
+    /// Whether the core took this connection straight to its destination.
+    ///
+    /// An empty chain is not the only shape of a direct connection: sing-box
+    /// reports the `direct` outbound as a one-element chain, so treating an
+    /// empty vector as the test counts every direct connection as proxied.
+    pub fn is_direct(&self) -> bool {
+        self.chains
+            .iter()
+            .all(|link| link.eq_ignore_ascii_case("direct"))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -489,6 +500,27 @@ fn urlencoded(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_one_element_direct_chain_is_not_a_proxied_connection() {
+        let direct = Connection {
+            chains: vec!["direct".to_owned()],
+            ..Default::default()
+        };
+        let absent = Connection::default();
+        let proxied = Connection {
+            chains: vec!["direct".to_owned(), "HK-01".to_owned()],
+            ..Default::default()
+        };
+        let node = Connection {
+            chains: vec!["♻️自动选择".to_owned()],
+            ..Default::default()
+        };
+        assert!(direct.is_direct());
+        assert!(absent.is_direct());
+        assert!(!proxied.is_direct());
+        assert!(!node.is_direct());
+    }
 
     #[tokio::test]
     async fn authenticated_api_sends_the_instance_secret() {
