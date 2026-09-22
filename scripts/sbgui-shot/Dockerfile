@@ -11,4 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       xvfb xauth x11-utils imagemagick fonts-noto-cjk fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
 
+# The rust image ships rustfmt but not clippy, so the lint gate would fail for
+# a reason that has nothing to do with the code.
+RUN rustup component add clippy rustfmt
+
 WORKDIR /src
