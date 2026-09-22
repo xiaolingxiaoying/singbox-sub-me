@@ -69,7 +69,7 @@ fi
 
 for size in $SIZES; do
   for page in $PAGES; do
-    SBGUI_PAGE=$page SBGUI_SIZE=$size \
+    SBGUI_PAGE=$page SBGUI_SIZE=$size SBGUI_SETTINGS_SECTION="${SBGUI_SETTINGS_SECTION:-}" \
       xvfb-run -a -s "-screen 0 ${size}x24" \
       bash "$HERE/inside.sh" --capture "$page" "$size" "$OUT" "$BIN"
   done

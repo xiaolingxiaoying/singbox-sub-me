@@ -17,8 +17,8 @@ use gpui::{
 use crate::state::{Page, Sbgui};
 use crate::theme::{
     AMBER, BLUE, BLUE_2, BODY, BORDER, CYAN, DANGER, DISPLAY, FAINT, GAP_ITEM, LABEL, META, MINT,
-    MUTED, PAD_CARD, PAD_SURFACE_X, PAD_SURFACE_Y, RADIUS, RADIUS_CONTROL, ROW_X, ROW_Y, SECTION,
-    SURFACE, SURFACE_2, TEXT, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD,
+    MUTED, PAD_SURFACE_X, PAD_SURFACE_Y, RADIUS, RADIUS_CONTROL, ROW_X, ROW_Y, SECTION, SURFACE,
+    SURFACE_2, TEXT, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD,
 };
 
 // Small embedded SVGs keep icon weight consistent and survive standalone packaging.
@@ -410,25 +410,6 @@ pub(crate) fn table_col(label: &'static str, width: Option<f32>) -> impl IntoEle
         .child(label)
 }
 
-pub(crate) fn panel(title: impl Into<String>) -> gpui::Div {
-    div()
-        .flex_1()
-        .p(px(PAD_CARD))
-        .rounded(px(RADIUS))
-        .bg(rgb(SURFACE))
-        .border_1()
-        .border_color(rgb(BORDER))
-        .flex()
-        .flex_col()
-        .child(
-            div()
-                .text_size(px(SECTION))
-                .font_weight(WEIGHT_SEMIBOLD)
-                .text_color(rgb(TEXT))
-                .child(title.into()),
-        )
-}
-
 pub(crate) fn traffic_chart(samples: Vec<(u64, u64)>, peak: u64) -> impl IntoElement {
     gpui::canvas(
         |_, _, _| (),
@@ -734,9 +715,13 @@ pub(crate) fn connection_row(
         .into_any_element()
 }
 
+/// One read-only setting: the name on the left, the value on the right of the
+/// same row, so a list of them is one vertical sweep instead of a column of
+/// label/value pairs stacked apart.
 pub(crate) fn setting_line(label: &str, value: &str) -> impl IntoElement {
     div()
         .w_full()
+        .min_h(px(68.0))
         .py(px(14.0))
         .flex()
         .items_center()
@@ -745,9 +730,10 @@ pub(crate) fn setting_line(label: &str, value: &str) -> impl IntoElement {
         .border_color(rgb(BORDER))
         .child(
             div()
-                .w(px(160.0))
+                .w(px(180.0))
                 .flex_shrink_0()
                 .text_size(px(BODY))
+                .font_weight(WEIGHT_MEDIUM)
                 .text_color(rgb(TEXT))
                 .child(label.to_owned()),
         )
@@ -762,6 +748,8 @@ pub(crate) fn setting_line(label: &str, value: &str) -> impl IntoElement {
         )
 }
 
+/// A short explanation that belongs to the rows under it rather than to one
+/// row: the label carries the weight, the detail says what changes.
 pub(crate) fn setting_row_intro(label: &str, detail: &str) -> impl IntoElement {
     div()
         .mt(px(18.0))
@@ -791,7 +779,8 @@ pub(crate) fn toggle_line(
 ) -> impl IntoElement {
     div()
         .w_full()
-        .py(px(16.0))
+        .min_h(px(68.0))
+        .py(px(14.0))
         .flex()
         .items_center()
         .gap(px(16.0))
@@ -802,6 +791,7 @@ pub(crate) fn toggle_line(
                 .flex_1()
                 .min_w(px(0.0))
                 .text_size(px(BODY))
+                .font_weight(WEIGHT_MEDIUM)
                 .text_color(rgb(TEXT))
                 .child(label),
         )

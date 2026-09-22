@@ -174,6 +174,33 @@ impl SettingsSection {
             Self::Advanced => "高级",
         }
     }
+
+    /// Why the section exists, shown under its name in the settings rail so a
+    /// row is 66 px of answer instead of one bare word.
+    pub(crate) fn blurb(self) -> &'static str {
+        match self {
+            Self::General => "订阅与本地配置档案",
+            Self::Network => "流量模式、端口与测试地址",
+            Self::Core => "sing-box 版本、镜像与更新",
+            Self::Tun => "虚拟网卡与系统路由",
+            Self::Automation => "自动启动与自动更新",
+            Self::Appearance => "主题与字体",
+            Self::Advanced => "数据目录与配置安全",
+        }
+    }
+
+    /// The rail icon, from the kit's own inventory.
+    pub(crate) fn glyph(self) -> &'static str {
+        match self {
+            Self::General => "stack",
+            Self::Network => "network",
+            Self::Core => "power",
+            Self::Tun => "globe",
+            Self::Automation => "clock",
+            Self::Appearance => "home",
+            Self::Advanced => "settings",
+        }
+    }
 }
 
 pub(crate) struct Sbgui {
@@ -242,6 +269,26 @@ pub(crate) fn env_page() -> Option<Page> {
         "settings" | "设置" => Page::Settings,
         _ => return None,
     })
+}
+
+/// `SBGUI_SETTINGS_SECTION=<general|network|core|tun|automation|appearance|advanced>`
+/// opens one settings section directly, so the screenshot harness can look at
+/// the widest rows instead of only the one that happens to be the default.
+pub(crate) fn env_settings_section() -> Option<SettingsSection> {
+    match std::env::var("SBGUI_SETTINGS_SECTION")
+        .ok()?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "general" => Some(SettingsSection::General),
+        "network" => Some(SettingsSection::Network),
+        "core" => Some(SettingsSection::Core),
+        "tun" => Some(SettingsSection::Tun),
+        "automation" => Some(SettingsSection::Automation),
+        "appearance" => Some(SettingsSection::Appearance),
+        "advanced" => Some(SettingsSection::Advanced),
+        _ => None,
+    }
 }
 
 pub(crate) fn env_window_size() -> (f32, f32) {

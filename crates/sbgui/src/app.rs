@@ -13,8 +13,8 @@ use gpui::{
 
 use crate::parse::{parse_count, parse_port};
 use crate::state::{
-    ExitChoice, INPUT_FIELDS, InputField, LogLevelFilter, Page, Sbgui, SettingsSection, TextField,
-    env_page, env_show_exit_confirm,
+    ExitChoice, INPUT_FIELDS, InputField, LogLevelFilter, Page, Sbgui, TextField, env_page,
+    env_settings_section, env_show_exit_confirm,
 };
 use crate::theme::{BG, BORDER, CONTENT_MAX, CONTENT_PAD, GAP_SECTION, TEXT, WINDOW_RADIUS};
 
@@ -38,7 +38,7 @@ impl Sbgui {
                 text: String::new(),
             }),
             log_level: LogLevelFilter::default(),
-            settings_section: SettingsSection::default(),
+            settings_section: env_settings_section().unwrap_or_default(),
             show_subscription_import: false,
             show_rule_sets: false,
             show_all_rules: false,

@@ -657,6 +657,7 @@ impl Sbgui {
     ) -> impl IntoElement {
         div()
             .w_full()
+            .min_h(px(68.0))
             .py(px(14.0))
             .flex()
             .items_center()
@@ -664,7 +665,13 @@ impl Sbgui {
             .gap(px(16.0))
             .border_b_1()
             .border_color(rgb(BORDER))
-            .child(div().text_size(px(BODY)).text_color(rgb(TEXT)).child(label))
+            .child(
+                div()
+                    .text_size(px(BODY))
+                    .font_weight(WEIGHT_MEDIUM)
+                    .text_color(rgb(TEXT))
+                    .child(label),
+            )
             .child(self.text_field(spec, window, cx))
     }
 }
