@@ -8,6 +8,27 @@ set -uo pipefail
 
 if [[ "${1:-}" == "--capture" ]]; then
   page=$2 size=$3 out=$4 bin=$5
+  # The controller endpoint and secret are regenerated on every launch, so read
+  # them back out of the runtime config the client just wrote rather than
+  # assuming them. `count` feeds the wait loop; `detail` is what gets reported.
+  api_probe() {
+    python3 - "$1" <<'PY'
+import json, os, sys, urllib.request
+cfg = json.load(open(os.path.expanduser("~/.config/sbgui/cache/active-config.json")))
+api = cfg["experimental"]["clash_api"]
+req = urllib.request.Request("http://%s/connections" % api["external_controller"],
+                             headers={"Authorization": "Bearer " + api["secret"]})
+try:
+    rows = json.load(urllib.request.urlopen(req, timeout=5))["connections"]
+except Exception as error:
+    print("probe failed: %s" % error)
+    sys.exit(0)
+if sys.argv[1] == "count":
+    print(len(rows))
+else:
+    print(len(rows), [(c["metadata"]["host"], c["metadata"]["destinationPort"]) for c in rows])
+PY
+  }
   w=${size%x*}
   # Every page runs in the same container, and killing sbgui does not kill the
   # sing-box it spawned: the survivor holds the mixed port and the next page
@@ -47,7 +68,20 @@ if [[ "${1:-}" == "--capture" ]]; then
       (curl -s -x http://127.0.0.1:2080 --max-time 40 "$url" -o /dev/null
        echo "$url exit=$?" >>/tmp/curl.status) &
     done
-    sleep 6
+    # When does the core start reporting the in-flight requests at all? The
+    # table only ever shows the last successful poll (CONNECTIONS_EVERY is 2 s),
+    # so a frame captured inside that window can legitimately be empty while
+    # the api already has rows. Wait for the rows to appear, then sit out two
+    # full poll cycles: whatever the frame shows afterwards is the refresh
+    # path's answer, not a race between two timers.
+    first=none
+    for i in $(seq 1 30); do
+      n=$(api_probe count)
+      if [ "$n" -gt 0 ] 2>/dev/null; then first=$i; break; fi
+      sleep 1
+    done
+    echo "    api first nonzero row at +${first}s after the requests were fired"
+    sleep 5
     # Three numbers say which half of the chain is broken: whether the request
     # reached the proxy at all, what the core logged about it, and what the
     # controller answers. Without them an empty table is only a guess. The
@@ -55,16 +89,7 @@ if [[ "${1:-}" == "--capture" ]]; then
     # have to be read back out of the runtime config rather than assumed.
     echo "    curl: $(tr '\n' ' ' </tmp/curl.status 2>/dev/null)"
     echo "    core log: $(tail -4 "$HOME/.config/sbgui/cache/core.log" 2>/dev/null | tr '\n' '|')"
-    echo "    api rows: $(python3 - <<'PY' 2>&1 | tail -1
-import json, os, urllib.request
-cfg = json.load(open(os.path.expanduser("~/.config/sbgui/cache/active-config.json")))
-api = cfg["experimental"]["clash_api"]
-req = urllib.request.Request("http://%s/connections" % api["external_controller"],
-                             headers={"Authorization": "Bearer " + api["secret"]})
-rows = json.load(urllib.request.urlopen(req, timeout=5))["connections"]
-print(len(rows), [(c["metadata"]["host"], c["metadata"]["destinationPort"]) for c in rows])
-PY
-)"
+    echo "    api rows: $(api_probe detail)"
   else
     sleep 3
   fi
