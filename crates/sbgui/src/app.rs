@@ -14,7 +14,7 @@ use gpui::{
 use crate::parse::{parse_count, parse_port};
 use crate::state::{
     ExitChoice, INPUT_FIELDS, InputField, LogLevelFilter, Page, Sbgui, TextField, env_page,
-    env_settings_section, env_show_exit_confirm,
+    env_settings_section, env_show_exit_confirm, env_show_stop_confirm,
 };
 use crate::theme::{BG, BORDER, CONTENT_MAX, CONTENT_PAD, GAP_SECTION, TEXT, WINDOW_RADIUS};
 
@@ -32,6 +32,7 @@ impl Sbgui {
             page: env_page().unwrap_or(Page::Dashboard),
             group_index: 0,
             confirm_exit: env_show_exit_confirm(),
+            confirm_stop_core: env_show_stop_confirm(),
             exit_choice: None,
             inputs: INPUT_FIELDS.map(|_| TextField {
                 focus: cx.focus_handle(),
@@ -250,6 +251,28 @@ impl Sbgui {
         self.field_mut(field).text = value;
     }
 
+    /// Sends a command, holding back the ones that must not happen by accident.
+    ///
+    /// Stopping the core drops every proxied connection and, with the system
+    /// proxy on, takes other applications offline, so the kit requires an
+    /// explicit confirmation first. Everything else goes straight through.
+    pub(crate) fn request(&mut self, command: ClientCommand, cx: &mut Context<Self>) {
+        if matches!(command, ClientCommand::StopCore) && !self.confirm_stop_core {
+            self.confirm_stop_core = true;
+            cx.notify();
+            return;
+        }
+        self.send(command);
+    }
+
+    pub(crate) fn answer_stop_core(&mut self, confirm: bool, cx: &mut Context<Self>) {
+        self.confirm_stop_core = false;
+        if confirm {
+            self.send(ClientCommand::StopCore);
+        }
+        cx.notify();
+    }
+
     /// The veto GPUI consults for `WM_CLOSE` (Alt+F4, taskbar close). A `false`
     /// return keeps the window open so the exit decision can be asked for
     /// first; the custom close button routes through [`Self::request_close`]
@@ -349,5 +372,6 @@ impl Render for Sbgui {
             .children(
                 (self.confirm_exit && self.exit_choice.is_none()).then(|| self.exit_overlay(cx)),
             )
+            .children(self.confirm_stop_core.then(|| self.stop_core_overlay(cx)))
     }
 }

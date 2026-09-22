@@ -118,8 +118,7 @@ impl Sbgui {
                                             .hover(|style| style.bg(rgb(SURFACE_2)))
                                             .on_click(cx.listener(
                                                 move |view, _: &ClickEvent, _, cx| {
-                                                    view.send(core_command.clone());
-                                                    cx.notify();
+                                                    view.request(core_command.clone(), cx);
                                                 },
                                             ))
                                             .child(icon(

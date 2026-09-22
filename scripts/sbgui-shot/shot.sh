@@ -35,6 +35,8 @@ MSYS_NO_PATHCONV=1 "$DOCKER" run --rm \
   -e PAGES="$PAGES" \
   -e SIZES="$SIZES" \
   -e DEMO_CORE="${DEMO_CORE:-}" \
+  -e SBGUI_SHOW_STOP_CONFIRM="${SBGUI_SHOW_STOP_CONFIRM:-}" \
+  -e SBGUI_SHOW_EXIT_CONFIRM="${SBGUI_SHOW_EXIT_CONFIRM:-}" \
   -e SBGUI_SETTINGS_SECTION="${SBGUI_SETTINGS_SECTION:-}" \
   "$IMAGE" bash -c 'tr -d "\r" < /src/scripts/sbgui-shot/inside.sh > /tmp/inside.sh; exec bash /tmp/inside.sh'
 

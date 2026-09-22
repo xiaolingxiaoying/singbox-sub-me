@@ -500,8 +500,7 @@ impl Sbgui {
             })
             .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
                 if let Some(command) = command.clone() {
-                    view.send(command);
-                    cx.notify();
+                    view.request(command, cx);
                 }
             }))
             .child(icon(glyph, color, 15.0))
@@ -536,8 +535,7 @@ impl Sbgui {
             if matches!(command, ClientCommand::StartCore) && view.snapshot.starting {
                 return;
             }
-            view.send(command.clone());
-            cx.notify();
+            view.request(command.clone(), cx);
         })
     }
 

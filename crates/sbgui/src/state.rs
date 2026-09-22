@@ -211,6 +211,8 @@ pub(crate) struct Sbgui {
     pub(crate) group_index: usize,
     /// Set while the exit confirmation overlay is visible.
     pub(crate) confirm_exit: bool,
+    /// Set while the stop-the-core confirmation is visible.
+    pub(crate) confirm_stop_core: bool,
     /// The exit decision, once made; a set choice lets the window close.
     pub(crate) exit_choice: Option<ExitChoice>,
     /// Text fields, indexed by `InputField as usize`.
@@ -304,4 +306,10 @@ pub(crate) fn env_window_size() -> (f32, f32) {
 
 pub(crate) fn env_show_exit_confirm() -> bool {
     std::env::var("SBGUI_SHOW_EXIT_CONFIRM").is_ok_and(|value| value == "1")
+}
+
+/// Review seam for the stop-the-core confirmation, which otherwise needs a
+/// click the screenshot harness cannot make.
+pub(crate) fn env_show_stop_confirm() -> bool {
+    std::env::var("SBGUI_SHOW_STOP_CONFIRM").is_ok_and(|value| value == "1")
 }
