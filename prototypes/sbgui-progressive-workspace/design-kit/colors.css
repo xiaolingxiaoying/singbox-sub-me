@@ -1,0 +1,19 @@
+:root {
+  --serein-bg: #f3f6f5;
+  --serein-surface: #ffffff;
+  --serein-surface-soft: #f7f9f8;
+  --serein-text: #13201e;
+  --serein-muted: #687774;
+  --serein-faint: #8f9c99;
+  --serein-border: #dce4e1;
+  --serein-border-strong: #cbd8d4;
+  --serein-teal: #0d9488;
+  --serein-teal-dark: #08766d;
+  --serein-teal-soft: #def4f1;
+  --serein-green: #16a06d;
+  --serein-blue: #3b82f6;
+  --serein-danger: #a33c3c;
+  --serein-font: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  --serein-radius-control: 7px;
+  --serein-radius-surface: 13px;
+}
