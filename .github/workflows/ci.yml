@@ -31,6 +31,22 @@ jobs:
       - run: cargo test --workspace --features sbctl/test-signing
       - run: cargo test -p sbctl --no-default-features --test release_trust
 
+  prototype:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: prototypes/sbgui-progressive-workspace
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: prototypes/sbgui-progressive-workspace/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm run test:sites
+
   windows-static:
     runs-on: windows-2022
     steps:
