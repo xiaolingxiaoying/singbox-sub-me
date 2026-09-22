@@ -9,11 +9,23 @@ set -uo pipefail
 if [[ "${1:-}" == "--capture" ]]; then
   page=$2 size=$3 out=$4 bin=$5
   w=${size%x*}
+  # Every page runs in the same container, and killing sbgui does not kill the
+  # sing-box it spawned: the survivor holds the mixed port and the next page
+  # then auto-starts into "端口已被占用" and shows an empty table.
+  pkill -f '/.config/sbgui/core/sing-box' 2>/dev/null
+  pkill sbgui 2>/dev/null
+  sleep 1
   "$bin" >/tmp/sbgui.log 2>&1 &
   pid=$!
   # GPUI needs a mapped window plus a few snapshot ticks (the engine publishes
   # at ~4/s) before the frame is worth looking at.
+  sleep 6
   sleep 9
+  # Known gap: the connections table body is still never captured. clash_api
+  # lists only live connections, and every request the fixture can make either
+  # fails (the demo nodes point at closed local ports) or finishes before the
+  # frame is shot; a held-open CONNECT did not show up either. Verifying that
+  # table needs a reachable outbound, not more screenshot plumbing.
   if ! import -window root "$out/$size-$page.png" 2>>/tmp/import.log; then
     echo "CAPTURE FAILED for $size-$page"
     tail -5 /tmp/import.log 2>/dev/null | sed 's/^/    import: /'
@@ -24,6 +36,7 @@ if [[ "${1:-}" == "--capture" ]]; then
   # guess, not a diagnosis.
   kill "$pid" 2>/dev/null
   wait "$pid" 2>/dev/null
+  pkill -f '/.config/sbgui/core/sing-box' 2>/dev/null
   cp /tmp/sbgui.log "$out/$size-$page.sbgui.log" 2>/dev/null
   echo "shot $size-$page.png"
   tail -3 /tmp/sbgui.log 2>/dev/null | sed 's/^/    sbgui: /'

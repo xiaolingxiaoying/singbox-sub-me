@@ -63,6 +63,7 @@
       { "ip_is_private": true, "outbound": "direct" },
       { "protocol": ["bittorrent"], "outbound": "direct" },
       { "domain_suffix": ["cn", "163.com", "bilibili.com"], "outbound": "direct" },
+      { "domain": ["example.com"], "outbound": "direct" },
       { "source_ip_cidr": ["10.0.0.0/8", "192.168.0.0/16"], "outbound": "direct" },
       { "domain_suffix": ["openai.com", "chatgpt.com", "anthropic.com"], "outbound": "♻️自动选择" },
       { "network": ["udp"], "port": [443], "outbound": "♻️自动选择" }
