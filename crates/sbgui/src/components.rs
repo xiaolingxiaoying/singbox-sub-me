@@ -17,8 +17,8 @@ use gpui::{
 use crate::state::{Page, Sbgui};
 use crate::theme::{
     AMBER, BLUE, BLUE_2, BODY, BORDER, CYAN, DANGER, DISPLAY, FAINT, GAP_ITEM, LABEL, META, MINT,
-    MUTED, PAD_SURFACE_X, PAD_SURFACE_Y, RADIUS, RADIUS_CONTROL, ROW_X, ROW_Y, SECTION, SURFACE,
-    SURFACE_2, TEXT, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD,
+    MUTED, PAD_SURFACE_X, PAD_SURFACE_Y, RADIUS, RADIUS_CONTROL, ROW_HOVER, ROW_X, ROW_Y, SECTION,
+    SURFACE, SURFACE_2, TEXT, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD,
 };
 
 // Small embedded SVGs keep icon weight consistent and survive standalone packaging.
@@ -472,20 +472,28 @@ pub(crate) fn legend(color: u32, label: &'static str, value: u64) -> impl IntoEl
         )
 }
 
+/// One rule row: the kit's 39 px data row, with the matcher's own type split
+/// out of the condition so a wall of rules scans down two columns instead of
+/// one long sentence.
 pub(crate) fn rule_row(index: usize, rule: &RouteRuleSnapshot) -> gpui::AnyElement {
+    let (kind, condition) = match rule.matcher.split_once(" · ") {
+        Some((kind, condition)) => (kind.to_owned(), condition.to_owned()),
+        None => ("条件".to_owned(), rule.matcher.clone()),
+    };
     div()
         .id(format!("rule-row-{index}"))
         .w_full()
-        .px(px(ROW_X))
-        .py(px(ROW_Y))
+        .min_h(px(39.0))
+        .px(px(13.0))
         .flex()
         .items_center()
-        .gap(px(16.0))
+        .gap(px(12.0))
         .when(index > 0, |row| row.border_t_1().border_color(rgb(BORDER)))
-        .hover(|style| style.bg(rgb(BLUE_2)))
+        .hover(|style| style.bg(rgb(ROW_HOVER)))
+        .text_size(px(LABEL))
         .child(
             div()
-                .w(px(44.0))
+                .w(px(40.0))
                 .flex_shrink_0()
                 .text_size(px(META))
                 .text_color(rgb(FAINT))
@@ -493,19 +501,26 @@ pub(crate) fn rule_row(index: usize, rule: &RouteRuleSnapshot) -> gpui::AnyEleme
         )
         .child(
             div()
-                .flex_1()
-                .min_w(px(0.0))
-                .text_size(px(BODY))
-                .text_color(rgb(TEXT))
-                .child(rule.matcher.clone()),
-        )
-        .child(
-            // The 状态 column used to sit here and say 已启用 on every row.
-            div()
-                .w(px(200.0))
+                .w(px(96.0))
                 .flex_shrink_0()
                 .truncate()
-                .text_size(px(BODY))
+                .text_color(rgb(MUTED))
+                .child(kind),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .truncate()
+                .text_color(rgb(TEXT))
+                .child(condition),
+        )
+        .child(
+            div()
+                .w(px(170.0))
+                .flex_shrink_0()
+                .truncate()
+                .font_weight(WEIGHT_MEDIUM)
                 .text_color(rgb(CYAN))
                 .child(rule.outbound.clone()),
         )

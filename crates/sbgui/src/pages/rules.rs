@@ -2,16 +2,20 @@
 
 use client_core::ClientCommand;
 use client_core::state::RouteRuleSnapshot;
+use gpui::prelude::FluentBuilder;
 use gpui::{
     ClickEvent, Context, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 
-use crate::components::{inline_empty, rule_row, status_dot};
+use crate::components::{
+    accordion, inline_empty, page_head, rule_row, status_dot, table_col, table_head_row,
+    work_surface,
+};
 use crate::state::{FieldSpec, InputField, Sbgui, Tone};
 use crate::theme::{
-    BODY, BORDER, CYAN, FAINT, GAP_SECTION, LABEL, LIST_PAGE, META, MINT, MUTED, RADIUS, ROW_X,
-    ROW_Y, SURFACE, SURFACE_2, TEXT, WEIGHT_MEDIUM,
+    BODY, BORDER, CYAN, FAINT, LABEL, LIST_PAGE, META, MINT, MUTED, RADIUS_CONTROL, ROW_HOVER,
+    SURFACE, WEIGHT_MEDIUM,
 };
 
 impl Sbgui {
@@ -45,69 +49,47 @@ impl Sbgui {
             .take(visible)
             .map(|(index, rule)| rule_row(*index, rule))
             .collect();
-        let rule_set_rows: Vec<gpui::AnyElement> = rule_sets
-            .iter()
-            .map(|set| {
-                div()
-                    .w_full()
-                    .px(px(ROW_X))
-                    .py(px(ROW_Y))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(
-                        div()
-                            .text_size(px(BODY))
-                            .font_weight(WEIGHT_MEDIUM)
-                            .text_color(rgb(CYAN))
-                            .child(set.tag.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(META))
-                            .text_color(rgb(FAINT))
-                            .child(set.kind.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .text_size(px(META))
-                            .text_color(rgb(MUTED))
-                            .truncate()
-                            .child(if set.url.is_empty() {
-                                "（本地规则集）".to_owned()
-                            } else {
-                                set.url.clone()
-                            }),
-                    )
-                    .into_any_element()
-            })
-            .collect();
 
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(GAP_SECTION))
+        work_surface()
+            .child(
+                page_head("当前配置里的路由规则：每条决定匹配的流量走哪个出站。").child(
+                    self.action(
+                        "refresh-rules",
+                        "刷新状态",
+                        Tone::Neutral,
+                        cx,
+                        ClientCommand::Refresh,
+                    ),
+                ),
+            )
+            // The statement of what is loaded on the left, the tool that narrows
+            // it on the right — the kit's rule bar, so the count is never
+            // competing with the search box for the same line.
             .child(
                 div()
+                    .mt(px(18.0))
+                    .mb(px(18.0))
+                    .w_full()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .justify_between()
-                    .gap(px(12.0))
-                    .flex_wrap()
+                    .gap(px(24.0))
                     .child(
                         div()
                             .flex_1()
+                            .min_w(px(200.0))
                             .flex()
                             .items_center()
                             .gap(px(8.0))
                             .child(status_dot(if count > 0 { MINT } else { FAINT }))
-                            .child(div().text_size(px(12.0)).text_color(rgb(MUTED)).child(
+                            .child(div().text_size(px(LABEL)).text_color(rgb(MUTED)).child(
                                 if count > 0 {
-                                    format!("当前配置 · {count} 条规则")
+                                    if query.is_empty() {
+                                        format!("当前配置 · {count} 条规则")
+                                    } else {
+                                        format!("匹配 {} / {count} 条规则", matched.len())
+                                    }
                                 } else {
                                     "等待激活配置".to_owned()
                                 },
@@ -118,90 +100,86 @@ impl Sbgui {
                             field: InputField::RuleSearch,
                             id: "rule-search",
                             placeholder: "搜索匹配条件或出站…",
-                            width: 240.0,
+                            width: 280.0,
                         },
                         window,
                         cx,
-                    ))
-                    .child(self.action(
-                        "refresh-rules",
-                        "刷新状态",
-                        Tone::Neutral,
-                        cx,
-                        ClientCommand::Refresh,
                     )),
             )
-            .children((!rule_set_rows.is_empty()).then(|| {
-                div()
-                    .id("rule-sets-panel")
-                    .w_full()
-                    .rounded(px(RADIUS))
-                    .bg(rgb(SURFACE))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .id("rule-sets-toggle")
-                            .px(px(15.0))
-                            .py(px(11.0))
-                            .flex()
-                            .items_center()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(SURFACE_2)))
-                            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
-                                view.show_rule_sets = !view.show_rule_sets;
-                                cx.notify();
-                            }))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(TEXT))
-                                    .child(format!("规则集 · {} 个", rule_set_rows.len())),
-                            )
-                            .child(div().text_size(px(11.0)).text_color(rgb(MUTED)).child(
-                                if self.show_rule_sets {
-                                    "收起"
-                                } else {
-                                    "展开"
-                                },
-                            )),
-                    )
-                    .children(if self.show_rule_sets {
-                        rule_set_rows
-                    } else {
-                        Vec::new()
-                    })
+            // Rule sets are the least-read thing on the page, so they disclose
+            // on demand instead of pushing the table down.
+            .children((!rule_sets.is_empty()).then(|| {
+                accordion(
+                    "rule-sets-toggle",
+                    "规则集",
+                    format!("{} 个 · 展开查看来源", rule_sets.len()),
+                    self.show_rule_sets,
+                    cx,
+                    |view| view.show_rule_sets = !view.show_rule_sets,
+                    div()
+                        .flex()
+                        .flex_col()
+                        .children(rule_sets.iter().enumerate().map(|(index, set)| {
+                            div()
+                                .id(format!("rule-set-{index}"))
+                                .w_full()
+                                .min_h(px(39.0))
+                                .py(px(8.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(10.0))
+                                .when(index > 0, |row| row.border_t_1().border_color(rgb(BORDER)))
+                                .child(
+                                    div()
+                                        .w(px(180.0))
+                                        .flex_shrink_0()
+                                        .truncate()
+                                        .text_size(px(BODY))
+                                        .font_weight(WEIGHT_MEDIUM)
+                                        .text_color(rgb(CYAN))
+                                        .child(set.tag.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(64.0))
+                                        .flex_shrink_0()
+                                        .text_size(px(META))
+                                        .text_color(rgb(FAINT))
+                                        .child(set.kind.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .truncate()
+                                        .text_size(px(META))
+                                        .text_color(rgb(MUTED))
+                                        .child(if set.url.is_empty() {
+                                            "（本地规则集）".to_owned()
+                                        } else {
+                                            set.url.clone()
+                                        }),
+                                )
+                        })),
+                )
             }))
             .child(
                 div()
                     .id("rules-panel")
                     .w_full()
-                    .rounded(px(RADIUS))
-                    .bg(rgb(SURFACE))
+                    .rounded(px(RADIUS_CONTROL + 2.0))
                     .border_1()
                     .border_color(rgb(BORDER))
                     .overflow_hidden()
-                    .children(if rows.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![
-                            div()
-                                .px(px(ROW_X))
-                                .py(px(10.0))
-                                .flex()
-                                .items_center()
-                                .gap(px(16.0))
-                                .bg(rgb(SURFACE_2))
-                                .text_size(px(META))
-                                .text_color(rgb(MUTED))
-                                .child(div().w(px(44.0)).child("#"))
-                                .child(div().flex_1().child("匹配条件"))
-                                .child(div().w(px(200.0)).child("出站"))
-                                .into_any_element(),
-                        ]
-                    })
+                    .flex()
+                    .flex_col()
+                    .child(
+                        table_head_row()
+                            .child(table_col("#", Some(40.0)))
+                            .child(table_col("类型", Some(96.0)))
+                            .child(table_col("匹配条件", None))
+                            .child(table_col("出站", Some(170.0))),
+                    )
                     .children(if rows.is_empty() {
                         vec![
                             inline_empty(
@@ -242,15 +220,18 @@ impl Sbgui {
         div()
             .id(id)
             .w_full()
-            .py(px(14.0))
+            .min_h(px(44.0))
             .flex()
             .items_center()
             .justify_center()
+            .border_t_1()
+            .border_color(rgb(BORDER))
+            .bg(rgb(SURFACE))
             .text_size(px(LABEL))
             .font_weight(WEIGHT_MEDIUM)
             .text_color(rgb(CYAN))
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(SURFACE_2)))
+            .hover(|s| s.bg(rgb(ROW_HOVER)))
             .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
                 toggle(view);
                 cx.notify();
