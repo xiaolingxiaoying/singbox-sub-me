@@ -10,9 +10,9 @@ Status: claimed
 
 | kit 必查项 | 状态 | 证据 |
 | --- | --- | --- |
-| 1/2 原型自身构建与测试 | 通过 | 原型目录内 `npm run build` / `test:sites` |
+| 1/2 原型自身构建与测试 | 通过 | 2026-09-22 去 Grid 改版后复跑：`npm run build` exit 0，`npm run test:sites` 6/6 |
 | 3 八个目的地全部可达（含 About） | 通过 | `.scratch/sbgui-zh-final/`、`.scratch/sbgui-en-final/` 逐页截图 |
-| 4 390×844 无横向溢出 | **未验证** | 见 `issues/03-narrow-breakpoints.md` |
+| 4 390×844 无横向溢出 | 不适用 | 生产窗口下限 860×640，窄屏已正式放弃，见 `issues/03-narrow-breakpoints.md` |
 | 5 语言按钮在中英之间切换且不丢页面 | 通过 | `.scratch/sbgui-en-final/`、`.scratch/sbgui-rules-en2/` |
 | 6 标题栏无设置快捷键 | 通过 | `.scratch/sbgui-zh-final/*.png` |
 | 7 节点页分组优先、紧凑行 | 通过 | `.scratch/sbgui-nodes-v1/` |
@@ -27,8 +27,17 @@ Status: claimed
 
 种子由 `scripts/sbgui-shot/seed-demo.sh` 提供：两份订阅、运行中的内核、10 条路由规则、真实 INFO 日志、以及经混合端口保持打开的慢连接。
 
-## 未决范围决策
+## 范围决策
 
-- 概览页保留卡片式指标带，与 kit"避免卡片网格"冲突：见 `issues/06-card-view-vs-kit.md`。
-- `window_min_size` 860×640 与窄屏断点 820/560 的取舍：见 `issues/03-narrow-breakpoints.md`。
-- 真实 Windows 平台尚未运行过一次：见 `issues/04-real-windows-run.md`。
+2026-09-22 维护者已裁决三项：
+
+- 窄屏：保持 860×640，acceptance #4 标为不适用（`issues/03`）。
+- 概览卡片带：以原型稿为准，kit 措辞收窄为"其他页面不要滥用卡片"（`issues/06`）。
+- 英文态引擎文案：走共享层输出机器可读事件码、各界面自行渲染（`issues/02`）。方向已定，实现未开始，acceptance #5 在此之前只算部分达成。
+
+## 已知未完成
+
+- 连接页"内核有连接、界面 0 行"：归因尚未证实，先补时序证据（`issues/01`）。
+- 连接表建立时间列显示原始 ISO 串且被截断（`issues/05`）。
+- 真实 Windows 只跑过一轮且不完整（`issues/04`）。
+- 原型改纯 flex 后，两栏瓜分剩余宽度的容器与 grid 版差 11–16.5px（`issues/07`）。

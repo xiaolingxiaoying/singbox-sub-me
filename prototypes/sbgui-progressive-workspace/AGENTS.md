@@ -16,6 +16,8 @@ Before making substantial visual changes, use the Product Design plugin's `get-c
 - All prototype navigation destinations are in scope and must retain the same calm, light desktop-workspace visual system: narrow sidebar, quiet title bar, cool-gray canvas, white surfaces, fine borders, modest radii, and teal state accents. Extend only `prototypes/sbgui-progressive-workspace`; do not modify production `crates/` code for prototype work.
 - In the Nodes destination, prioritize strategy groups over raw node inventory. Keep node rows intentionally compact: name, current selection, and latency only; hide protocol, region, host, and traffic until a later detail interaction is explicitly requested.
 - The prototype title bar has no settings shortcut. Its only app-level utility control is the Chinese/English language switch; retain window controls alongside it. Keep reusable icon, color, layout, and acceptance references in `design-kit/`.
+- Decided 2026-09-22: the production client keeps an 860 × 640 minimum window and narrow-screen support is dropped. The 820/560 breakpoints stay in the prototype as a density study but are not a production acceptance gate, and acceptance check 4 (390 × 844) is marked not applicable.
+- Decided 2026-09-22: the Overview status card and metric strip are the sanctioned card surfaces — the prototype mock wins over the kit wording there. Every other destination still uses tables, lists, and two-pane rails; do not add card grids elsewhere.
 
 When implementing from a selected generated mock, treat that image as the source of truth for layout, component anatomy, density, spacing, color, typography, visible content, and hierarchy.
 

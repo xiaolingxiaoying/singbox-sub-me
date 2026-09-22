@@ -5,7 +5,7 @@
 1. `npm run build` completes successfully.
 2. `npm run test:sites` completes with all tests passing.
 3. Browser verification at desktop width confirms every destination: Overview, Nodes, Subscriptions, Rules, Connections, Logs, Settings, and About.
-4. Browser verification at 390 × 844 confirms no viewport-level horizontal overflow; wide tables may scroll inside their own container.
+4. Not applicable to the production client. The client enforces an 860 × 640 minimum window, so a 390 × 844 viewport cannot be reached; the browser prototype still renders it. Recorded 2026-09-22 in `.scratch/sbgui-progressive-workspace/issues/03-narrow-breakpoints.md`.
 5. The language button changes the visible interface to English and back to Chinese without losing the active page.
 6. The title bar contains no settings shortcut; only the language control and window controls remain on the right.
 7. Node screen exposes policy groups and compact node choices; compact rows show only selection, name, and latency.
