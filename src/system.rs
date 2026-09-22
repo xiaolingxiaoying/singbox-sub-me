@@ -1,4 +1,4 @@
-//! Host kernel tuning helpers for the `system` subcommands.
+//! Host facts and kernel tuning helpers for the `system` subcommands.
 //!
 //! BBR (Bottleneck Bandwidth and Round-trip propagation time) is Google's TCP
 //! congestion control algorithm. It improves throughput and latency on lossy or
@@ -107,6 +107,18 @@ fn persist<C: crate::runtime::Clock>(runtime: &Runtime<C>) -> Result<(), SystemE
     let contents = "net.ipv4.tcp_congestion_control=bbr\nnet.core.default_qdisc=fq\n";
     fs::write(&path, contents).map_err(|error| SystemError::Persist(error.to_string()))?;
     Ok(())
+}
+
+/// UDP `connect` performs a route lookup without sending a packet, which makes
+/// it a cheap probe for an IPv6 default route.
+///
+/// It lives here rather than in the subscription renderers because it is a
+/// fact about the host, not a choice about the configuration.
+pub fn host_has_ipv6_route() -> bool {
+    let Ok(socket) = std::net::UdpSocket::bind("[::]:0") else {
+        return false;
+    };
+    socket.connect("[2001:4860:4860::8888]:443").is_ok()
 }
 
 #[cfg(test)]

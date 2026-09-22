@@ -229,16 +229,7 @@ fn remote_rule_set(tag: &str, url: &str) -> Value {
 /// when the deployment never opted in; the explicit flag forces the same
 /// restriction on dual-stack hosts.
 fn ipv4_only_required(config: &DeploymentConfig) -> bool {
-    config.ipv4_only || !host_has_ipv6_route()
-}
-
-/// UDP `connect` performs a route lookup without sending a packet, which makes
-/// it a cheap probe for an IPv6 default route.
-fn host_has_ipv6_route() -> bool {
-    let Ok(socket) = std::net::UdpSocket::bind("[::]:0") else {
-        return false;
-    };
-    socket.connect("[2001:4860:4860::8888]:443").is_ok()
+    config.ipv4_only || !crate::system::host_has_ipv6_route()
 }
 
 pub(crate) fn sing_box_server(
