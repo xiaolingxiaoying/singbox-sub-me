@@ -18,6 +18,7 @@ Thumbs.db
 # Local agent tooling (never part of the project)
 .kilo/
 .zcode/
+.qoder/
 
 # Local build artefacts, whatever target triple they were built for
 /sbctl-linux-*
@@ -32,6 +33,19 @@ Thumbs.db
 dist/
 .impeccable/
 /.zcodeignore
+node_modules/
 
 # Local Linux sing-box binary for the headless GUI harness (never committed).
 .scratch/sbgui-demo-bin/
+
+# A sing-box cache_file written with a relative path lands in the process cwd,
+# which for a container bind-mounting the repo is the repo root itself.
+/cache.db
+
+# Every screenshot run is ephemeral: the logs and the superseded iterations of
+# a page stay out, and only the shot that proved a change is force-added.
+# sbgui-progressive-workspace is the live issue tracker, not a run directory.
+/.scratch/sbgui-*
+!/.scratch/sbgui-progressive-workspace/
+/.scratch/win11-vm/
+/.scratch/refactor-structure-20260921/
