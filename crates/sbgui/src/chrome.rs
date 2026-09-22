@@ -154,6 +154,7 @@ impl Sbgui {
                             Page::Connections => ("network", Some(snapshot.active_connections)),
                             Page::Logs => ("logs", None),
                             Page::Settings => ("settings", None),
+                            Page::About => ("info", None),
                         };
                         div()
                             .id(format!("nav-{}", item.title()))
@@ -592,6 +593,7 @@ impl Sbgui {
             Page::Connections => self.connections(window, cx),
             Page::Logs => self.logs(window, cx),
             Page::Settings => self.settings(window, cx),
+            Page::About => self.about(cx),
         }
     }
 

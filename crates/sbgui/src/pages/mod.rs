@@ -3,6 +3,7 @@
 //! A page renders the snapshot plus its own slice of view state and never
 //! reaches into another page's state.
 
+pub(crate) mod about;
 pub(crate) mod connections;
 pub(crate) mod dashboard;
 pub(crate) mod logs;

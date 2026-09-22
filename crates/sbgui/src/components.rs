@@ -65,6 +65,7 @@ pub(crate) fn icon(name: &str, color: u32, size: f32) -> impl IntoElement {
         }
         "refresh" => "<path d='M20 12a8 8 0 1 1-2.4-5.7'/><path d='M20 4v4.5h-4.5'/>",
         "plus" => "<path d='M12 5v14M5 12h14'/>",
+        "info" => "<circle cx='12' cy='12' r='9'/><path d='M12 11v5M12 8h.01'/>",
         _ => "<circle cx='12' cy='12' r='8'/>",
     };
     let data = format!(

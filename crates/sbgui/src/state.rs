@@ -20,6 +20,7 @@ pub(crate) enum Page {
     Connections,
     Logs,
     Settings,
+    About,
 }
 
 impl Page {
@@ -32,10 +33,11 @@ impl Page {
             Self::Connections => "连接",
             Self::Logs => "日志",
             Self::Settings => "设置",
+            Self::About => "关于",
         }
     }
 
-    pub(crate) fn all() -> [Self; 7] {
+    pub(crate) fn all() -> [Self; 8] {
         [
             Self::Dashboard,
             Self::Subscriptions,
@@ -44,6 +46,7 @@ impl Page {
             Self::Connections,
             Self::Logs,
             Self::Settings,
+            Self::About,
         ]
     }
 }
@@ -269,6 +272,7 @@ pub(crate) fn env_page() -> Option<Page> {
         "connections" | "连接" => Page::Connections,
         "logs" | "日志" => Page::Logs,
         "settings" | "设置" => Page::Settings,
+        "about" | "关于" => Page::About,
         _ => return None,
     })
 }
