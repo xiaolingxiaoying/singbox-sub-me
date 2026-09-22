@@ -530,20 +530,41 @@ impl Sbgui {
         cx: &mut Context<Self>,
         command: ClientCommand,
     ) -> impl IntoElement {
+        self.button(id, label, tone, None, cx, move |view, cx| {
+            // The start button is deliberately inert while a start is already
+            // in flight; a second one would queue a second core.
+            if matches!(command, ClientCommand::StartCore) && view.snapshot.starting {
+                return;
+            }
+            view.send(command.clone());
+            cx.notify();
+        })
+    }
+
+    /// The kit's control shape, shared by every button: at least 34 px tall,
+    /// 7 px radius, 12 px medium label, and an optional leading icon so a
+    /// primary action never has to draw a "+" out of text.
+    pub(crate) fn button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        tone: Tone,
+        glyph: Option<&'static str>,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> impl IntoElement {
         let (fg, bg, edge) = tone_colors(tone);
         div()
             .id(id)
-            // The kit keeps every clickable control at 34 px or taller; padding
-            // alone used to leave these at 31 px.
             .min_h(px(34.0))
             .px(px(14.0))
-            .py(px(8.0))
             .rounded(px(RADIUS_CONTROL))
             .bg(rgb(bg))
             .border_1()
             .border_color(rgb(edge))
             .flex()
             .items_center()
+            .gap(px(7.0))
             .text_size(px(LABEL))
             .font_weight(WEIGHT_MEDIUM)
             .text_color(rgb(fg))
@@ -558,12 +579,9 @@ impl Sbgui {
                     .text_color(rgb(fg))
             })
             .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
-                if matches!(command, ClientCommand::StartCore) && view.snapshot.starting {
-                    return;
-                }
-                view.send(command.clone());
-                cx.notify();
+                on_click(view, cx);
             }))
+            .children(glyph.map(|name| icon(name, fg, 15.0)))
             .child(label)
     }
 

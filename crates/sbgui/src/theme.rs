@@ -40,6 +40,13 @@ pub(crate) const BLUE: u32 = 0x3b82f6;
 
 pub(crate) const NAV_ACTIVE: u32 = 0xdef4f1;
 
+/// A table row under the pointer, and one that carries the current selection.
+/// Both come from the kit's own data-table rules, which keep a selected row a
+/// shade quieter than a selected navigation item.
+pub(crate) const ROW_HOVER: u32 = 0xf2faf8;
+
+pub(crate) const ROW_SELECTED: u32 = 0xedf9f7;
+
 /// The kit keeps two teal steps only, so the accent's edge shares the darker
 /// one rather than inventing a third.
 const EDGE: u32 = 0x08766d;
@@ -126,5 +133,6 @@ pub(crate) fn tone_colors(tone: Tone) -> (u32, u32, u32) {
         Tone::Accent => (0xffffff, CYAN, EDGE),
         Tone::Neutral => (TEXT, SURFACE_2, BORDER),
         Tone::Warning => (0x985c08, 0xfff5e5, 0xf2dfbf),
+        Tone::Danger => (DANGER, SURFACE, BORDER_STRONG),
     }
 }

@@ -53,6 +53,9 @@ pub(crate) enum Tone {
     Accent,
     Neutral,
     Warning,
+    /// A control that destroys something: the kit keeps it quiet (danger text
+    /// on a white control) rather than a filled red block.
+    Danger,
 }
 
 /// What the user chose to do with the OS proxy when closing the window.

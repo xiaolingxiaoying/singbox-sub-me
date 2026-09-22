@@ -64,6 +64,7 @@ pub(crate) fn icon(name: &str, color: u32, size: f32) -> impl IntoElement {
             "<circle cx='7' cy='7' r='3.4'/><circle cx='17' cy='7' r='3.4'/><circle cx='7' cy='17' r='3.4'/><path d='M17 14.2v5.6m-2.8-2.8h5.6'/>"
         }
         "refresh" => "<path d='M20 12a8 8 0 1 1-2.4-5.7'/><path d='M20 4v4.5h-4.5'/>",
+        "plus" => "<path d='M12 5v14M5 12h14'/>",
         _ => "<circle cx='12' cy='12' r='8'/>",
     };
     let data = format!(
@@ -355,6 +356,58 @@ pub(crate) fn work_surface() -> gpui::Div {
         .py(px(PAD_SURFACE_Y))
         .flex()
         .flex_col()
+}
+
+/// The band that opens a management page's surface: what the page is for on the
+/// left, the actions that belong to it on the right, one hairline under both.
+/// The page's own name is already in the band above the workspace, so this one
+/// carries the sentence and the buttons rather than repeating the title.
+pub(crate) fn page_head(description: &'static str) -> gpui::Div {
+    div()
+        .w_full()
+        .pb(px(19.0))
+        .border_b_1()
+        .border_color(rgb(BORDER))
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(20.0))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(240.0))
+                .text_size(px(BODY))
+                .line_height(px(21.0))
+                .text_color(rgb(MUTED))
+                .child(description),
+        )
+}
+
+/// The header line of a data table: 37 px of soft surface carrying 11 px muted
+/// column names, which is what lets a row of values stay at 12 px and still be
+/// scannable.
+pub(crate) fn table_head_row() -> gpui::Div {
+    div()
+        .w_full()
+        .min_h(px(37.0))
+        .px(px(14.0))
+        .flex()
+        .items_center()
+        .gap(px(12.0))
+        .bg(rgb(SURFACE_2))
+        .text_size(px(META))
+        .font_weight(WEIGHT_MEDIUM)
+        .text_color(rgb(MUTED))
+}
+
+/// One column of a table: a fixed track when the content is a date or a count,
+/// a share of the remaining width when it is free text.
+pub(crate) fn table_col(label: &'static str, width: Option<f32>) -> impl IntoElement {
+    div()
+        .when_some(width, |cell, width| cell.w(px(width)).flex_shrink_0())
+        .when(width.is_none(), |cell| cell.flex_1().min_w(px(0.0)))
+        .truncate()
+        .child(label)
 }
 
 pub(crate) fn panel(title: impl Into<String>) -> gpui::Div {
