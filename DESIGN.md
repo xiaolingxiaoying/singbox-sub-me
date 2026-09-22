@@ -8,6 +8,11 @@
 两个 UI 都只渲染 `client-core` 发布的 `ClientSnapshot`，并只发送 `ClientCommand`。
 订阅、内核、节点、系统代理、TUN、连接与日志的行为不属于界面，不得在 UI 内重复实现。
 
+一个数值「读起来是什么」同样不属于界面：字节数、相对时间、订阅用量与延迟档位只在
+`client-core::format` 里写一次（`human_bytes`、`age_label`、`usage_label`、`delay_level`），
+两个客户端各取所需。配色、字形与控件留在各自 UI —— ratatui 的 `Color` 与 GPUI 的 `u32`
+无法共用，两端色板本就不同。
+
 ## 方向
 
 - `sbgui` 使用中性灰白底色和白色内容表面；蓝色只用于当前选择与主操作。绿色表示正常、橙色表示需注意、红色表示失败。

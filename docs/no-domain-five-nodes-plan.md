@@ -69,9 +69,9 @@ sing-box 内核 (-c /etc/s-box/sb.json)
 
 ### 2.1 已经具备的能力
 
-- `certificate_mode = SelfSigned`：`src/subscription.rs::ensure_self_signed_certificate` 自动生成自签证书（长有效期）。
-- 客户端工件自动 `skip-cert-verify` / `insecure`：`src/subscription.rs::client_skip_cert_verify`。
-- `ip-fallback` 订阅模式：`http://<IP>:<http_port>/sub/<凭据>/...` 明文分发（`src/subscription.rs::subscription_url`）。
+- `certificate_mode = SelfSigned`：`src/subscription/render/singbox.rs::ensure_self_signed_certificate` 自动生成自签证书（长有效期）。
+- 客户端工件自动 `skip-cert-verify` / `insecure`：`src/subscription/render/mod.rs::client_skip_cert_verify`。
+- `ip-fallback` 订阅模式：`http://<IP>:<http_port>/sub/<凭据>/...` 明文分发（`src/subscription/artifacts.rs::subscription_url`）。
 - 统一节点模型：`src/canonical.rs::nodes()`，host 可取 IP。
 
 ### 2.2 卡点
@@ -80,7 +80,7 @@ sing-box 内核 (-c /etc/s-box/sb.json)
 | --- | --- | --- |
 | ① 验证禁止 4 个 TLS 协议 | `src/config.rs` `validate()`（`SubscriptionMode::IpFallback` 分支） | 只要启用 `vmess-websocket/hysteria2/tuic/anytls` 就报 `"VMess WebSocket, Hysteria2, TUIC, and AnyTLS require a domain subscription mode"`。该理由并不成立——它们只需自签 + 假 SNI。 |
 | ② SNI 锁死 = 订阅主机 | `src/canonical.rs::nodes()`：`let tls_server_name = &config.subscription_host;` | ip-fallback 时 `subscription_host` 是 IP，导致 TLS 协议 `sni` 与自签证书 `CN` 都是 IP。IP 不适合作 SNI / 证书 CN。sing-box-yg 用假域名解决；sbctl 缺这个解耦字段。 |
-| ③(连带) 自签证书 CN | `src/subscription.rs` `ensure_self_signed_certificate`：`CertificateParams::new(vec![config.subscription_host.clone()])` | IP 作为 CN 不合适，需改为假 SNI。 |
+| ③(连带) 自签证书 CN | `src/subscription/render/singbox.rs` `ensure_self_signed_certificate`：`CertificateParams::new(vec![config.subscription_host.clone()])` | IP 作为 CN 不合适，需改为假 SNI。 |
 
 > 结论：**订阅分发（HTTP over IP）已经有了；缺的是"允许这 4 个协议 + 给它们一个独立的假 SNI / 自签证书"。**
 
@@ -117,13 +117,13 @@ sing-box 内核 (-c /etc/s-box/sb.json)
 
 ### 3.4 Phase 4 — 证书按 SNI 生成
 
-- `src/subscription.rs`：
+- `src/subscription/`（拆分后）：
   - `certificate_tls_config` / `ensure_self_signed_certificate`：自签证书的 `CN` 与 TLS `server_name` 用 `protocol_sni`（主机名），不再使用 IP。
   - VLESS Reality 保持不变（用 `reality_decoy_sni`）。
 
 ### 3.5 Phase 5 — 客户端工件带 SNI + skip-verify
 
-- `src/subscription.rs` 三份工件（sing-box / Clash / URI）：
+- `src/subscription/render/` 三份工件（sing-box / Clash / URI）：
   - `sni` / `server_name` 统一指向 `protocol_sni`。
   - 已由 `client_skip_cert_verify` 输出 `insecure`/`skip-cert-verify`，保持不变。
   - 确保 SFA / Mihomo / 通用订阅客户端三端都能用。
