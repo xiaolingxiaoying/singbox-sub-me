@@ -196,6 +196,9 @@ pub(crate) struct Sbgui {
     /// Same cap for the connection list, which grows without bound.
     pub(crate) show_all_connections: bool,
     pub(crate) core_menu_open: bool,
+    /// Whether the overview's lower-frequency numbers are showing. It starts
+    /// open so the page never hides a value the previous layout always drew.
+    pub(crate) advanced_open: bool,
     pub(crate) node_card_view: bool,
     pub(crate) paused_connections: Option<Vec<Connection>>,
     pub(crate) selected_connection: Option<String>,

@@ -18,6 +18,10 @@ pub(crate) const SURFACE_2: u32 = 0xf7f9f8;
 
 pub(crate) const BORDER: u32 = 0xdce4e1;
 
+/// The kit's second border step: the one a surface uses when it wants to be
+/// touched (`--serein-border-strong`), not merely enclosed.
+pub(crate) const BORDER_STRONG: u32 = 0xcbd8d4;
+
 pub(crate) const TEXT: u32 = 0x13201e;
 
 pub(crate) const MUTED: u32 = 0x687774;
@@ -46,9 +50,16 @@ pub(crate) const AMBER: u32 = 0xb45309;
 
 pub(crate) const DANGER: u32 = 0xa33c3c;
 
-// Type scale. Five sizes, each with one job, and nothing below 11px: the old
+// Type scale. Seven sizes, each with one job, and nothing below 11px: the old
 // mix of 10/11/12/13/15/28px runs is what made every page read as crowded.
+// The two display steps exist because the kit gives a working surface a 19px
+// heading and its headline numbers a size of their own; a 14px title over a
+// 13px body cannot carry that hierarchy.
+pub(crate) const DISPLAY: f32 = 24.0;
+
 pub(crate) const TITLE: f32 = 20.0;
+
+pub(crate) const SECTION_LG: f32 = 19.0;
 
 pub(crate) const SECTION: f32 = 14.0;
 
@@ -83,6 +94,13 @@ pub(crate) const GAP_SECTION: f32 = 12.0;
 pub(crate) const GAP_ITEM: f32 = 12.0;
 
 pub(crate) const PAD_CARD: f32 = 20.0;
+
+/// A working surface's own padding: `layout.md` allows 18-26 px inside one,
+/// and the kit's pages use 24 px vertically against 26 px horizontally so a
+/// table row and a heading share the same left edge.
+pub(crate) const PAD_SURFACE_X: f32 = 26.0;
+
+pub(crate) const PAD_SURFACE_Y: f32 = 24.0;
 
 pub(crate) const ROW_X: f32 = 20.0;
 

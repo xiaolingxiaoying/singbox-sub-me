@@ -483,6 +483,7 @@ impl Sbgui {
         div()
             .id(id)
             .flex_shrink_0()
+            .min_h(px(34.0))
             .px(px(12.0))
             .py(px(8.0))
             .rounded(px(RADIUS_CONTROL))
@@ -532,12 +533,17 @@ impl Sbgui {
         let (fg, bg, edge) = tone_colors(tone);
         div()
             .id(id)
+            // The kit keeps every clickable control at 34 px or taller; padding
+            // alone used to leave these at 31 px.
+            .min_h(px(34.0))
             .px(px(14.0))
             .py(px(8.0))
             .rounded(px(RADIUS_CONTROL))
             .bg(rgb(bg))
             .border_1()
             .border_color(rgb(edge))
+            .flex()
+            .items_center()
             .text_size(px(LABEL))
             .font_weight(WEIGHT_MEDIUM)
             .text_color(rgb(fg))
@@ -594,6 +600,7 @@ impl Sbgui {
             .id(id)
             .w(px(width))
             .min_w(px(120.0))
+            .min_h(px(36.0))
             .px(px(12.0))
             .py(px(9.0))
             .rounded(px(RADIUS_CONTROL))

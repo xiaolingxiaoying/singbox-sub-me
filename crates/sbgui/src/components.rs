@@ -7,7 +7,7 @@ use client_core::ClientCommand;
 use client_core::clash_api::Connection;
 use client_core::command::SettingsPatch;
 use client_core::format::{DelayLevel, delay_level, human_bytes};
-use client_core::state::{ClientSnapshot, LogLevel, RouteRuleSnapshot};
+use client_core::state::{LogLevel, RouteRuleSnapshot};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     ClickEvent, Context, InteractiveElement, IntoElement, ParentElement,
@@ -16,8 +16,9 @@ use gpui::{
 
 use crate::state::{Page, Sbgui};
 use crate::theme::{
-    AMBER, BLUE, BLUE_2, BODY, BORDER, CYAN, DANGER, FAINT, LABEL, META, MINT, MUTED, PAD_CARD,
-    RADIUS, ROW_X, ROW_Y, SECTION, SURFACE, SURFACE_2, TEXT, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD,
+    AMBER, BLUE, BLUE_2, BODY, BORDER, CYAN, DANGER, DISPLAY, FAINT, GAP_ITEM, LABEL, META, MINT,
+    MUTED, PAD_CARD, PAD_SURFACE_X, PAD_SURFACE_Y, RADIUS, RADIUS_CONTROL, ROW_X, ROW_Y, SECTION,
+    SURFACE, SURFACE_2, TEXT, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD,
 };
 
 // Small embedded SVGs keep icon weight consistent and survive standalone packaging.
@@ -46,10 +47,23 @@ pub(crate) fn icon(name: &str, color: u32, size: f32) -> impl IntoElement {
             "<circle cx='12' cy='12' r='9'/><ellipse cx='12' cy='12' rx='4' ry='9'/><path d='M3 12h18'/>"
         }
         "chevron" => "<path d='m9 5 7 7-7 7'/>",
+        "chevron_down" => "<path d='m5 9 7 7 7-7'/>",
         "check" => "<path d='m5 12 4 4L19 6'/>",
         "clock" => "<circle cx='12' cy='12' r='9'/><path d='M12 7v5l3 2'/>",
         "download" => "<path d='M12 3v12m-5-5 5 5 5-5M5 21h14'/>",
         "upload" => "<path d='M12 21V9m-5 5 5-5 5 5M5 3h14'/>",
+        // The kit's own inventory (design-kit/icon-manifest.md), drawn with the
+        // same 1.7 stroke as the rest rather than as text symbols.
+        "search" => "<circle cx='11' cy='11' r='7'/><path d='m20 20-3.6-3.6'/>",
+        "power" => "<path d='M12 3v9'/><path d='M18.4 6.6a9 9 0 1 1-12.8 0'/>",
+        "database" => {
+            "<ellipse cx='12' cy='5.5' rx='8' ry='3'/><path d='M4 5.5v13c0 1.7 3.6 3 8 3s8-1.3 8-3v-13'/><path d='M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3'/>"
+        }
+        "stack" => "<path d='m12 3 9 5-9 5-9-5 9-5Z'/><path d='m3 13 9 5 9-5'/>",
+        "connections" => {
+            "<circle cx='7' cy='7' r='3.4'/><circle cx='17' cy='7' r='3.4'/><circle cx='7' cy='17' r='3.4'/><path d='M17 14.2v5.6m-2.8-2.8h5.6'/>"
+        }
+        "refresh" => "<path d='M20 12a8 8 0 1 1-2.4-5.7'/><path d='M20 4v4.5h-4.5'/>",
         _ => "<circle cx='12' cy='12' r='8'/>",
     };
     let data = format!(
@@ -69,6 +83,204 @@ pub(crate) fn status_dot(color: u32) -> impl IntoElement {
         .flex_shrink_0()
         .rounded(px(4.0))
         .bg(rgb(color))
+}
+
+/// The core's health as the kit draws it: a 22 px dot wearing a 7 px ring of
+/// its own colour, so "running" is legible before any text is read.
+pub(crate) fn health_dot(on: bool) -> impl IntoElement {
+    div()
+        .size(px(36.0))
+        .flex_shrink_0()
+        .rounded(px(18.0))
+        .bg(rgb(if on { BLUE_2 } else { SURFACE_2 }))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .size(px(22.0))
+                .rounded(px(11.0))
+                .bg(rgb(if on { MINT } else { 0xaeb9b6 })),
+        )
+}
+
+/// The kit's switch: a 46 x 26 track with a 20 px knob, inside a hitbox that
+/// keeps the whole control at the 34 px minimum a pointer target needs.
+/// `command` is `None` while the setting cannot change (a running core will
+/// not pick up a new traffic mode), and the track says so by staying grey.
+pub(crate) fn switch(
+    id: &'static str,
+    on: bool,
+    command: Option<ClientCommand>,
+    cx: &mut Context<Sbgui>,
+) -> impl IntoElement {
+    let clickable = command.is_some();
+    div()
+        .id(id)
+        .min_h(px(34.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .when(clickable, |style| style.cursor_pointer())
+        .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+            if let Some(command) = command.clone() {
+                view.send(command);
+                cx.notify();
+            }
+        }))
+        .child(
+            div()
+                .w(px(46.0))
+                .h(px(26.0))
+                .p(px(3.0))
+                .rounded(px(13.0))
+                .flex()
+                .items_center()
+                .when(on, |track| track.justify_end())
+                .when(!on, |track| track.justify_start())
+                .bg(rgb(if on { CYAN } else { 0xc7cbd1 }))
+                .child(
+                    div()
+                        .w(px(20.0))
+                        .h(px(20.0))
+                        .rounded(px(10.0))
+                        .bg(rgb(SURFACE)),
+                ),
+        )
+}
+
+/// One labelled disclosure: the trigger names a lower-frequency group, the
+/// body carries the values. Progressive disclosure is how the kit keeps the
+/// overview scannable without dropping the details.
+pub(crate) fn accordion(
+    id: &'static str,
+    title: &'static str,
+    subtitle: impl Into<String>,
+    open: bool,
+    cx: &mut Context<Sbgui>,
+    toggle: impl Fn(&mut Sbgui) + 'static,
+    body: impl IntoElement,
+) -> impl IntoElement {
+    let subtitle = subtitle.into();
+    div()
+        .mt(px(GAP_ITEM))
+        .w_full()
+        .rounded(px(RADIUS_CONTROL + 1.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(SURFACE_2))
+        .overflow_hidden()
+        .child(
+            div()
+                .id(id)
+                .w_full()
+                .min_h(px(42.0))
+                .px(px(14.0))
+                .flex()
+                .items_center()
+                .gap(px(9.0))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(BLUE_2)))
+                .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                    toggle(view);
+                    cx.notify();
+                }))
+                .child(icon(
+                    if open { "chevron_down" } else { "chevron" },
+                    MUTED,
+                    15.0,
+                ))
+                .child(
+                    div()
+                        .text_size(px(LABEL))
+                        .font_weight(WEIGHT_MEDIUM)
+                        .text_color(rgb(TEXT))
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(META))
+                        .text_color(rgb(FAINT))
+                        .child(subtitle),
+                ),
+        )
+        .when(open, |panel| {
+            panel.child(
+                div()
+                    .w_full()
+                    .px(px(16.0))
+                    .py(px(13.0))
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(SURFACE))
+                    .child(body),
+            )
+        })
+}
+
+/// One value inside a disclosure body: the label in muted type, the value
+/// after it in the page's own text colour.
+pub(crate) fn detail_item(label: &'static str, value: String) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(px(META))
+        .text_color(rgb(MUTED))
+        .child(label.to_owned())
+        .child(
+            div()
+                .font_weight(WEIGHT_MEDIUM)
+                .text_color(rgb(TEXT))
+                .child(value),
+        )
+}
+
+/// One headline metric: icon above a label and a display-size value, with a
+/// hairline on its left so a row of them reads as one instrument, not as four
+/// floating cards.
+pub(crate) fn metric_cell(
+    glyph: &'static str,
+    label: &'static str,
+    value: String,
+    detail: Option<String>,
+    first: bool,
+) -> impl IntoElement {
+    div()
+        .flex_1()
+        .min_w(px(132.0))
+        .px(px(17.0))
+        .py(px(8.0))
+        .when(!first, |cell| cell.border_l_1().border_color(rgb(BORDER)))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(icon(glyph, CYAN, 20.0))
+                .child(
+                    div()
+                        .text_size(px(LABEL))
+                        .text_color(rgb(MUTED))
+                        .child(label),
+                ),
+        )
+        .child(
+            div()
+                .mt(px(5.0))
+                .text_size(px(DISPLAY))
+                .font_weight(WEIGHT_SEMIBOLD)
+                .text_color(rgb(TEXT))
+                .truncate()
+                .child(value),
+        )
+        .children(detail.map(|text| {
+            div()
+                .mt(px(3.0))
+                .text_size(px(META))
+                .text_color(rgb(FAINT))
+                .child(text)
+        }))
 }
 
 pub(crate) fn side_rate(label: &str, value: u64, color: u32) -> impl IntoElement {
@@ -129,6 +341,22 @@ pub(crate) fn info_cell(
         }))
 }
 
+/// One working surface: the kit's white card that every section sits in — 1 px
+/// border, 13 px radius, and 24/26 px of internal padding so a heading and a
+/// table share the same left edge.
+pub(crate) fn work_surface() -> gpui::Div {
+    div()
+        .w_full()
+        .rounded(px(RADIUS))
+        .bg(rgb(SURFACE))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .px(px(PAD_SURFACE_X))
+        .py(px(PAD_SURFACE_Y))
+        .flex()
+        .flex_col()
+}
+
 pub(crate) fn panel(title: impl Into<String>) -> gpui::Div {
     div()
         .flex_1()
@@ -148,86 +376,7 @@ pub(crate) fn panel(title: impl Into<String>) -> gpui::Div {
         )
 }
 
-pub(crate) fn traffic_panel(snapshot: &ClientSnapshot) -> impl IntoElement {
-    let samples: Vec<(u64, u64)> = snapshot
-        .traffic_history
-        .iter()
-        .map(|p| (p.up, p.down))
-        .collect();
-    let peak = snapshot.traffic_peak();
-    // Two points make a line; before that the panel said "等待流量数据" under
-    // an empty 170px box, which was the loudest thing on the page.
-    let has_curve = samples.len() > 1;
-    panel("流量趋势")
-        // One legend for both rates: the metric cards used to repeat them, and
-        // the 1 h / 24 h chips used to be two buttons that did nothing.
-        .child(
-            div()
-                .mt(px(16.0))
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap(px(20.0))
-                .child(legend(CYAN, "下载", snapshot.download_speed))
-                .child(legend(BLUE, "上传", snapshot.upload_speed))
-                .child(
-                    div()
-                        .flex_1()
-                        .text_size(px(META))
-                        .text_color(rgb(FAINT))
-                        .child("最近 5 分钟 · 本机 sing-box 实时采样"),
-                ),
-        )
-        .child(
-            div()
-                .mt(px(16.0))
-                .h(px(if has_curve { 180.0 } else { 96.0 }))
-                .w_full()
-                .when(has_curve, |plot| {
-                    plot.child(traffic_chart(samples, peak.max(1)))
-                })
-                .when(!has_curve, |plot| {
-                    plot.flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(8.0))
-                        .bg(rgb(SURFACE_2))
-                        .child(
-                            div()
-                                .text_size(px(LABEL))
-                                .text_color(rgb(FAINT))
-                                .child("内核运行并产生上下行后，这里绘制曲线。"),
-                        )
-                }),
-        )
-        .children(has_curve.then(|| {
-            div()
-                .mt(px(10.0))
-                .flex()
-                .justify_between()
-                .text_size(px(META))
-                .text_color(rgb(FAINT))
-                .child(format!("{} 个采样点", snapshot.traffic_history.len()))
-                .child("现在")
-        }))
-        .child(
-            div()
-                .mt(px(18.0))
-                .pt(px(16.0))
-                .border_t_1()
-                .border_color(rgb(BORDER))
-                .flex()
-                .flex_wrap()
-                .gap(px(32.0))
-                .children([
-                    info_cell("累计下载", human_bytes(snapshot.total_download), None),
-                    info_cell("累计上传", human_bytes(snapshot.total_upload), None),
-                    info_cell("5 分钟峰值", format!("{}/s", human_bytes(peak)), None),
-                ]),
-        )
-}
-
-fn traffic_chart(samples: Vec<(u64, u64)>, peak: u64) -> impl IntoElement {
+pub(crate) fn traffic_chart(samples: Vec<(u64, u64)>, peak: u64) -> impl IntoElement {
     gpui::canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
@@ -268,7 +417,7 @@ fn traffic_chart(samples: Vec<(u64, u64)>, peak: u64) -> impl IntoElement {
 }
 
 /// One chart legend entry: the series colour, its name, and its live value.
-fn legend(color: u32, label: &'static str, value: u64) -> impl IntoElement {
+pub(crate) fn legend(color: u32, label: &'static str, value: u64) -> impl IntoElement {
     div()
         .flex()
         .items_center()
@@ -603,32 +752,12 @@ pub(crate) fn toggle_line(
                 .text_color(rgb(TEXT))
                 .child(label),
         )
-        .child(
-            div()
-                .id(id)
-                .w(px(46.0))
-                .h(px(26.0))
-                .flex_shrink_0()
-                .p(px(3.0))
-                .rounded(px(13.0))
-                .flex()
-                .items_center()
-                .when(on, |control| control.justify_end())
-                .when(!on, |control| control.justify_start())
-                .bg(rgb(if on { CYAN } else { 0xc7cbd1 }))
-                .cursor_pointer()
-                .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
-                    view.send(ClientCommand::UpdateSettings(patch.clone()));
-                    cx.notify();
-                }))
-                .child(
-                    div()
-                        .w(px(20.0))
-                        .h(px(20.0))
-                        .rounded(px(10.0))
-                        .bg(rgb(SURFACE)),
-                ),
-        )
+        .child(switch(
+            id,
+            on,
+            Some(ClientCommand::UpdateSettings(patch)),
+            cx,
+        ))
 }
 
 pub(crate) fn empty_state(

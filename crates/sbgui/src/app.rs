@@ -44,6 +44,7 @@ impl Sbgui {
             show_all_rules: false,
             show_all_connections: false,
             core_menu_open: false,
+            advanced_open: true,
             node_card_view: false,
             paused_connections: None,
             selected_connection: None,
