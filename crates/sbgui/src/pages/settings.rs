@@ -2,7 +2,6 @@
 
 use client_core::ClientCommand;
 use client_core::command::SettingsPatch;
-use client_core::format::age_label;
 use client_core::system_proxy::TrafficMode;
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -13,7 +12,7 @@ use gpui::{
 use crate::components::{
     icon, page_head, setting_line, setting_row_intro, toggle_line, work_surface,
 };
-use crate::lang::{outbound_mode, traffic_mode};
+use crate::lang::{age_label, outbound_mode, traffic_mode};
 use crate::state::{FieldSpec, InputField, Sbgui, SettingsSection, Tone};
 use crate::theme::{
     AMBER, BODY, BORDER, BORDER_STRONG, CYAN, CYAN_DARK, FAINT, LABEL, META, MUTED, NAV_ACTIVE,
@@ -214,7 +213,7 @@ impl Sbgui {
                         div()
                             .text_size(px(META))
                             .text_color(rgb(MUTED))
-                            .child(age_label(profile.last_updated)),
+                            .child(age_label(profile.last_updated, locale)),
                     )
                     .child(if active {
                         // The active archive is already in use; a second

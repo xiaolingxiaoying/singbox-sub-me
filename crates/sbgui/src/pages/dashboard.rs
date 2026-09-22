@@ -7,7 +7,7 @@
 
 use client_core::ClientCommand;
 use client_core::command::SettingsPatch;
-use client_core::format::{human_bytes, usage_label};
+use client_core::format::human_bytes;
 use client_core::system_proxy::TrafficMode;
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -19,7 +19,7 @@ use crate::components::{
     accordion, clean_proxy_label, delay_color, detail_item, health_dot, icon, info_cell, legend,
     metric_cell, pill, switch, traffic_chart, work_surface,
 };
-use crate::lang::{Locale, outbound_mode};
+use crate::lang::{Locale, outbound_mode, usage_label};
 use crate::state::{Page, Sbgui};
 use crate::theme::{
     AMBER, BLUE, BLUE_2, BODY, BORDER, BORDER_STRONG, CYAN, DANGER, DISPLAY, FAINT, GAP_SECTION,
@@ -891,7 +891,7 @@ impl Sbgui {
                                                 human_bytes(total)
                                             )
                                         } else {
-                                            usage_label(usage)
+                                            usage_label(usage, locale)
                                         }),
                                 )
                                 .children((total > 0).then(|| {

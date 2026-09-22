@@ -1,7 +1,7 @@
 //! The subscription page: profiles, import and updates.
 
 use client_core::ClientCommand;
-use client_core::format::{age_label, human_bytes};
+use client_core::format::human_bytes;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     ClickEvent, Context, InteractiveElement, IntoElement, ParentElement,
@@ -11,6 +11,7 @@ use gpui::{
 use crate::components::{
     empty_state, icon, page_head, pill, table_col, table_head_row, work_surface,
 };
+use crate::lang::age_label;
 use crate::state::{FieldSpec, InputField, Sbgui, Tone};
 use crate::theme::{
     BODY, BORDER, BORDER_STRONG, CYAN, FAINT, LABEL, META, MINT, MUTED, RADIUS_CONTROL, ROW_HOVER,
@@ -353,7 +354,7 @@ impl Sbgui {
                             .flex_shrink_0()
                             .text_size(px(META))
                             .text_color(rgb(MUTED))
-                            .child(age_label(profile.last_updated)),
+                            .child(age_label(profile.last_updated, locale)),
                     )
                     .child(
                         div()

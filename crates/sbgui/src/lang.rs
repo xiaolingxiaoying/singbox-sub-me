@@ -8,6 +8,9 @@
 //! branch is its own expression, so `format!` works on both sides.
 
 use client_core::clash_api::OutboundMode;
+use client_core::format::{
+    age_label as core_age_label, human_bytes, now_epoch, usage_label as core_usage_label,
+};
 use client_core::system_proxy::TrafficMode;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -65,9 +68,61 @@ pub(crate) fn traffic_mode(mode: TrafficMode, locale: Locale) -> &'static str {
     }
 }
 
+/// The two relative-time strings the engine formats for itself. They live in
+/// `client-core` because the terminal client renders them too, so the Chinese
+/// half stays the shared helper's output — delegating keeps the two clients
+/// word-for-word identical — and only the English half is written here.
+pub(crate) fn age_label(epoch_seconds: u64, locale: Locale) -> String {
+    if locale != Locale::En {
+        return core_age_label(epoch_seconds);
+    }
+    if epoch_seconds == 0 {
+        return "Never updated".to_owned();
+    }
+    let age = now_epoch().saturating_sub(epoch_seconds);
+    if age < 3_600 {
+        format!("{} min ago", age / 60)
+    } else if age < 86_400 {
+        format!("{} h ago", age / 3_600)
+    } else {
+        format!("{} d ago", age / 86_400)
+    }
+}
+
+/// The subscription quota line, same arrangement as [`age_label`].
+pub(crate) fn usage_label(
+    usage: Option<&client_core::subscription::SubscriptionUserinfo>,
+    locale: Locale,
+) -> String {
+    if locale != Locale::En {
+        return core_usage_label(usage);
+    }
+    let Some(usage) = usage else {
+        return "Usage not reported yet".to_owned();
+    };
+    let mut text = match usage.remaining() {
+        Some(remaining) => format!(
+            "Used {} / {} · {} left",
+            human_bytes(usage.used()),
+            human_bytes(usage.total),
+            human_bytes(remaining)
+        ),
+        None => format!("Used {} · no quota set", human_bytes(usage.used())),
+    };
+    if let Some(expire) = usage.expire {
+        let now = now_epoch();
+        if expire > now {
+            text.push_str(&format!(" · resets in {} days", (expire - now) / 86_400));
+        } else {
+            text.push_str(" · expired");
+        }
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Locale;
+    use super::{Locale, age_label, core_age_label, core_usage_label, usage_label};
 
     #[test]
     fn the_button_names_the_language_it_switches_to() {
@@ -97,5 +152,41 @@ mod tests {
                 assert_eq!((plain, counted), ("Overview", "2 groups".to_owned()));
             }
         }
+    }
+
+    /// The engine's own helpers stay the single source of the Chinese wording,
+    /// so the two clients can never drift apart by one character.
+    #[test]
+    fn the_engine_helpers_keep_their_chinese_wording() {
+        let now = client_core::format::now_epoch();
+        for epoch in [0, now - 180, now - 7_200, now - 172_800] {
+            assert_eq!(age_label(epoch, Locale::Zh), core_age_label(epoch));
+        }
+        assert_eq!(usage_label(None, Locale::Zh), core_usage_label(None));
+    }
+
+    #[test]
+    fn the_engine_helpers_have_an_english_half() {
+        let now = client_core::format::now_epoch();
+        assert_eq!(age_label(0, Locale::En), "Never updated");
+        assert_eq!(age_label(now - 180, Locale::En), "3 min ago");
+        assert_eq!(age_label(now - 7_200, Locale::En), "2 h ago");
+        assert_eq!(age_label(now - 172_800, Locale::En), "2 d ago");
+        assert_eq!(usage_label(None, Locale::En), "Usage not reported yet");
+        let quota = client_core::subscription::SubscriptionUserinfo {
+            upload: 0,
+            download: 1024,
+            total: 2048,
+            expire: None,
+        };
+        assert_eq!(
+            usage_label(Some(&quota), Locale::En),
+            "Used 1.0 KiB / 2.0 KiB · 1.0 KiB left"
+        );
+        let uncapped = client_core::subscription::SubscriptionUserinfo { total: 0, ..quota };
+        assert_eq!(
+            usage_label(Some(&uncapped), Locale::En),
+            "Used 1.0 KiB · no quota set"
+        );
     }
 }
