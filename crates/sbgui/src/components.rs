@@ -564,7 +564,7 @@ pub(crate) fn log_row(index: usize, source: &str, line: &str, wrap: bool) -> gpu
         .items_start()
         .gap(px(12.0))
         .when(index > 0, |row| row.border_t_1().border_color(rgb(BORDER)))
-        .hover(|style| style.bg(rgb(BLUE_2)))
+        .hover(|style| style.bg(rgb(ROW_HOVER)))
         .text_size(px(LABEL))
         .line_height(px(19.0))
         // The 序号 column is gone: a line number nobody cites is decoration,

@@ -7,11 +7,9 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 
-use crate::components::{inline_empty, log_row, log_table_header};
-use crate::state::{FieldSpec, InputField, LogLevelFilter, Sbgui};
-use crate::theme::{
-    BLUE_2, BORDER, CYAN, GAP_SECTION, LABEL, MUTED, RADIUS, ROW_X, SURFACE, SURFACE_2, TEXT,
-};
+use crate::components::{inline_empty, log_row, log_table_header, page_head, work_surface};
+use crate::state::{FieldSpec, InputField, LogLevelFilter, Sbgui, Tone};
+use crate::theme::{BLUE_2, BORDER, CYAN, LABEL, MUTED, RADIUS, RADIUS_CONTROL, SURFACE};
 
 impl Sbgui {
     // ----------------------------------------------------------------- logs
@@ -88,9 +86,10 @@ impl Sbgui {
             level_chips.push(
                 div()
                     .id(format!("log-level-{:?}", candidate))
+                    .min_h(px(34.0))
                     .px(px(12.0))
                     .py(px(6.0))
-                    .rounded(px(9.0))
+                    .rounded(px(RADIUS_CONTROL))
                     .text_size(px(LABEL))
                     .cursor_pointer()
                     .bg(rgb(if active { BLUE_2 } else { SURFACE }))
@@ -105,20 +104,109 @@ impl Sbgui {
                     .into_any_element(),
             );
         }
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(GAP_SECTION))
+
+        // The view controls (follow / wrap / copy / clear / export) are what the
+        // page does, so they sit in the head beside the sentence; the level chips
+        // and the search are how the list is narrowed, so they share one row
+        // above the table — the same spine the rules page uses.
+        work_surface()
+            .child(
+                page_head("内核运行日志与客户端事件，按级别与关键字筛选。").child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(self.utility_toggle(
+                            "log-follow",
+                            if self.log_follow {
+                                "自动滚动：开"
+                            } else {
+                                "自动滚动：关"
+                            },
+                            self.log_follow,
+                            cx,
+                            |view| view.log_follow = !view.log_follow,
+                        ))
+                        .child(self.utility_toggle(
+                            "log-wrap",
+                            if self.log_wrap {
+                                "自动换行：开"
+                            } else {
+                                "自动换行：关"
+                            },
+                            self.log_wrap,
+                            cx,
+                            |view| view.log_wrap = !view.log_wrap,
+                        ))
+                        .child(self.button(
+                            "copy-logs",
+                            "复制",
+                            Tone::Neutral,
+                            None,
+                            cx,
+                            move |view, cx| {
+                                let _ = view;
+                                cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
+                            },
+                        ))
+                        .child(self.button(
+                            "clear-logs",
+                            "清空",
+                            Tone::Neutral,
+                            None,
+                            cx,
+                            |view, cx| {
+                                // The engine owns the buffers: hiding lines
+                                // by count stops working once the ring is full.
+                                view.send(ClientCommand::ClearLogs);
+                                view.log_rows.set(0);
+                                cx.notify();
+                            },
+                        ))
+                        .child(self.button(
+                            "export-logs",
+                            "导出",
+                            Tone::Neutral,
+                            None,
+                            cx,
+                            |view, cx| {
+                                let text = view
+                                    .snapshot
+                                    .core_logs
+                                    .iter()
+                                    .map(|line| format!("[sing-box] {line}"))
+                                    .chain(
+                                        view.snapshot
+                                            .events
+                                            .iter()
+                                            .map(|line| format!("[客户端] {line}")),
+                                    )
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                let path = view.data_dir.join("serein-logs.txt");
+                                view.snapshot.status = match std::fs::write(&path, text) {
+                                    Ok(()) => format!("日志已导出到 {}", path.display()),
+                                    Err(error) => format!("导出日志失败：{error}"),
+                                };
+                                cx.notify();
+                            },
+                        )),
+                ),
+            )
             .child(
                 div()
+                    .mt(px(18.0))
+                    .w_full()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .justify_between()
-                    .gap(px(12.0))
-                    .flex_wrap()
+                    .gap(px(24.0))
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap(px(8.0))
                             .children(level_chips),
@@ -126,6 +214,7 @@ impl Sbgui {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap(px(10.0))
                             .child(self.text_field(
@@ -149,81 +238,13 @@ impl Sbgui {
             .child(
                 div()
                     .id("log-panel")
+                    .mt(px(18.0))
                     .w_full()
                     .rounded(px(RADIUS))
                     .bg(rgb(SURFACE))
                     .border_1()
                     .border_color(rgb(BORDER))
                     .overflow_hidden()
-                    // The view controls used to be a third band of their own,
-                    // under a panel header that only repeated the page title.
-                    .child(
-                        div()
-                            .px(px(ROW_X))
-                            .py(px(12.0))
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .justify_end()
-                            .gap(px(8.0))
-                            .border_b_1()
-                            .border_color(rgb(BORDER))
-                            .child(self.utility_toggle(
-                                "log-follow",
-                                if self.log_follow {
-                                    "自动滚动：开"
-                                } else {
-                                    "自动滚动：关"
-                                },
-                                self.log_follow,
-                                cx,
-                                |view| view.log_follow = !view.log_follow,
-                            ))
-                            .child(self.utility_toggle(
-                                "log-wrap",
-                                if self.log_wrap {
-                                    "自动换行：开"
-                                } else {
-                                    "自动换行：关"
-                                },
-                                self.log_wrap,
-                                cx,
-                                |view| view.log_wrap = !view.log_wrap,
-                            ))
-                            .child(self.quiet_action("copy-logs", "复制", cx, move |view, cx| {
-                                let _ = view;
-                                cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
-                            }))
-                            .child(self.quiet_action("clear-logs", "清空", cx, |view, cx| {
-                                // The engine owns the buffers: hiding lines
-                                // by count stops working once the ring is
-                                // full.
-                                view.send(ClientCommand::ClearLogs);
-                                view.log_rows.set(0);
-                                cx.notify();
-                            }))
-                            .child(self.quiet_action("export-logs", "导出", cx, |view, cx| {
-                                let text = view
-                                    .snapshot
-                                    .core_logs
-                                    .iter()
-                                    .map(|line| format!("[sing-box] {line}"))
-                                    .chain(
-                                        view.snapshot
-                                            .events
-                                            .iter()
-                                            .map(|line| format!("[客户端] {line}")),
-                                    )
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
-                                let path = view.data_dir.join("serein-logs.txt");
-                                view.snapshot.status = match std::fs::write(&path, text) {
-                                    Ok(()) => format!("日志已导出到 {}", path.display()),
-                                    Err(error) => format!("导出日志失败：{error}"),
-                                };
-                                cx.notify();
-                            })),
-                    )
                     .children(if rows.is_empty() {
                         Vec::new()
                     } else {
@@ -248,29 +269,6 @@ impl Sbgui {
                             }),
                     ),
             )
-    }
-
-    /// A quiet bordered action, used where a full `action` button would shout.
-    fn quiet_action(
-        &self,
-        id: &'static str,
-        label: &'static str,
-        cx: &mut Context<Self>,
-        action: impl Fn(&mut Self, &mut Context<Self>) + 'static,
-    ) -> impl IntoElement {
-        div()
-            .id(id)
-            .px(px(12.0))
-            .py(px(6.0))
-            .rounded(px(9.0))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .text_size(px(LABEL))
-            .text_color(rgb(TEXT))
-            .cursor_pointer()
-            .hover(|s| s.bg(rgb(SURFACE_2)))
-            .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| action(view, cx)))
-            .child(label)
     }
 }
 
