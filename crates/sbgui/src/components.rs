@@ -479,17 +479,12 @@ pub(crate) fn legend(color: u32, label: &'static str, value: u64) -> impl IntoEl
         )
 }
 
-/// One rule row: the kit's 39 px data row, with the matcher's own type split
-/// out of the condition so a wall of rules scans down two columns instead of
-/// one long sentence.
+/// One rule row: the kit's 39 px data row. The rule's kind is interface copy
+/// and is labelled in the current language; the condition beside it is
+/// configuration data and is shown exactly as the subscription wrote it.
 pub(crate) fn rule_row(index: usize, rule: &RouteRuleSnapshot, locale: Locale) -> gpui::AnyElement {
-    let (kind, condition) = match rule.matcher.split_once(" · ") {
-        Some((kind, condition)) => (kind.to_owned(), condition.to_owned()),
-        None => (
-            tr!(locale, "条件", "Condition").to_owned(),
-            rule.matcher.clone(),
-        ),
-    };
+    let kind = tr!(locale, rule.kind.zh(), rule.kind.en());
+    let condition = rule.value.clone().unwrap_or_else(|| "—".to_owned());
     div()
         .id(format!("rule-row-{index}"))
         .w_full()
@@ -511,7 +506,7 @@ pub(crate) fn rule_row(index: usize, rule: &RouteRuleSnapshot, locale: Locale) -
         )
         .child(
             div()
-                .w(px(96.0))
+                .w(px(124.0))
                 .flex_shrink_0()
                 .truncate()
                 .text_color(rgb(MUTED))

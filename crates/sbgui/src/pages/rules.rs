@@ -37,7 +37,9 @@ impl Sbgui {
             .enumerate()
             .filter(|(_, rule)| {
                 query.is_empty()
-                    || rule.matcher.to_lowercase().contains(&query)
+                    || format!("{} {}", rule.matcher_zh(), rule.kind.en())
+                        .to_lowercase()
+                        .contains(&query)
                     || rule.outbound.to_lowercase().contains(&query)
             })
             .collect();
@@ -199,7 +201,7 @@ impl Sbgui {
                     .child(
                         table_head_row()
                             .child(table_col("#", Some(40.0)))
-                            .child(table_col(tr!(locale, "类型", "Type"), Some(96.0)))
+                            .child(table_col(tr!(locale, "类型", "Type"), Some(124.0)))
                             .child(table_col(tr!(locale, "匹配条件", "Match"), None))
                             .child(table_col(tr!(locale, "出站", "Outbound"), Some(170.0))),
                     )

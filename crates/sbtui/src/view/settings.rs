@@ -142,7 +142,7 @@ pub(crate) fn rules_lines(app: &App) -> Vec<String> {
         lines.push(format!(
             "{:>2}. {} → {}",
             index + 1,
-            rule.matcher,
+            rule.matcher_zh(),
             if rule.outbound.is_empty() {
                 "（动作）"
             } else {
@@ -172,11 +172,13 @@ mod tests {
         }];
         app.snapshot.rules = vec![
             client_core::state::RouteRuleSnapshot {
-                matcher: "规则集 · geoip-cn".to_owned(),
+                kind: client_core::state::RuleKind::RuleSet,
+                value: Some("geoip-cn".to_owned()),
                 outbound: "🚀节点选择".to_owned(),
             },
             client_core::state::RouteRuleSnapshot {
-                matcher: "其他未命中流量".to_owned(),
+                kind: client_core::state::RuleKind::Final,
+                value: None,
                 outbound: "🚀节点选择".to_owned(),
             },
         ];

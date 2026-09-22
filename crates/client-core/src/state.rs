@@ -71,11 +71,77 @@ pub struct TrafficPoint {
 
 /// One routing rule of the active configuration, rendered for the UIs' rules
 /// views. `outbound` is the target outbound tag, or the rule's `action` when
+/// What a route rule matches on. The kind is interface copy, so each client
+/// labels it in its own language; the value beside it (domains, ports,
+/// protocols) is configuration data and is never translated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RuleKind {
+    DomainSuffix,
+    Domain,
+    DomainKeyword,
+    RuleSet,
+    IpCidr,
+    Private,
+    Protocol,
+    Network,
+    Port,
+    #[default]
+    Other,
+    /// The `route.final` fall-through.
+    Final,
+}
+
+impl RuleKind {
+    pub fn zh(self) -> &'static str {
+        match self {
+            Self::DomainSuffix => "域名后缀",
+            Self::Domain => "域名",
+            Self::DomainKeyword => "域名关键字",
+            Self::RuleSet => "规则集",
+            Self::IpCidr => "网段",
+            Self::Private => "私有地址",
+            Self::Protocol => "协议",
+            Self::Network => "网络",
+            Self::Port => "端口",
+            Self::Other => "其他匹配条件",
+            Self::Final => "其他未命中流量",
+        }
+    }
+
+    pub fn en(self) -> &'static str {
+        match self {
+            Self::DomainSuffix => "Domain suffix",
+            Self::Domain => "Domain",
+            Self::DomainKeyword => "Domain keyword",
+            Self::RuleSet => "Rule set",
+            Self::IpCidr => "IP range",
+            Self::Private => "Private address",
+            Self::Protocol => "Protocol",
+            Self::Network => "Network",
+            Self::Port => "Port",
+            Self::Other => "Other condition",
+            Self::Final => "Unmatched traffic",
+        }
+    }
+}
+
 /// the rule uses a non-forward action (sing-box 1.11+).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteRuleSnapshot {
-    pub matcher: String,
+    pub kind: RuleKind,
+    /// The matched value, verbatim from the configuration.
+    pub value: Option<String>,
     pub outbound: String,
+}
+
+impl RouteRuleSnapshot {
+    /// The Chinese one-line form the terminal client prints.
+    pub fn matcher_zh(&self) -> String {
+        match &self.value {
+            Some(value) => format!("{} · {value}", self.kind.zh()),
+            None => self.kind.zh().to_owned(),
+        }
+    }
 }
 
 /// One `route.rule_set` entry of the active configuration.
@@ -132,15 +198,18 @@ pub fn parse_route_rules(config_text: &str) -> (Vec<RouteRuleSnapshot>, Vec<Rule
                 .and_then(|value| value.as_str())
                 .unwrap_or("未指定")
                 .to_owned();
+            let (kind, value) = rule_matcher(rule);
             rules.push(RouteRuleSnapshot {
-                matcher: rule_matcher(rule),
+                kind,
+                value,
                 outbound,
             });
         }
     }
     if let Some(final_outbound) = route.get("final").and_then(|value| value.as_str()) {
         rules.push(RouteRuleSnapshot {
-            matcher: "其他未命中流量".to_owned(),
+            kind: RuleKind::Final,
+            value: None,
             outbound: final_outbound.to_owned(),
         });
     }
@@ -148,7 +217,7 @@ pub fn parse_route_rules(config_text: &str) -> (Vec<RouteRuleSnapshot>, Vec<Rule
 }
 
 /// One human-readable line describing a rule's matching conditions.
-fn rule_matcher(rule: &serde_json::Value) -> String {
+fn rule_matcher(rule: &serde_json::Value) -> (RuleKind, Option<String>) {
     let list_value = |key: &str| {
         rule.get(key)
             .and_then(|value| value.as_array())
@@ -166,37 +235,37 @@ fn rule_matcher(rule: &serde_json::Value) -> String {
             .map(str::to_owned)
     };
     if let Some(value) = list_value("domain_suffix") {
-        return format!("域名后缀 · {value}");
+        return (RuleKind::DomainSuffix, Some(value));
     }
     if let Some(value) = list_value("domain") {
-        return format!("域名 · {value}");
+        return (RuleKind::Domain, Some(value));
     }
     if let Some(value) = list_value("domain_keyword") {
-        return format!("域名关键字 · {value}");
+        return (RuleKind::DomainKeyword, Some(value));
     }
     if let Some(value) = list_value("rule_set") {
-        return format!("规则集 · {value}");
+        return (RuleKind::RuleSet, Some(value));
     }
     if let Some(value) = list_value("ip_cidr") {
-        return format!("网段 · {value}");
+        return (RuleKind::IpCidr, Some(value));
     }
     if rule.get("ip_is_private").is_some() {
-        return "私有地址".to_owned();
+        return (RuleKind::Private, None);
     }
     if let Some(protocol) = plain_value("protocol") {
-        return format!("协议 · {protocol}");
+        return (RuleKind::Protocol, Some(protocol));
     }
     if let Some(network) = plain_value("network") {
-        return format!("网络 · {network}");
+        return (RuleKind::Network, Some(network));
     }
     if let Some(port) = plain_value("port").or_else(|| {
         rule.get("port")
             .and_then(|value| value.as_u64())
             .map(|value| value.to_string())
     }) {
-        return format!("端口 · {port}");
+        return (RuleKind::Port, Some(port));
     }
-    "其他匹配条件".to_owned()
+    (RuleKind::Other, None)
 }
 
 /// The UI-facing view of the persistent preferences that clients can change.
@@ -481,14 +550,14 @@ mod tests {
         assert_eq!(rule_sets[0].kind, "remote");
         assert_eq!(rule_sets[1].kind, "local");
         assert_eq!(rules.len(), 6);
-        assert_eq!(rules[0].matcher, "规则集 · geoip-cn");
+        assert_eq!(rules[0].matcher_zh(), "规则集 · geoip-cn");
         assert_eq!(rules[0].outbound, "🚀节点选择");
-        assert!(rules[1].matcher.starts_with("域名后缀"));
-        assert_eq!(rules[2].matcher, "私有地址");
-        assert_eq!(rules[3].matcher, "协议 · dns");
+        assert!(rules[1].matcher_zh().starts_with("域名后缀"));
+        assert_eq!(rules[2].matcher_zh(), "私有地址");
+        assert_eq!(rules[3].matcher_zh(), "协议 · dns");
         assert_eq!(rules[3].outbound, "hijack-dns");
-        assert_eq!(rules[4].matcher, "端口 · 443");
-        assert_eq!(rules[5].matcher, "其他未命中流量");
+        assert_eq!(rules[4].matcher_zh(), "端口 · 443");
+        assert_eq!(rules[5].matcher_zh(), "其他未命中流量");
         assert_eq!(rules[5].outbound, "🚀节点选择");
     }
 
