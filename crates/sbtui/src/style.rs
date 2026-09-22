@@ -85,4 +85,37 @@ mod tests {
         assert_eq!(meter(0, 12).chars().count(), 12);
         assert_eq!(meter(1024 * 1024, 12).chars().count(), 12);
     }
+
+    #[test]
+    fn status_color_reads_the_chinese_status_vocabulary() {
+        assert_eq!(status_color("导入订阅失败"), DANGER);
+        assert_eq!(status_color("需要先安装内核"), AMBER);
+        assert_eq!(status_color("内核已启动"), MINT);
+        assert_eq!(
+            status_color("从未更新"),
+            AMBER,
+            "\"never\" is deliberately a warning: there is no data yet"
+        );
+        assert_eq!(
+            status_color("就绪"),
+            TEXT,
+            "an unknown status stays neutral"
+        );
+    }
+
+    #[test]
+    fn short_label_counts_characters_and_leaves_room_for_the_ellipsis() {
+        assert_eq!(short_label("订阅管理", 6), "订阅管理");
+        assert_eq!(short_label("订阅订阅订阅订阅", 5), "订阅订阅…");
+        assert_eq!(short_label("abcdefgh", 5).chars().count(), 5);
+        assert_eq!(short_label("abcd", 1), "…");
+    }
+
+    #[test]
+    fn delay_color_uses_the_shared_bands_and_stays_quiet_without_a_measurement() {
+        assert_eq!(delay_color(None), MUTED);
+        assert_eq!(delay_color(Some(199)), MINT);
+        assert_eq!(delay_color(Some(200)), AMBER);
+        assert_eq!(delay_color(Some(500)), DANGER);
+    }
 }
