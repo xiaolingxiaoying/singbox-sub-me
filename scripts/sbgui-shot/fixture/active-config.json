@@ -1,0 +1,81 @@
+{
+  "log": { "level": "info", "timestamp": true },
+  "dns": {
+    "servers": [{ "tag": "local", "type": "local" }],
+    "final": "local",
+    "strategy": "prefer_ipv4"
+  },
+  "inbounds": [
+    { "type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 2080 }
+  ],
+  "outbounds": [
+    {
+      "type": "selector",
+      "tag": "🚀节点选择",
+      "default": "♻️自动选择",
+      "outbounds": ["♻️自动选择", "HK-01 · 移动", "JP-02 · 软猫", "US-03 · 微软", "SG-04 · 亚马逊 · 长期节点名称示例", "direct"]
+    },
+    {
+      "type": "urltest",
+      "tag": "♻️自动选择",
+      "url": "http://www.gstatic.com/generate_204",
+      "interval": "3m",
+      "tolerance": 50,
+      "outbounds": ["HK-01 · 移动", "JP-02 · 软猫", "US-03 · 微软", "SG-04 · 亚马逊 · 长期节点名称示例"]
+    },
+    {
+      "type": "vless",
+      "tag": "HK-01 · 移动",
+      "server": "127.0.0.1",
+      "server_port": 55001,
+      "uuid": "34f6d7c1-9f2a-4f4d-9d1c-2f1a7b6c5d4e",
+      "packet_encoding": "xudp"
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "JP-02 · 软猫",
+      "server": "127.0.0.1",
+      "server_port": 55002,
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "MDEyMzQ1Njc4OWFiY2RlZg=="
+    },
+    {
+      "type": "trojan",
+      "tag": "US-03 · 微软",
+      "server": "127.0.0.1",
+      "server_port": 55003,
+      "password": "demo-password"
+    },
+    {
+      "type": "hysteria2",
+      "tag": "SG-04 · 亚马逊 · 长期节点名称示例",
+      "server": "127.0.0.1",
+      "server_port": 55004,
+      "password": "demo-secret",
+      "tls": { "enabled": true, "server_name": "example.org", "insecure": true }
+    },
+    { "type": "direct", "tag": "direct" }
+  ],
+  "route": {
+    "rules": [
+      { "action": "sniff" },
+      { "protocol": ["dns"], "action": "hijack-dns" },
+      { "ip_is_private": true, "outbound": "direct" },
+      { "protocol": ["bittorrent"], "outbound": "direct" },
+      { "domain_suffix": ["cn", "163.com", "bilibili.com"], "outbound": "direct" },
+      { "source_ip_cidr": ["10.0.0.0/8", "192.168.0.0/16"], "outbound": "direct" },
+      { "domain_suffix": ["openai.com", "chatgpt.com", "anthropic.com"], "outbound": "♻️自动选择" },
+      { "network": ["udp"], "port": [443], "outbound": "♻️自动选择" }
+    ],
+    "final": "🚀节点选择",
+    "auto_detect_interface": false
+  },
+  "experimental": {
+    "cache_file": { "enabled": true, "path": "cache.db" },
+    "clash_api": {
+      "external_controller": "127.0.0.1:9090",
+      "external_ui": "",
+      "secret": ""
+    }
+  }
+}

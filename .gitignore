@@ -32,3 +32,6 @@ Thumbs.db
 dist/
 .impeccable/
 /.zcodeignore
+
+# Local Linux sing-box binary for the headless GUI harness (never committed).
+.scratch/sbgui-demo-bin/

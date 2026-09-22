@@ -6,7 +6,9 @@
 #   REPO='C:\path\to\repo' bash scripts/sbgui-shot/shot.sh
 #
 # Screenshots land in $OUT_REL inside the repository so they can be diffed.
-# Override PAGES / SIZES / OUT_REL to narrow a run.
+# Override PAGES / SIZES / OUT_REL to narrow a run. Set DEMO_CORE to a Linux
+# sing-box path inside the container (e.g. /src/.scratch/sbgui-demo-bin/sing-box)
+# to seed a subscription, a running core and traffic before shooting.
 set -euo pipefail
 
 IMAGE=sbgui-shot
@@ -32,6 +34,7 @@ MSYS_NO_PATHCONV=1 "$DOCKER" run --rm \
   -e OUT="/src/$OUT_REL" \
   -e PAGES="$PAGES" \
   -e SIZES="$SIZES" \
+  -e DEMO_CORE="${DEMO_CORE:-}" \
   "$IMAGE" bash -c 'tr -d "\r" < /src/scripts/sbgui-shot/inside.sh > /tmp/inside.sh; exec bash /tmp/inside.sh'
 
 echo "=== $OUT_REL ==="
