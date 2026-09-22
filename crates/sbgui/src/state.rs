@@ -11,6 +11,9 @@ use client_core::clash_api::Connection;
 use client_core::state::ClientSnapshot;
 use gpui::{FocusHandle, ScrollHandle};
 
+use crate::lang::Locale;
+use crate::tr;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Page {
     Dashboard,
@@ -24,16 +27,18 @@ pub(crate) enum Page {
 }
 
 impl Page {
-    pub(crate) fn title(self) -> &'static str {
+    /// The navigation label: both languages are written at the same place, so
+    /// a new page cannot ship with only one of them.
+    pub(crate) fn title(self, locale: Locale) -> &'static str {
         match self {
-            Self::Dashboard => "概览",
-            Self::Subscriptions => "订阅",
-            Self::Proxies => "节点",
-            Self::Rules => "规则",
-            Self::Connections => "连接",
-            Self::Logs => "日志",
-            Self::Settings => "设置",
-            Self::About => "关于",
+            Self::Dashboard => tr!(locale, "概览", "Overview"),
+            Self::Subscriptions => tr!(locale, "订阅", "Subscriptions"),
+            Self::Proxies => tr!(locale, "节点", "Nodes"),
+            Self::Rules => tr!(locale, "规则", "Rules"),
+            Self::Connections => tr!(locale, "连接", "Connections"),
+            Self::Logs => tr!(locale, "日志", "Logs"),
+            Self::Settings => tr!(locale, "设置", "Settings"),
+            Self::About => tr!(locale, "关于", "About"),
         }
     }
 
@@ -49,6 +54,15 @@ impl Page {
             Self::About,
         ]
     }
+}
+
+/// What the title-bar language control does, written over the pair it could
+/// disturb rather than inside the click closure: a switch hands back the page
+/// the user was on and the other language, and nothing else. Everything the
+/// page keeps in `Sbgui` — the selected group, the filters, the open
+/// disclosures — is not in this signature, so it cannot be lost by it.
+pub(crate) fn switch_language(locale: Locale, page: Page) -> (Page, Locale) {
+    (page, locale.toggle())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -216,6 +230,9 @@ pub(crate) struct Sbgui {
     pub(crate) confirm_exit: bool,
     /// Set while the stop-the-core confirmation is visible.
     pub(crate) confirm_stop_core: bool,
+    /// Which language the interface is drawn in. Session-level: switching must
+    /// not lose the page or the view state the user is working in.
+    pub(crate) locale: crate::lang::Locale,
     /// The exit decision, once made; a set choice lets the window close.
     pub(crate) exit_choice: Option<ExitChoice>,
     /// Text fields, indexed by `InputField as usize`.
@@ -262,6 +279,15 @@ pub(crate) struct Sbgui {
 /// - `SBGUI_SIZE=<width>x<height>` overrides the window size in logical px.
 /// - `SBGUI_SHOW_EXIT_CONFIRM=1` renders the exit-confirmation overlay
 ///   without enabling the OS proxy.
+/// - `SBGUI_LANG=en` starts the interface in English, so a translation can be
+///   screenshotted without a pointer reaching the title-bar control.
+pub(crate) fn env_locale() -> crate::lang::Locale {
+    match std::env::var("SBGUI_LANG").ok().as_deref() {
+        Some("en") => crate::lang::Locale::En,
+        _ => crate::lang::Locale::default(),
+    }
+}
+
 pub(crate) fn env_page() -> Option<Page> {
     let name = std::env::var("SBGUI_PAGE").ok()?;
     Some(match name.to_ascii_lowercase().as_str() {
@@ -316,4 +342,26 @@ pub(crate) fn env_show_exit_confirm() -> bool {
 /// click the screenshot harness cannot make.
 pub(crate) fn env_show_stop_confirm() -> bool {
     std::env::var("SBGUI_SHOW_STOP_CONFIRM").is_ok_and(|value| value == "1")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Locale, Page, switch_language};
+
+    /// The title-bar control goes through [`switch_language`], so this covers
+    /// the rule it exists to keep: whatever page you are on, asking for the
+    /// other language leaves you on it.
+    #[test]
+    fn switching_the_language_keeps_the_page() {
+        for page in Page::all() {
+            for locale in [Locale::Zh, Locale::En] {
+                let (kept, next) = switch_language(locale, page);
+                assert_eq!(kept, page);
+                assert_eq!(next, locale.toggle());
+                let (kept, back) = switch_language(next, kept);
+                assert_eq!(kept, page);
+                assert_eq!(back, locale);
+            }
+        }
+    }
 }

@@ -20,6 +20,7 @@
 mod app;
 mod chrome;
 mod components;
+mod lang;
 mod overlay;
 mod pages;
 mod parse;

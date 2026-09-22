@@ -12,11 +12,23 @@ use crate::theme::{
     AMBER, BODY, BORDER, CYAN_DARK, DANGER, LABEL, MUTED, RADIUS, RADIUS_CONTROL, SURFACE,
     SURFACE_2, TEXT, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD, tone_colors,
 };
+use crate::tr;
 
 impl Sbgui {
     /// Modal confirmation shown when the window closes while the OS proxy is
     /// still enabled. Nothing is restored silently: the user picks.
     pub(crate) fn exit_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let locale = self.locale;
+        let body = tr!(
+            locale,
+            "退出会停止 sing-box。若保留系统代理，其他应用可能无法联网。",
+            "Quitting stops sing-box. Other apps may lose the network if the proxy stays on."
+        );
+        let note = tr!(
+            locale,
+            "选择「仅退出」后，系统代理设置将保留。",
+            "Choosing Quit only leaves the system-proxy settings in place."
+        );
         div()
             // A hitbox only exists for an identified element; without this the
             // overlay looks modal while the buttons underneath still answer
@@ -47,7 +59,7 @@ impl Sbgui {
                             .text_size(px(18.0))
                             .font_weight(WEIGHT_SEMIBOLD)
                             .text_color(rgb(TEXT))
-                            .child("退出 Serein？"),
+                            .child(tr!(locale, "退出 Serein？", "Quit Serein?")),
                     )
                     .child(
                         div()
@@ -55,14 +67,14 @@ impl Sbgui {
                             .text_size(px(BODY))
                             .line_height(px(21.0))
                             .text_color(rgb(MUTED))
-                            .child("退出会停止 sing-box。若保留系统代理，其他应用可能无法联网。"),
+                            .child(body),
                     )
                     .child(
                         div()
                             .mt(px(6.0))
                             .text_size(px(LABEL))
                             .text_color(rgb(DANGER))
-                            .child("选择「仅退出」后，系统代理设置将保留。"),
+                            .child(note),
                     )
                     .child(
                         div()
@@ -85,18 +97,18 @@ impl Sbgui {
                                         view.confirm_exit = false;
                                         cx.notify();
                                     }))
-                                    .child("取消"),
+                                    .child(tr!(locale, "取消", "Cancel")),
                             )
                             .child(self.exit_button(
                                 "exit-keep",
-                                "仅退出",
+                                tr!(locale, "仅退出", "Quit only"),
                                 Tone::Neutral,
                                 cx,
                                 ExitChoice::Keep,
                             ))
                             .child(self.exit_button(
                                 "exit-restore",
-                                "关闭系统代理并退出",
+                                tr!(locale, "关闭系统代理并退出", "Disable proxy and quit"),
                                 Tone::Accent,
                                 cx,
                                 ExitChoice::Restore,
@@ -145,10 +157,24 @@ impl Sbgui {
     /// confirmation before this state change: proxied connections drop, and
     /// with the system proxy on, other applications lose their outlet too.
     pub(crate) fn stop_core_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let locale = self.locale;
+        let body = tr!(
+            locale,
+            "停止后，系统代理和 TUN 将无法继续工作，当前连接也会中断。",
+            "Stopping drops the current connections and leaves proxy and TUN without an outlet."
+        );
         let detail = if self.snapshot.system_proxy_enabled {
-            "系统代理当前已启用，建议停止后及时关闭系统代理。"
+            tr!(
+                locale,
+                "系统代理当前已启用，建议停止后及时关闭系统代理。",
+                "The system proxy is on now; turn it off soon after stopping."
+            )
         } else {
-            "出站模式、节点与订阅设置都会保留，随时可以重新启动。"
+            tr!(
+                locale,
+                "出站模式、节点与订阅设置都会保留，随时可以重新启动。",
+                "Outbound mode, nodes and subscriptions are kept, so the core can start again."
+            )
         };
         div()
             .id("stop-core-modal")
@@ -179,7 +205,7 @@ impl Sbgui {
                             .text_size(px(18.0))
                             .font_weight(WEIGHT_SEMIBOLD)
                             .text_color(rgb(TEXT))
-                            .child("停止 sing-box 内核？"),
+                            .child(tr!(locale, "停止 sing-box 内核？", "Stop sing-box core?")),
                     )
                     .child(
                         div()
@@ -187,7 +213,7 @@ impl Sbgui {
                             .text_size(px(BODY))
                             .line_height(px(21.0))
                             .text_color(rgb(MUTED))
-                            .child("停止后，系统代理和 TUN 将无法继续工作，当前连接也会中断。"),
+                            .child(body),
                     )
                     .child(
                         div()
@@ -221,7 +247,7 @@ impl Sbgui {
                                     .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
                                         view.answer_stop_core(false, cx);
                                     }))
-                                    .child("取消"),
+                                    .child(tr!(locale, "取消", "Cancel")),
                             )
                             .child(
                                 div()
@@ -239,7 +265,7 @@ impl Sbgui {
                                     .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
                                         view.answer_stop_core(true, cx);
                                     }))
-                                    .child("确认停止"),
+                                    .child(tr!(locale, "确认停止", "Stop core")),
                             ),
                     ),
             )

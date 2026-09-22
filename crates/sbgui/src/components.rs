@@ -66,6 +66,10 @@ pub(crate) fn icon(name: &str, color: u32, size: f32) -> impl IntoElement {
         "refresh" => "<path d='M20 12a8 8 0 1 1-2.4-5.7'/><path d='M20 4v4.5h-4.5'/>",
         "plus" => "<path d='M12 5v14M5 12h14'/>",
         "info" => "<circle cx='12' cy='12' r='9'/><path d='M12 11v5M12 8h.01'/>",
+        // The title bar's language switch, from the kit's Translate reference.
+        "translate" => {
+            "<path d='M7.6 3.6v3M3 7h9.2M10.6 9.6 3.6 16.8M4 9.6l7 7.2'/><path d='m14.3 16.8 3.7-9.4 3.7 9.4M15.5 13.6h5'/><path d='M13.8 20.4h8.4'/>"
+        }
         _ => "<circle cx='12' cy='12' r='8'/>",
     };
     let data = format!(

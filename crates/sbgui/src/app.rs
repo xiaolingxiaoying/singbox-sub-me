@@ -13,8 +13,8 @@ use gpui::{
 
 use crate::parse::{parse_count, parse_port};
 use crate::state::{
-    ExitChoice, INPUT_FIELDS, InputField, LogLevelFilter, Page, Sbgui, TextField, env_page,
-    env_settings_section, env_show_exit_confirm, env_show_stop_confirm,
+    ExitChoice, INPUT_FIELDS, InputField, LogLevelFilter, Page, Sbgui, TextField, env_locale,
+    env_page, env_settings_section, env_show_exit_confirm, env_show_stop_confirm,
 };
 use crate::theme::{BG, BORDER, CONTENT_MAX, CONTENT_PAD, GAP_SECTION, TEXT, WINDOW_RADIUS};
 
@@ -33,6 +33,7 @@ impl Sbgui {
             group_index: 0,
             confirm_exit: env_show_exit_confirm(),
             confirm_stop_core: env_show_stop_confirm(),
+            locale: env_locale(),
             exit_choice: None,
             inputs: INPUT_FIELDS.map(|_| TextField {
                 focus: cx.focus_handle(),

@@ -11,12 +11,15 @@ use gpui::{
 };
 
 use crate::components::{clean_proxy_label, icon, side_rate};
-use crate::state::{FieldSpec, Page, Sbgui, Tone};
+use crate::lang::outbound_mode;
+use crate::state::{FieldSpec, Page, Sbgui, Tone, switch_language};
 use crate::theme::{
-    BLUE, BODY, BORDER, BRAND_ICON_PATH, CONTENT_MAX, CONTENT_PAD, CYAN, CYAN_DARK, DANGER, FAINT,
-    GAP_ITEM, LABEL, META, MINT, MUTED, NAV_ACTIVE, RADIUS_CONTROL, SECTION, SIDEBAR_W, SURFACE,
-    SURFACE_2, TEXT, TITLE, TITLEBAR_H, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD, tone_colors,
+    BLUE, BODY, BORDER, BORDER_STRONG, BRAND_ICON_PATH, CONTENT_MAX, CONTENT_PAD, CYAN, CYAN_DARK,
+    DANGER, FAINT, GAP_ITEM, LABEL, META, MINT, MUTED, NAV_ACTIVE, RADIUS_CONTROL, ROW_HOVER,
+    SECTION, SIDEBAR_W, SURFACE, SURFACE_2, TEXT, TITLE, TITLEBAR_H, WEIGHT_MEDIUM,
+    WEIGHT_SEMIBOLD, tone_colors,
 };
+use crate::tr;
 
 impl Sbgui {
     pub(crate) fn titlebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -62,6 +65,7 @@ impl Sbgui {
                     .h_full()
                     .window_control_area(WindowControlArea::Drag),
             )
+            .child(self.language_button(cx))
             .child(self.window_button(
                 "minimize",
                 "minimize",
@@ -83,6 +87,39 @@ impl Sbgui {
                 cx,
                 Self::request_close,
             ))
+    }
+
+    /// The title bar's only app-level control, and the kit keeps it alone there:
+    /// no settings shortcut. The label names the language the button will give
+    /// you, and the click swaps the language only — `switch_language` hands the
+    /// page straight back, so the user stays where they were working.
+    fn language_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("titlebar-language")
+            .h(px(30.0))
+            .mr(px(10.0))
+            .px(px(8.0))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .rounded(px(RADIUS_CONTROL))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .bg(rgb(SURFACE))
+            .text_size(px(LABEL))
+            .font_weight(WEIGHT_SEMIBOLD)
+            .text_color(rgb(CYAN_DARK))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(ROW_HOVER)).border_color(rgb(BORDER_STRONG)))
+            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
+                let (page, locale) = switch_language(view.locale, view.page);
+                view.page = page;
+                view.locale = locale;
+                cx.notify();
+            }))
+            .child(icon("translate", CYAN_DARK, 15.0))
+            .child(self.locale.next_label())
     }
 
     /// The custom close button is a click inside the client area, not a
@@ -126,6 +163,7 @@ impl Sbgui {
 
     pub(crate) fn sidebar(&self, page: Page, cx: &mut Context<Self>) -> impl IntoElement {
         let snapshot = &self.snapshot;
+        let locale = self.locale;
         div()
             .id("sidebar-scroll")
             .w(px(SIDEBAR_W))
@@ -157,7 +195,7 @@ impl Sbgui {
                             Page::About => ("info", None),
                         };
                         div()
-                            .id(format!("nav-{}", item.title()))
+                            .id(format!("nav-{}", item.title(locale)))
                             .w_full()
                             .h(px(44.0))
                             .px(px(12.0))
@@ -206,7 +244,7 @@ impl Sbgui {
                                     .text_size(px(BODY))
                                     .when(active, |style| style.font_weight(WEIGHT_MEDIUM))
                                     .text_color(rgb(if active { CYAN } else { TEXT }))
-                                    .child(item.title()),
+                                    .child(item.title(locale)),
                             )
                             .children(count.map(|value| {
                                 div()
@@ -226,8 +264,16 @@ impl Sbgui {
                     .items_center()
                     .gap(px(12.0))
                     .text_size(px(META))
-                    .child(side_rate("下载", snapshot.download_speed, CYAN))
-                    .child(side_rate("上传", snapshot.upload_speed, BLUE)),
+                    .child(side_rate(
+                        tr!(locale, "下载", "Download"),
+                        snapshot.download_speed,
+                        CYAN,
+                    ))
+                    .child(side_rate(
+                        tr!(locale, "上传", "Upload"),
+                        snapshot.upload_speed,
+                        BLUE,
+                    )),
             )
     }
 
@@ -271,7 +317,7 @@ impl Sbgui {
                                     .text_size(px(TITLE))
                                     .font_weight(WEIGHT_SEMIBOLD)
                                     .text_color(rgb(TEXT))
-                                    .child(page.title()),
+                                    .child(page.title(self.locale)),
                             )
                             .when(!status_text.is_empty(), |column| {
                                 column.child(
@@ -296,14 +342,14 @@ impl Sbgui {
                             .gap(px(8.0))
                             .child(self.action(
                                 "global-restart",
-                                "重启内核",
+                                tr!(self.locale, "重启内核", "Restart core"),
                                 Tone::Neutral,
                                 cx,
                                 ClientCommand::RestartCore,
                             ))
                             .child(self.action(
                                 "global-stop",
-                                "停止内核",
+                                tr!(self.locale, "停止内核", "Stop core"),
                                 Tone::Warning,
                                 cx,
                                 ClientCommand::StopCore,
@@ -314,9 +360,14 @@ impl Sbgui {
 
     fn control_chips(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let snapshot = &self.snapshot;
+        let locale = self.locale;
         let running = snapshot.core_running;
         let tun_on = snapshot.traffic_mode == TrafficMode::Tun;
-        let current = clean_proxy_label(snapshot.current_node.as_deref().unwrap_or("未选择节点"));
+        let current = clean_proxy_label(snapshot.current_node.as_deref().unwrap_or(tr!(
+            locale,
+            "未选择节点",
+            "No node selected"
+        )));
         let delay = self.selected_group().and_then(|group| {
             group
                 .delays
@@ -334,19 +385,19 @@ impl Sbgui {
             .gap(px(8.0))
             .child(Self::status_chip(
                 "global-core",
-                "内核",
+                tr!(locale, "内核", "Core"),
                 if snapshot.busy.is_some() {
                     if running {
-                        "停止并取消"
+                        tr!(locale, "停止并取消", "Stop & cancel")
                     } else {
-                        "取消操作"
+                        tr!(locale, "取消操作", "Cancel")
                     }
                 } else if snapshot.starting {
-                    "启动中"
+                    tr!(locale, "启动中", "Starting")
                 } else if running {
-                    "运行中"
+                    tr!(locale, "运行中", "Running")
                 } else {
-                    "未运行"
+                    tr!(locale, "未运行", "Not running")
                 },
                 "nodes",
                 if running { MINT } else { MUTED },
@@ -359,8 +410,8 @@ impl Sbgui {
             ))
             .child(Self::status_chip(
                 "global-mode",
-                "出站模式",
-                snapshot.outbound_mode.label(),
+                tr!(locale, "出站模式", "Outbound mode"),
+                outbound_mode(snapshot.outbound_mode, locale),
                 "rules",
                 CYAN,
                 cx,
@@ -391,12 +442,11 @@ impl Sbgui {
                             .items_center()
                             .gap(px(8.0))
                             .child(icon("globe", CYAN, 15.0))
-                            .child(
-                                div()
-                                    .text_size(px(META))
-                                    .text_color(rgb(FAINT))
-                                    .child("当前节点"),
-                            )
+                            .child(div().text_size(px(META)).text_color(rgb(FAINT)).child(tr!(
+                                locale,
+                                "当前节点",
+                                "Current node"
+                            )))
                             .child(
                                 div()
                                     .flex_1()
@@ -411,11 +461,11 @@ impl Sbgui {
             )
             .child(Self::status_chip(
                 "global-system-proxy",
-                "系统代理",
+                tr!(locale, "系统代理", "System proxy"),
                 if snapshot.system_proxy_enabled {
-                    "已开启"
+                    tr!(locale, "已开启", "Enabled")
                 } else {
-                    "已关闭"
+                    tr!(locale, "已关闭", "Disabled")
                 },
                 "network",
                 if snapshot.system_proxy_enabled {
@@ -429,7 +479,11 @@ impl Sbgui {
             .child(Self::status_chip(
                 "global-tun",
                 "TUN",
-                if tun_on { "已开启" } else { "已关闭" },
+                if tun_on {
+                    tr!(locale, "已开启", "Enabled")
+                } else {
+                    tr!(locale, "已关闭", "Disabled")
+                },
                 "network",
                 if tun_on { MINT } else { MUTED },
                 cx,
