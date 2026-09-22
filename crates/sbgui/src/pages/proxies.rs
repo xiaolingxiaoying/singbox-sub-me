@@ -4,14 +4,14 @@ use client_core::ClientCommand;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     ClickEvent, Context, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, Window, div, px, rgb,
+    StatefulInteractiveElement, Styled, Window, div, px, rgb, rgba,
 };
 
 use crate::components::{clean_proxy_label, delay_color, empty_state, icon, pill, status_dot};
 use crate::state::{FieldSpec, InputField, Sbgui, Tone};
 use crate::theme::{
-    BLUE_2, BODY, BORDER, CYAN, DANGER, FAINT, GAP_SECTION, LABEL, META, MUTED, RADIUS, ROW_X,
-    ROW_Y, SURFACE, SURFACE_2, TEXT, WEIGHT_MEDIUM, WEIGHT_NORMAL,
+    BLUE_2, BODY, BORDER, CYAN, DANGER, FAINT, GAP_SECTION, LABEL, META, MUTED, NAV_ACTIVE, RADIUS,
+    RADIUS_CONTROL, ROW_X, SURFACE, SURFACE_2, TEXT, WEIGHT_MEDIUM, WEIGHT_NORMAL,
 };
 
 impl Sbgui {
@@ -61,13 +61,15 @@ impl Sbgui {
                 let display_name = clean_proxy_label(member);
                 div()
                     .id(format!("node-{index}"))
-                    .w(if card_view { px(238.0) } else { px(720.0) })
-                    .when(card_view, |row| row.flex_grow(1.0))
+                    .when(card_view, |row| row.w(px(238.0)).flex_grow(1.0))
+                    .when(!card_view, |row| row.w_full())
                     .min_w(px(0.0))
-                    .min_h(px(50.0))
+                    // Compact on purpose: a node row answers "is this the one,
+                    // what is it called, how fast is it" and nothing else.
+                    .min_h(px(34.0))
                     .px(px(ROW_X))
-                    .py(px(ROW_Y))
-                    .rounded(px(if card_view { 10.0 } else { 0.0 }))
+                    .py(px(8.0))
+                    .rounded(px(if card_view { RADIUS_CONTROL } else { 0.0 }))
                     .bg(rgb(if selected { BLUE_2 } else { SURFACE }))
                     .when(card_view, |row| {
                         row.border_1()
@@ -118,7 +120,7 @@ impl Sbgui {
                             .flex_shrink_0()
                             .px(px(10.0))
                             .py(px(6.0))
-                            .rounded(px(9.0))
+                            .rounded(px(RADIUS_CONTROL))
                             .text_size(px(LABEL))
                             .text_color(rgb(color))
                             .cursor_pointer()
@@ -134,99 +136,51 @@ impl Sbgui {
             .collect::<Vec<_>>();
         div()
             .flex()
-            .flex_col()
-            .gap(px(GAP_SECTION))
+            .gap(px(16.0))
+            // Strategy groups are the primary rail: the question a node page
+            // answers first is "which policy", and only then "which node".
             .child(
                 div()
+                    .w(px(176.0))
+                    .flex_shrink_0()
                     .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(12.0))
-                    .flex_wrap()
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(rgb(MUTED))
-                            .child(format!(
-                                "{} 个代理组 · {} 个节点",
-                                groups.len(),
-                                groups.iter().map(|item| item.members.len()).sum::<usize>()
-                            )),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(self.text_field(
-                                FieldSpec {
-                                    field: InputField::ProxySearch,
-                                    id: "proxy-search",
-                                    placeholder: "搜索节点…",
-                                    width: 210.0,
-                                },
-                                window,
-                                cx,
-                            ))
-                            .child(self.action(
-                                "test-group-toolbar",
-                                "全部测速",
-                                Tone::Neutral,
-                                cx,
-                                ClientCommand::TestGroup(group.name.clone()),
-                            ))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .rounded(px(9.0))
-                                    .border_1()
-                                    .border_color(rgb(BORDER))
-                                    .overflow_hidden()
-                                    .child(self.view_mode(
-                                        "node-list-view",
-                                        "列表",
-                                        !card_view,
-                                        cx,
-                                        false,
-                                    ))
-                                    .child(self.view_mode(
-                                        "node-card-view",
-                                        "卡片",
-                                        card_view,
-                                        cx,
-                                        true,
-                                    )),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(8.0))
+                    .flex_col()
+                    .gap(px(4.0))
                     .children(groups.iter().enumerate().map(|(index, item)| {
                         let active = item.name == group.name;
                         div()
                             .id(format!("group-{index}"))
-                            .px(px(14.0))
-                            .py(px(9.0))
-                            .rounded(px(10.0))
-                            .bg(rgb(if active { BLUE_2 } else { SURFACE }))
+                            .w_full()
+                            .min_h(px(38.0))
+                            .px(px(10.0))
+                            .py(px(8.0))
+                            .rounded(px(RADIUS_CONTROL))
+                            .bg(rgb(if active { NAV_ACTIVE } else { SURFACE }))
                             .flex()
                             .items_center()
-                            .gap(px(8.0))
+                            .gap(px(9.0))
                             .cursor_pointer()
-                            .hover(|s| s.bg(rgb(SURFACE_2)))
+                            .hover(|s| s.bg(rgb(if active { NAV_ACTIVE } else { SURFACE_2 })))
                             .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
                                 view.group_index = index;
                                 cx.notify();
                             }))
                             .child(
                                 div()
-                                    .text_size(px(LABEL))
+                                    .w(px(3.0))
+                                    .h(px(16.0))
+                                    .flex_shrink_0()
+                                    .rounded(px(2.0))
+                                    .bg(if active { rgb(CYAN) } else { rgba(0x0000_0000) }),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .truncate()
+                                    .text_size(px(BODY))
                                     .font_weight(if active { WEIGHT_MEDIUM } else { WEIGHT_NORMAL })
-                                    .text_color(rgb(if active { CYAN } else { MUTED }))
+                                    .text_color(rgb(if active { CYAN } else { TEXT }))
                                     .child(clean_proxy_label(&item.name)),
                             )
                             .child(
@@ -237,35 +191,107 @@ impl Sbgui {
                             )
                     })),
             )
-            // The group summary used to be a card of its own, repeating the
-            // selected chip and a second 测试延迟 button.
             .child(
                 div()
-                    .px(px(4.0))
-                    .text_size(px(META))
-                    .text_color(rgb(MUTED))
-                    .child(format!(
-                        "{} · {} 个节点 · {}",
-                        clean_proxy_label(&group.name),
-                        group.members.len(),
-                        if automatic {
-                            "自动选择，点击节点不会切换"
-                        } else {
-                            "点击节点即可切换"
-                        }
-                    )),
-            )
-            .child(
-                div()
-                    .rounded(px(RADIUS))
-                    .bg(rgb(SURFACE))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .overflow_hidden()
+                    .flex_1()
+                    .min_w(px(0.0))
                     .flex()
-                    .flex_wrap()
-                    .gap(px(if card_view { 12.0 } else { 0.0 }))
-                    .children(members),
+                    .flex_col()
+                    .gap(px(GAP_SECTION))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(12.0))
+                            .flex_wrap()
+                            .child(
+                                div()
+                                    .text_size(px(META))
+                                    .text_color(rgb(MUTED))
+                                    .child(format!(
+                                        "{} 个代理组 · {} 个节点",
+                                        groups.len(),
+                                        groups.iter().map(|item| item.members.len()).sum::<usize>()
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .child(self.text_field(
+                                        FieldSpec {
+                                            field: InputField::ProxySearch,
+                                            id: "proxy-search",
+                                            placeholder: "搜索节点…",
+                                            width: 210.0,
+                                        },
+                                        window,
+                                        cx,
+                                    ))
+                                    .child(self.action(
+                                        "test-group-toolbar",
+                                        "全部测速",
+                                        Tone::Neutral,
+                                        cx,
+                                        ClientCommand::TestGroup(group.name.clone()),
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .rounded(px(RADIUS_CONTROL))
+                                            .border_1()
+                                            .border_color(rgb(BORDER))
+                                            .overflow_hidden()
+                                            .child(self.view_mode(
+                                                "node-list-view",
+                                                "列表",
+                                                !card_view,
+                                                cx,
+                                                false,
+                                            ))
+                                            .child(self.view_mode(
+                                                "node-card-view",
+                                                "卡片",
+                                                card_view,
+                                                cx,
+                                                true,
+                                            )),
+                                    ),
+                            ),
+                    )
+                    // The group summary used to be a card of its own, repeating the
+                    // selected chip and a second 测试延迟 button.
+                    .child(
+                        div()
+                            .px(px(4.0))
+                            .text_size(px(META))
+                            .text_color(rgb(MUTED))
+                            .child(format!(
+                                "{} · {} 个节点 · {}",
+                                clean_proxy_label(&group.name),
+                                group.members.len(),
+                                if automatic {
+                                    "自动选择，点击节点不会切换"
+                                } else {
+                                    "点击节点即可切换"
+                                }
+                            )),
+                    )
+                    .child(
+                        div()
+                            .rounded(px(RADIUS))
+                            .bg(rgb(SURFACE))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .overflow_hidden()
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(if card_view { 12.0 } else { 0.0 }))
+                            .children(members),
+                    ),
             )
     }
 
