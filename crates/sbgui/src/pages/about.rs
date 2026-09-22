@@ -13,15 +13,23 @@ use crate::theme::{
     BODY, BORDER, CYAN, FAINT, LABEL, META, MUTED, RADIUS, ROW_X, SECTION, SURFACE, TEXT,
     WEIGHT_MEDIUM, WEIGHT_SEMIBOLD,
 };
+use crate::tr;
 
 impl Sbgui {
     pub(crate) fn about(&self, _cx: &mut Context<Self>) -> Div {
         let snapshot = &self.snapshot;
+        let locale = self.locale;
         let core = match (snapshot.core_installed, snapshot.core_version.as_deref()) {
             (true, Some(version)) => version.to_owned(),
-            (false, Some(version)) => format!("{version}（未安装）"),
-            (true, None) => "已安装，版本未知".to_owned(),
-            _ => "未安装".to_owned(),
+            (false, Some(version)) => tr!(
+                locale,
+                format!("{version}（未安装）"),
+                format!("{version} (not installed)")
+            ),
+            (true, None) => {
+                tr!(locale, "已安装，版本未知", "Installed, version unknown").to_owned()
+            }
+            _ => tr!(locale, "未安装", "Not installed").to_owned(),
         };
         div()
             .flex()
@@ -49,7 +57,7 @@ impl Sbgui {
                                     .text_size(px(SECTION))
                                     .font_weight(WEIGHT_SEMIBOLD)
                                     .text_color(rgb(TEXT))
-                                    .child("关于"),
+                                    .child(tr!(locale, "关于", "About")),
                             ),
                     )
                     .child(
@@ -57,20 +65,24 @@ impl Sbgui {
                             .text_size(px(BODY))
                             .line_height(px(21.0))
                             .text_color(rgb(MUTED))
-                            .child("基于 sing-box 的私有订阅桌面客户端：内核、订阅、节点与系统代理都由同一个控制面管理，界面只渲染它的状态。"),
+                            .child(tr!(
+                                locale,
+                                "基于 sing-box 的私有订阅桌面客户端：内核、订阅、节点与系统代理都由同一个控制面管理，界面只渲染它的状态。",
+                                "A desktop client for private subscriptions on sing-box: core, subscriptions, nodes and the system proxy share one control plane, and this window only draws its state."
+                            )),
                     )
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .gap(px(2.0))
-                            .child(row("应用版本", env!("CARGO_PKG_VERSION")))
-                            .child(row("内核版本", &core))
+                            .child(row(tr!(locale, "应用版本", "App version"), env!("CARGO_PKG_VERSION")))
+                            .child(row(tr!(locale, "内核版本", "Core version"), &core))
                             .child(row(
-                                "运行平台",
+                                tr!(locale, "运行平台", "Platform"),
                                 &format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
                             ))
-                            .child(row("数据目录", &self.data_dir.display().to_string())),
+                            .child(row(tr!(locale, "数据目录", "Data directory"), &self.data_dir.display().to_string())),
                     ),
             )
             .child(
@@ -89,20 +101,20 @@ impl Sbgui {
                             .text_size(px(LABEL))
                             .font_weight(WEIGHT_MEDIUM)
                             .text_color(rgb(FAINT))
-                            .child("当前状态"),
+                            .child(tr!(locale, "当前状态", "Current status")),
                     )
                     .child(row(
-                        "内核",
+                        tr!(locale, "内核", "Core"),
                         if snapshot.core_running {
-                            "运行中"
+                            tr!(locale, "运行中", "Running")
                         } else {
-                            "未运行"
+                            tr!(locale, "未运行", "Not running")
                         },
                     ))
-                    .child(row("订阅档案", &snapshot.profiles.len().to_string()))
-                    .child(row("代理组", &snapshot.proxy_groups.len().to_string()))
-                    .child(row("路由规则", &snapshot.rules.len().to_string()))
-                    .child(row("活跃连接", &snapshot.active_connections.to_string())),
+                    .child(row(tr!(locale, "订阅档案", "Subscription profiles"), &snapshot.profiles.len().to_string()))
+                    .child(row(tr!(locale, "代理组", "Proxy groups"), &snapshot.proxy_groups.len().to_string()))
+                    .child(row(tr!(locale, "路由规则", "Route rules"), &snapshot.rules.len().to_string()))
+                    .child(row(tr!(locale, "活跃连接", "Active connections"), &snapshot.active_connections.to_string())),
             )
     }
 }

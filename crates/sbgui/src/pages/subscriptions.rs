@@ -16,6 +16,7 @@ use crate::theme::{
     BODY, BORDER, BORDER_STRONG, CYAN, FAINT, LABEL, META, MINT, MUTED, RADIUS_CONTROL, ROW_HOVER,
     ROW_SELECTED, SURFACE, SURFACE_2, TEXT, WEIGHT_MEDIUM,
 };
+use crate::tr;
 
 /// The name column carries two lines and the usage column a bar, so both get a
 /// share of the leftover width instead of a fixed track.
@@ -48,6 +49,7 @@ impl Sbgui {
 
     pub(crate) fn subscriptions(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let profiles = self.snapshot.profiles.clone();
+        let locale = self.locale;
         let usage = self.snapshot.subscription_usage;
         let node_count = self
             .snapshot
@@ -63,7 +65,7 @@ impl Sbgui {
             .gap(px(9.0))
             .child(self.button(
                 "add-subscription",
-                "添加订阅",
+                tr!(locale, "添加订阅", "Add subscription"),
                 Tone::Accent,
                 Some("plus"),
                 cx,
@@ -74,7 +76,7 @@ impl Sbgui {
             ))
             .child(self.button(
                 "import-from-clipboard",
-                "从剪贴板导入",
+                tr!(locale, "从剪贴板导入", "Import from clipboard"),
                 Tone::Neutral,
                 None,
                 cx,
@@ -94,14 +96,20 @@ impl Sbgui {
             ))
             .child(self.action(
                 "update-all-subscriptions",
-                "全部更新",
+                tr!(locale, "全部更新", "Update all"),
                 Tone::Neutral,
                 cx,
                 ClientCommand::UpdateSubscription,
             ));
 
-        let mut surface = work_surface()
-            .child(page_head("管理订阅链接，更新节点列表与切换档案。").child(head_actions));
+        let mut surface = work_surface().child(
+            page_head(tr!(
+                locale,
+                "管理订阅链接，更新节点列表与切换档案。",
+                "Manage subscription links, update their nodes and switch profiles.",
+            ))
+            .child(head_actions),
+        );
 
         if self.show_subscription_import {
             surface = surface.child(
@@ -124,7 +132,7 @@ impl Sbgui {
                                     .text_size(px(BODY))
                                     .font_weight(WEIGHT_MEDIUM)
                                     .text_color(rgb(TEXT))
-                                    .child("添加订阅"),
+                                    .child(tr!(locale, "添加订阅", "Add subscription")),
                             )
                             .child(
                                 div()
@@ -149,7 +157,11 @@ impl Sbgui {
                             .mt(px(2.0))
                             .text_size(px(LABEL))
                             .text_color(rgb(MUTED))
-                            .child("粘贴 HTTP/HTTPS 订阅地址或 sing-box JSON 地址。"),
+                            .child(tr!(
+                                locale,
+                                "粘贴 HTTP/HTTPS 订阅地址或 sing-box JSON 地址。",
+                                "Paste an HTTP/HTTPS subscription or sing-box JSON URL.",
+                            )),
                     )
                     .child(
                         div()
@@ -170,7 +182,7 @@ impl Sbgui {
                             ))
                             .child(self.button(
                                 "import-manual",
-                                "添加",
+                                tr!(locale, "添加", "Add"),
                                 Tone::Accent,
                                 None,
                                 cx,
@@ -185,8 +197,12 @@ impl Sbgui {
 
         if profiles.is_empty() {
             return surface.child(empty_state(
-                "还没有订阅",
-                "点击「添加订阅」，或从剪贴板导入订阅链接。",
+                tr!(locale, "还没有订阅", "No subscriptions yet"),
+                tr!(
+                    locale,
+                    "点击「添加订阅」，或从剪贴板导入订阅链接。",
+                    "Use Add subscription, or import a link from the clipboard.",
+                ),
                 None,
                 cx,
             ));
@@ -221,7 +237,7 @@ impl Sbgui {
                                     .child(if total > 0 {
                                         format!("{} / {}", human_bytes(used), human_bytes(total))
                                     } else {
-                                        "未设置配额".to_owned()
+                                        tr!(locale, "未设置配额", "No quota set").to_owned()
                                     }),
                             )
                             .children((total > 0).then(|| {
@@ -234,7 +250,11 @@ impl Sbgui {
                             .mt(px(5.0))
                             .text_size(px(META))
                             .text_color(rgb(MUTED))
-                            .child(format!("{} 个节点", node_count))
+                            .child(tr!(
+                                locale,
+                                format!("{} 个节点", node_count),
+                                format!("{} nodes", node_count)
+                            ))
                             .into_any_element(),
                     ];
                     // The bar only earns its row when the provider actually
@@ -250,7 +270,11 @@ impl Sbgui {
                         div()
                             .text_size(px(META))
                             .text_color(rgb(FAINT))
-                            .child("未启用时无用量信息")
+                            .child(tr!(
+                                locale,
+                                "未启用时无用量信息",
+                                "No usage reported while inactive"
+                            ))
                             .into_any_element(),
                     ]
                 };
@@ -287,7 +311,9 @@ impl Sbgui {
                                             .truncate()
                                             .child(profile.name.clone()),
                                     )
-                                    .children(active.then(|| pill("当前", CYAN))),
+                                    .children(
+                                        active.then(|| pill(tr!(locale, "当前", "Active"), CYAN)),
+                                    ),
                             )
                             .child(
                                 div()
@@ -314,7 +340,11 @@ impl Sbgui {
                                     .rounded(px(4.0))
                                     .bg(rgb(if active { MINT } else { FAINT })),
                             )
-                            .child(if active { "使用中" } else { "未启用" }),
+                            .child(if active {
+                                tr!(locale, "使用中", "In use")
+                            } else {
+                                tr!(locale, "未启用", "Inactive")
+                            }),
                     )
                     .child(grow_col(1.2, 170.0).children(usage_cell))
                     .child(
@@ -334,7 +364,7 @@ impl Sbgui {
                             .children((!active).then(|| {
                                 self.mini_action(
                                     index + 300_000,
-                                    "设为当前",
+                                    tr!(locale, "设为当前", "Use this"),
                                     cx,
                                     ClientCommand::SwitchProfile(name_for_activate.clone()),
                                 )
@@ -343,7 +373,7 @@ impl Sbgui {
                             .children(active.then(|| {
                                 self.mini_action(
                                     index + 100_000,
-                                    "更新",
+                                    tr!(locale, "更新", "Update"),
                                     cx,
                                     ClientCommand::UpdateSubscription,
                                 )
@@ -355,7 +385,11 @@ impl Sbgui {
                                 } else {
                                     "remove-profile"
                                 },
-                                if armed { "确认删除？" } else { "删除" },
+                                if armed {
+                                    tr!(locale, "确认删除？", "Confirm delete?")
+                                } else {
+                                    tr!(locale, "删除", "Delete")
+                                },
                                 Tone::Danger,
                                 None,
                                 cx,
@@ -393,11 +427,18 @@ impl Sbgui {
                 .flex_col()
                 .child(
                     table_head_row()
-                        .child(grow_col(1.4, 200.0).child("名称"))
-                        .child(table_col("状态", Some(72.0)))
-                        .child(grow_col(1.2, 170.0).child("流量与节点"))
-                        .child(table_col("上次更新", Some(72.0)))
-                        .child(div().flex_shrink_0().child("操作")),
+                        .child(grow_col(1.4, 200.0).child(tr!(locale, "名称", "Name")))
+                        .child(table_col(tr!(locale, "状态", "Status"), Some(72.0)))
+                        .child(grow_col(1.2, 170.0).child(tr!(
+                            locale,
+                            "流量与节点",
+                            "Usage & nodes"
+                        )))
+                        .child(table_col(
+                            tr!(locale, "上次更新", "Last updated"),
+                            Some(72.0),
+                        ))
+                        .child(div().flex_shrink_0().child(tr!(locale, "操作", "Actions"))),
                 )
                 .children(rows),
         )

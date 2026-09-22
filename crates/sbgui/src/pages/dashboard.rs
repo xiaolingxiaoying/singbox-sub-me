@@ -19,12 +19,38 @@ use crate::components::{
     accordion, clean_proxy_label, delay_color, detail_item, health_dot, icon, info_cell, legend,
     metric_cell, pill, switch, traffic_chart, work_surface,
 };
+use crate::lang::{Locale, outbound_mode};
 use crate::state::{Page, Sbgui};
 use crate::theme::{
     AMBER, BLUE, BLUE_2, BODY, BORDER, BORDER_STRONG, CYAN, DANGER, DISPLAY, FAINT, GAP_SECTION,
     LABEL, META, MINT, MUTED, RADIUS_CONTROL, SECTION, SECTION_LG, SURFACE, SURFACE_2, TEXT,
     WEIGHT_MEDIUM, WEIGHT_SEMIBOLD,
 };
+use crate::tr;
+
+/// The quota's reset-or-expiry half of the overview's usage line. The count of
+/// days is data; only the words around it belong to a language.
+fn expiry_text(
+    usage: Option<&client_core::subscription::SubscriptionUserinfo>,
+    locale: Locale,
+) -> String {
+    let Some(item) = usage else {
+        return tr!(locale, "无到期信息", "No expiry reported").to_owned();
+    };
+    let Some(expire) = item.expire else {
+        return tr!(locale, "配额不设到期", "Quota without an expiry").to_owned();
+    };
+    let now = client_core::format::now_epoch();
+    if expire > now {
+        tr!(
+            locale,
+            format!("重置或到期 · {} 天后", (expire - now) / 86_400),
+            format!("resets or expires in {} days", (expire - now) / 86_400)
+        )
+    } else {
+        tr!(locale, "已到期", "expired").to_owned()
+    }
+}
 
 impl Sbgui {
     // ------------------------------------------------------------ dashboard
@@ -43,6 +69,7 @@ impl Sbgui {
     /// numbers that used to fill a fourth card.
     fn connection_surface(&self, cx: &mut Context<Self>) -> gpui::Div {
         let snapshot = &self.snapshot;
+        let locale = self.locale;
         let running = snapshot.core_running;
         let busy = snapshot.busy.is_some();
         let starting = snapshot.starting;
@@ -50,25 +77,29 @@ impl Sbgui {
             .active_profile
             .as_ref()
             .map(|item| item.name.clone())
-            .unwrap_or_else(|| "尚未添加订阅".to_owned());
-        let current = clean_proxy_label(snapshot.current_node.as_deref().unwrap_or("尚未选择节点"));
+            .unwrap_or_else(|| tr!(locale, "尚未添加订阅", "No subscription yet").to_owned());
+        let current = clean_proxy_label(snapshot.current_node.as_deref().unwrap_or(tr!(
+            locale,
+            "尚未选择节点",
+            "No node selected"
+        )));
         let group = self
             .selected_group()
             .map(|item| clean_proxy_label(&item.name))
-            .unwrap_or_else(|| "无策略组".to_owned());
+            .unwrap_or_else(|| tr!(locale, "无策略组", "No policy group").to_owned());
         let delay = self.selected_group().and_then(|item| {
             item.delays
                 .get(snapshot.current_node.as_deref().unwrap_or(""))
                 .copied()
         });
         let core_label = if busy {
-            "停止并取消"
+            tr!(locale, "停止并取消", "Stop & cancel")
         } else if starting {
-            "启动中"
+            tr!(locale, "启动中", "Starting")
         } else if running {
-            "停止内核"
+            tr!(locale, "停止内核", "Stop core")
         } else {
-            "启动内核"
+            tr!(locale, "启动内核", "Start core")
         };
         let core_command = if busy || starting || running {
             ClientCommand::StopCore
@@ -97,7 +128,7 @@ impl Sbgui {
                                             .text_size(px(SECTION_LG))
                                             .font_weight(WEIGHT_SEMIBOLD)
                                             .text_color(rgb(TEXT))
-                                            .child("连接状态"),
+                                            .child(tr!(locale, "连接状态", "Connection status")),
                                     )
                                     .child(
                                         div()
@@ -141,11 +172,11 @@ impl Sbgui {
                                             .font_weight(WEIGHT_SEMIBOLD)
                                             .text_color(rgb(if running { MINT } else { MUTED }))
                                             .child(if busy || starting {
-                                                "处理中"
+                                                tr!(locale, "处理中", "Busy")
                                             } else if running {
-                                                "已连接"
+                                                tr!(locale, "已连接", "Connected")
                                             } else {
-                                                "已停止"
+                                                tr!(locale, "已停止", "Stopped")
                                             }),
                                     )
                                     .children(delay.map(|value| {
@@ -159,9 +190,18 @@ impl Sbgui {
                                     .text_color(rgb(MUTED))
                                     .truncate()
                                     .child(if running {
-                                        format!("{profile} · {group} · 当前节点 {current}")
+                                        tr!(
+                                            locale,
+                                            format!("{profile} · {group} · 当前节点 {current}"),
+                                            format!("{profile} · {group} · active {current}")
+                                        )
                                     } else {
-                                        "内核未运行；启动后系统代理与 TUN 才会接管流量。".to_owned()
+                                        tr!(
+                                            locale,
+                                            "内核未运行；启动后系统代理与 TUN 才会接管流量。",
+                                            "The core is stopped; the proxy and TUN take traffic only once it runs"
+                                        )
+                                        .to_owned()
                                     }),
                             ),
                     ),
@@ -169,39 +209,67 @@ impl Sbgui {
             .child(self.quick_controls(cx))
             .child(accordion(
                 "dashboard-advanced",
-                "进阶设置",
-                "路由 / 内核 / 自动重启",
+                tr!(locale, "进阶设置", "Advanced settings"),
+                tr!(locale, "路由 / 内核 / 自动重启", "Routing / core / auto restart"),
                 self.advanced_open,
                 cx,
                 |view| view.advanced_open = !view.advanced_open,
                 div().flex().flex_wrap().gap(px(24.0)).children([
                     detail_item(
-                        "内核版本",
-                        snapshot
-                            .core_version
-                            .clone()
-                            .unwrap_or_else(|| "未安装".to_owned()),
+                        tr!(locale, "内核版本", "Core version"),
+                        snapshot.core_version.clone().unwrap_or_else(|| tr!(
+                            locale,
+                            "未安装",
+                            "Not installed"
+                        ).to_owned()),
                     ),
                     detail_item(
-                        "运行版本",
+                        tr!(locale, "运行版本", "Running version"),
                         snapshot
                             .core_runtime_version
                             .clone()
                             .unwrap_or_else(|| "—".to_owned()),
                     ),
                     detail_item(
-                        "内存占用",
+                        tr!(locale, "内存占用", "Memory used"),
                         if running && snapshot.memory_used > 0 {
                             human_bytes(snapshot.memory_used)
                         } else {
                             "—".to_owned()
                         },
                     ),
-                    detail_item("路由规则", format!("{} 条", snapshot.rules.len())),
-                    detail_item("规则集", format!("{} 个", snapshot.rule_sets.len())),
-                    detail_item("出站模式", snapshot.outbound_mode.label().to_owned()),
-                    detail_item("自动重启", format!("{} 次", snapshot.restart_attempts)),
-                    detail_item("混合端口", snapshot.settings.mixed_port.to_string()),
+                    detail_item(
+                        tr!(locale, "路由规则", "Route rules"),
+                        tr!(
+                            locale,
+                            format!("{} 条", snapshot.rules.len()),
+                            format!("{} rules", snapshot.rules.len())
+                        ),
+                    ),
+                    detail_item(
+                        tr!(locale, "规则集", "Rule sets"),
+                        tr!(
+                            locale,
+                            format!("{} 个", snapshot.rule_sets.len()),
+                            format!("{} sets", snapshot.rule_sets.len())
+                        ),
+                    ),
+                    detail_item(
+                        tr!(locale, "出站模式", "Outbound mode"),
+                        outbound_mode(snapshot.outbound_mode, locale).to_owned(),
+                    ),
+                    detail_item(
+                        tr!(locale, "自动重启", "Auto restart"),
+                        tr!(
+                            locale,
+                            format!("{} 次", snapshot.restart_attempts),
+                            format!("{} times", snapshot.restart_attempts)
+                        ),
+                    ),
+                    detail_item(
+                        tr!(locale, "混合端口", "Mixed port"),
+                        snapshot.settings.mixed_port.to_string(),
+                    ),
                 ]),
             ))
             // First-run guidance lives inside the same surface rather than
@@ -217,7 +285,7 @@ impl Sbgui {
                             .text_size(px(BODY))
                             .font_weight(WEIGHT_MEDIUM)
                             .text_color(rgb(TEXT))
-                            .child("完成首次连接"),
+                            .child(tr!(locale, "完成首次连接", "Finish the first connection")),
                     )
                     .child(
                         div()
@@ -227,7 +295,12 @@ impl Sbgui {
                             .items_center()
                             .gap(px(10.0))
                             .children(
-                                ["添加订阅", "选择节点", "启动内核", "开启系统代理"]
+                                [
+                                    tr!(locale, "添加订阅", "Add a subscription"),
+                                    tr!(locale, "选择节点", "Pick a node"),
+                                    tr!(locale, "启动内核", "Start the core"),
+                                    tr!(locale, "开启系统代理", "Turn on the system proxy"),
+                                ]
                                     .into_iter()
                                     .enumerate()
                                     .map(|(index, step)| {
@@ -269,6 +342,7 @@ impl Sbgui {
     /// three floating cards.
     fn quick_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let snapshot = &self.snapshot;
+        let locale = self.locale;
         let running = snapshot.core_running || snapshot.starting;
         let tun_on = snapshot.traffic_mode == TrafficMode::Tun;
         div()
@@ -279,12 +353,16 @@ impl Sbgui {
             .flex()
             .flex_wrap()
             .child(self.control_item(
-                "系统代理",
+                tr!(locale, "系统代理", "System proxy"),
                 true,
                 if snapshot.system_proxy_enabled {
-                    format!("已开启 · 127.0.0.1:{}", snapshot.settings.mixed_port)
+                    tr!(
+                        locale,
+                        format!("已开启 · 127.0.0.1:{}", snapshot.settings.mixed_port),
+                        format!("Enabled · 127.0.0.1:{}", snapshot.settings.mixed_port)
+                    )
                 } else {
-                    "已关闭".to_owned()
+                    tr!(locale, "已关闭", "Disabled").to_owned()
                 },
                 switch(
                     "dashboard-system-proxy",
@@ -293,40 +371,58 @@ impl Sbgui {
                     cx,
                 ),
             ))
-            .child(self.control_item(
-                "TUN 模式",
-                false,
-                if tun_on {
-                    if running {
-                        "已启用 · 改动需重启内核".to_owned()
+            .child(
+                self.control_item(
+                    tr!(locale, "TUN 模式", "TUN mode"),
+                    false,
+                    if tun_on {
+                        if running {
+                            tr!(
+                                locale,
+                                "已启用 · 改动需重启内核",
+                                "Enabled · a core restart applies it"
+                            )
+                        } else {
+                            tr!(locale, "已启用", "Enabled")
+                        }
+                    } else if running {
+                        tr!(
+                            locale,
+                            "已关闭 · 改动需重启内核",
+                            "Disabled · a core restart applies it"
+                        )
                     } else {
-                        "已启用".to_owned()
+                        tr!(locale, "已关闭", "Disabled")
                     }
-                } else if running {
-                    "已关闭 · 改动需重启内核".to_owned()
-                } else {
-                    "已关闭".to_owned()
-                },
-                switch(
-                    "dashboard-tun",
-                    tun_on,
-                    (!running).then(|| {
-                        ClientCommand::UpdateSettings(SettingsPatch {
-                            traffic_mode: Some(if tun_on {
-                                TrafficMode::SystemProxy
-                            } else {
-                                TrafficMode::Tun
-                            }),
-                            ..Default::default()
-                        })
-                    }),
-                    cx,
+                    .to_owned(),
+                    switch(
+                        "dashboard-tun",
+                        tun_on,
+                        (!running).then(|| {
+                            ClientCommand::UpdateSettings(SettingsPatch {
+                                traffic_mode: Some(if tun_on {
+                                    TrafficMode::SystemProxy
+                                } else {
+                                    TrafficMode::Tun
+                                }),
+                                ..Default::default()
+                            })
+                        }),
+                        cx,
+                    ),
                 ),
-            ))
+            )
             .child(self.control_item(
-                "出站模式",
+                tr!(locale, "出站模式", "Outbound mode"),
                 false,
-                format!("{}接管匹配流量", snapshot.outbound_mode.label()),
+                tr!(
+                    locale,
+                    format!("{}接管匹配流量", snapshot.outbound_mode.label()),
+                    format!(
+                        "{} takes matched traffic",
+                        outbound_mode(snapshot.outbound_mode, locale)
+                    )
+                ),
                 self.outbound_segments(cx),
             ))
     }
@@ -375,6 +471,7 @@ impl Sbgui {
     /// cycle through a chip.
     fn outbound_segments(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.snapshot.outbound_mode;
+        let locale = self.locale;
         div()
             .flex()
             .flex_shrink_0()
@@ -411,7 +508,7 @@ impl Sbgui {
                             view.send(ClientCommand::SetOutboundMode(mode));
                             cx.notify();
                         }))
-                        .child(mode.label())
+                        .child(outbound_mode(mode, locale))
                 }),
             )
     }
@@ -419,11 +516,16 @@ impl Sbgui {
     /// The node in use, the four live numbers, and the five-minute curve.
     fn traffic_surface(&self, cx: &mut Context<Self>) -> gpui::Div {
         let snapshot = &self.snapshot;
-        let current = clean_proxy_label(snapshot.current_node.as_deref().unwrap_or("尚未选择节点"));
+        let locale = self.locale;
+        let current = clean_proxy_label(snapshot.current_node.as_deref().unwrap_or(tr!(
+            locale,
+            "尚未选择节点",
+            "No node selected"
+        )));
         let group = self
             .selected_group()
             .map(|item| clean_proxy_label(&item.name))
-            .unwrap_or_else(|| "无策略组".to_owned());
+            .unwrap_or_else(|| tr!(locale, "无策略组", "No policy group").to_owned());
         let delay = self.selected_group().and_then(|item| {
             item.delays
                 .get(snapshot.current_node.as_deref().unwrap_or(""))
@@ -451,7 +553,7 @@ impl Sbgui {
                     .text_size(px(SECTION_LG))
                     .font_weight(WEIGHT_SEMIBOLD)
                     .text_color(rgb(TEXT))
-                    .child("当前节点与流量"),
+                    .child(tr!(locale, "当前节点与流量", "Current node & traffic")),
             )
             .child(
                 div()
@@ -509,7 +611,11 @@ impl Sbgui {
                                             .text_size(px(LABEL))
                                             .text_color(rgb(MUTED))
                                             .truncate()
-                                            .child(format!("策略组 {group}")),
+                                            .child(tr!(
+                                                locale,
+                                                format!("策略组 {group}"),
+                                                format!("Group {group}")
+                                            )),
                                     )
                                     .child(
                                         div()
@@ -518,8 +624,21 @@ impl Sbgui {
                                             .text_color(rgb(FAINT))
                                             .truncate()
                                             .child(delay.map_or_else(
-                                                || "延迟未测，点击节点行可单独测速".to_owned(),
-                                                |value| format!("{value} ms · 点击可切换节点"),
+                                                || {
+                                                    tr!(
+                                                        locale,
+                                                        "延迟未测，点击节点行可单独测速",
+                                                        "Latency not measured yet; test a node there"
+                                                    )
+                                                    .to_owned()
+                                                },
+                                                |value| {
+                                                    tr!(
+                                                        locale,
+                                                        format!("{value} ms · 点击可切换节点"),
+                                                        format!("{value} ms · pick another node")
+                                                    )
+                                                },
                                             )),
                                     ),
                             )
@@ -534,28 +653,32 @@ impl Sbgui {
                             .children([
                                 metric_cell(
                                     "download",
-                                    "下载速度",
+                                    tr!(locale, "下载速度", "Download"),
                                     format!("{}/s", human_bytes(snapshot.download_speed)),
                                     None,
                                     true,
                                 ),
                                 metric_cell(
                                     "upload",
-                                    "上传速度",
+                                    tr!(locale, "上传速度", "Upload"),
                                     format!("{}/s", human_bytes(snapshot.upload_speed)),
                                     None,
                                     false,
                                 ),
                                 metric_cell(
                                     "connections",
-                                    "活跃连接",
-                                    format!("{} 条", snapshot.active_connections),
+                                    tr!(locale, "活跃连接", "Active connections"),
+                                    tr!(
+                                        locale,
+                                        format!("{} 条", snapshot.active_connections),
+                                        snapshot.active_connections.to_string()
+                                    ),
                                     Some(format!("TCP {tcp_count} · UDP {udp_count}")),
                                     false,
                                 ),
                                 metric_cell(
                                     "database",
-                                    "总流量",
+                                    tr!(locale, "总流量", "Total traffic"),
                                     human_bytes(snapshot.total_download + snapshot.total_upload),
                                     None,
                                     false,
@@ -576,7 +699,7 @@ impl Sbgui {
                             .text_size(px(BODY))
                             .font_weight(WEIGHT_MEDIUM)
                             .text_color(rgb(TEXT))
-                            .child("近 5 分钟流量"),
+                            .child(tr!(locale, "近 5 分钟流量", "Traffic · last 5 min")),
                     )
                     .child(
                         div()
@@ -586,9 +709,9 @@ impl Sbgui {
                             .gap(px(20.0))
                             .text_size(px(META))
                             .text_color(rgb(FAINT))
-                            .child(legend(CYAN, "下载", snapshot.download_speed))
-                            .child(legend(BLUE, "上传", snapshot.upload_speed))
-                            .child("本机 sing-box 实时采样"),
+                            .child(legend(CYAN, tr!(locale, "下载", "Download"), snapshot.download_speed))
+                            .child(legend(BLUE, tr!(locale, "上传", "Upload"), snapshot.upload_speed))
+                            .child(tr!(locale, "本机 sing-box 实时采样", "Live samples from this sing-box")),
                     ),
             )
             .child(
@@ -609,7 +732,11 @@ impl Sbgui {
                                 div()
                                     .text_size(px(LABEL))
                                     .text_color(rgb(FAINT))
-                                    .child("内核运行并产生上下行后，这里绘制曲线。"),
+                                    .child(tr!(
+                                    locale,
+                                    "内核运行并产生上下行后，这里绘制曲线。",
+                                    "The curve is drawn once the core runs and moves traffic."
+                                )),
                             )
                     }),
             )
@@ -620,8 +747,12 @@ impl Sbgui {
                     .justify_between()
                     .text_size(px(META))
                     .text_color(rgb(FAINT))
-                    .child(format!("{} 个采样点", snapshot.traffic_history.len()))
-                    .child("现在")
+                    .child(tr!(
+                        locale,
+                        format!("{} 个采样点", snapshot.traffic_history.len()),
+                        format!("{} samples", snapshot.traffic_history.len())
+                    ))
+                    .child(tr!(locale, "现在", "Now"))
             }))
             .child(
                 div()
@@ -633,9 +764,21 @@ impl Sbgui {
                     .flex_wrap()
                     .gap(px(32.0))
                     .children([
-                        info_cell("累计下载", human_bytes(snapshot.total_download), None),
-                        info_cell("累计上传", human_bytes(snapshot.total_upload), None),
-                        info_cell("5 分钟峰值", format!("{}/s", human_bytes(peak)), None),
+                        info_cell(
+                            tr!(locale, "累计下载", "Total download"),
+                            human_bytes(snapshot.total_download),
+                            None,
+                        ),
+                        info_cell(
+                            tr!(locale, "累计上传", "Total upload"),
+                            human_bytes(snapshot.total_upload),
+                            None,
+                        ),
+                        info_cell(
+                            tr!(locale, "5 分钟峰值", "5-minute peak"),
+                            format!("{}/s", human_bytes(peak)),
+                            None,
+                        ),
                     ]),
             )
     }
@@ -643,6 +786,7 @@ impl Sbgui {
     /// The account being spent and what the core said last.
     fn usage_surface(&self, cx: &mut Context<Self>) -> gpui::Div {
         let snapshot = &self.snapshot;
+        let locale = self.locale;
         let usage = snapshot.subscription_usage.as_ref();
         let used = usage.map_or(0, |item| item.used());
         let total = usage.map_or(0, |item| item.total);
@@ -668,7 +812,7 @@ impl Sbgui {
                                 .text_size(px(SECTION_LG))
                                 .font_weight(WEIGHT_SEMIBOLD)
                                 .text_color(rgb(TEXT))
-                                .child("订阅与事件"),
+                                .child(tr!(locale, "订阅与事件", "Subscriptions & events")),
                         )
                         .child(
                             div()
@@ -690,14 +834,21 @@ impl Sbgui {
                                                 .active_profile
                                                 .as_ref()
                                                 .map(|item| item.name.clone())
-                                                .unwrap_or_else(|| "尚未添加订阅".to_owned()),
+                                                .unwrap_or_else(|| {
+                                                    tr!(
+                                                        locale,
+                                                        "尚未添加订阅",
+                                                        "No subscription yet"
+                                                    )
+                                                    .to_owned()
+                                                }),
                                         ),
                                 )
                                 .children(
                                     snapshot
                                         .active_profile
                                         .as_ref()
-                                        .map(|_| pill("使用中", CYAN)),
+                                        .map(|_| pill(tr!(locale, "使用中", "In use"), CYAN)),
                                 ),
                         )
                         // Two flex children whose grow weights are the used
@@ -756,28 +907,18 @@ impl Sbgui {
                                 .text_size(px(META))
                                 .text_color(rgb(MUTED))
                                 .truncate()
-                                .child(format!(
-                                    "{} · {} 个节点",
-                                    usage.map_or_else(
-                                        || "无到期信息".to_owned(),
-                                        |item| {
-                                            item.expire.map_or_else(
-                                                || "配额不设到期".to_owned(),
-                                                |expire| {
-                                                    let now = client_core::format::now_epoch();
-                                                    if expire > now {
-                                                        format!(
-                                                            "重置或到期 · {} 天后",
-                                                            (expire - now) / 86_400
-                                                        )
-                                                    } else {
-                                                        "已到期".to_owned()
-                                                    }
-                                                },
-                                            )
-                                        },
+                                .child(tr!(
+                                    locale,
+                                    format!(
+                                        "{} · {} 个节点",
+                                        expiry_text(usage, locale),
+                                        node_count
                                     ),
-                                    node_count
+                                    format!(
+                                        "{} · {} nodes",
+                                        expiry_text(usage, locale),
+                                        node_count
+                                    )
                                 )),
                         ),
                 )
@@ -809,7 +950,7 @@ impl Sbgui {
                                                 .text_size(px(SECTION_LG))
                                                 .font_weight(WEIGHT_SEMIBOLD)
                                                 .text_color(rgb(TEXT))
-                                                .child("最近事件"),
+                                                .child(tr!(locale, "最近事件", "Recent events")),
                                         ),
                                 )
                                 .child(
@@ -829,7 +970,7 @@ impl Sbgui {
                                             view.page = Page::Logs;
                                             cx.notify();
                                         }))
-                                        .child("查看全部"),
+                                        .child(tr!(locale, "查看全部", "View all")),
                                 ),
                         )
                         .children(if events.is_empty() {
@@ -838,7 +979,11 @@ impl Sbgui {
                                     .mt(px(12.0))
                                     .text_size(px(BODY))
                                     .text_color(rgb(FAINT))
-                                    .child("客户端还没有产生事件记录。")
+                                    .child(tr!(
+                                        locale,
+                                        "客户端还没有产生事件记录。",
+                                        "The client has not recorded an event yet."
+                                    ))
                                     .into_any_element(),
                             ]
                         } else {

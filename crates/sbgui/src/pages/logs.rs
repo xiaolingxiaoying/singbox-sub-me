@@ -10,11 +10,16 @@ use gpui::{
 use crate::components::{inline_empty, log_row, log_table_header, page_head, work_surface};
 use crate::state::{FieldSpec, InputField, LogLevelFilter, Sbgui, Tone};
 use crate::theme::{BLUE_2, BORDER, CYAN, LABEL, MUTED, RADIUS, RADIUS_CONTROL, SURFACE};
+use crate::tr;
 
 impl Sbgui {
     // ----------------------------------------------------------------- logs
 
     pub(crate) fn logs(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+        let locale = self.locale;
+        // The source column and the copy/export prefix name the same stream, so
+        // they share one label.
+        let client_source = tr!(locale, "客户端", "Client");
         let query = self.field(InputField::LogQuery).text.trim().to_lowercase();
         let level = self.log_level;
         let keep = |line: &str| -> bool {
@@ -60,7 +65,12 @@ impl Sbgui {
         }
         let event_offset = rows.len();
         for (index, line) in events.iter().rev().take(60).rev().enumerate() {
-            rows.push(log_row(event_offset + index, "客户端", line, self.log_wrap));
+            rows.push(log_row(
+                event_offset + index,
+                client_source,
+                line,
+                self.log_wrap,
+            ));
         }
         // "自动滚动" pins the view to the newest line whenever the panel grew;
         // scrolling a list that did not change would fight the user's wheel.
@@ -71,7 +81,11 @@ impl Sbgui {
         let copy_text = kernel
             .iter()
             .map(|line| format!("[sing-box] {line}"))
-            .chain(events.iter().map(|line| format!("[客户端] {line}")))
+            .chain(
+                events
+                    .iter()
+                    .map(|line| format!("[{client_source}] {line}")),
+            )
             .collect::<Vec<_>>()
             .join("\n");
         let mut level_chips: Vec<gpui::AnyElement> = Vec::new();
@@ -100,7 +114,7 @@ impl Sbgui {
                         view.log_level = candidate;
                         cx.notify();
                     }))
-                    .child(candidate.label())
+                    .child(candidate.label(locale))
                     .into_any_element(),
             );
         }
@@ -111,7 +125,12 @@ impl Sbgui {
         // above the table — the same spine the rules page uses.
         work_surface()
             .child(
-                page_head("内核运行日志与客户端事件，按级别与关键字筛选。").child(
+                page_head(tr!(
+                    locale,
+                    "内核运行日志与客户端事件，按级别与关键字筛选。",
+                    "Core log lines and client events, filtered by level and keyword.",
+                ))
+                .child(
                     div()
                         .flex()
                         .flex_wrap()
@@ -120,9 +139,9 @@ impl Sbgui {
                         .child(self.utility_toggle(
                             "log-follow",
                             if self.log_follow {
-                                "自动滚动：开"
+                                tr!(locale, "自动滚动：开", "Auto-scroll: on")
                             } else {
-                                "自动滚动：关"
+                                tr!(locale, "自动滚动：关", "Auto-scroll: off")
                             },
                             self.log_follow,
                             cx,
@@ -131,9 +150,9 @@ impl Sbgui {
                         .child(self.utility_toggle(
                             "log-wrap",
                             if self.log_wrap {
-                                "自动换行：开"
+                                tr!(locale, "自动换行：开", "Word wrap: on")
                             } else {
-                                "自动换行：关"
+                                tr!(locale, "自动换行：关", "Word wrap: off")
                             },
                             self.log_wrap,
                             cx,
@@ -141,7 +160,7 @@ impl Sbgui {
                         ))
                         .child(self.button(
                             "copy-logs",
-                            "复制",
+                            tr!(locale, "复制", "Copy"),
                             Tone::Neutral,
                             None,
                             cx,
@@ -152,7 +171,7 @@ impl Sbgui {
                         ))
                         .child(self.button(
                             "clear-logs",
-                            "清空",
+                            tr!(locale, "清空", "Clear"),
                             Tone::Neutral,
                             None,
                             cx,
@@ -166,11 +185,11 @@ impl Sbgui {
                         ))
                         .child(self.button(
                             "export-logs",
-                            "导出",
+                            tr!(locale, "导出", "Export"),
                             Tone::Neutral,
                             None,
                             cx,
-                            |view, cx| {
+                            move |view, cx| {
                                 let text = view
                                     .snapshot
                                     .core_logs
@@ -180,14 +199,23 @@ impl Sbgui {
                                         view.snapshot
                                             .events
                                             .iter()
-                                            .map(|line| format!("[客户端] {line}")),
+                                            .map(|line| format!("[{client_source}] {line}")),
                                     )
                                     .collect::<Vec<_>>()
                                     .join("\n");
                                 let path = view.data_dir.join("serein-logs.txt");
+                                let locale = view.locale;
                                 view.snapshot.status = match std::fs::write(&path, text) {
-                                    Ok(()) => format!("日志已导出到 {}", path.display()),
-                                    Err(error) => format!("导出日志失败：{error}"),
+                                    Ok(()) => tr!(
+                                        locale,
+                                        format!("日志已导出到 {}", path.display()),
+                                        format!("Logs exported to {}", path.display())
+                                    ),
+                                    Err(error) => tr!(
+                                        locale,
+                                        format!("导出日志失败：{error}"),
+                                        format!("Export failed: {error}")
+                                    ),
                                 };
                                 cx.notify();
                             },
@@ -221,18 +249,21 @@ impl Sbgui {
                                 FieldSpec {
                                     field: InputField::LogQuery,
                                     id: "log-query",
-                                    placeholder: "按关键字过滤日志…",
+                                    placeholder: tr!(
+                                        locale,
+                                        "按关键字过滤日志…",
+                                        "Filter the log by keyword…",
+                                    ),
                                     width: 240.0,
                                 },
                                 window,
                                 cx,
                             ))
-                            .child(
-                                div()
-                                    .text_size(px(LABEL))
-                                    .text_color(rgb(MUTED))
-                                    .child(format!("{} 行", rows.len())),
-                            ),
+                            .child(div().text_size(px(LABEL)).text_color(rgb(MUTED)).child(tr!(
+                                locale,
+                                format!("{} 行", rows.len()),
+                                format!("{} lines", rows.len())
+                            ))),
                     ),
             )
             .child(
@@ -248,7 +279,7 @@ impl Sbgui {
                     .children(if rows.is_empty() {
                         Vec::new()
                     } else {
-                        vec![log_table_header().into_any_element()]
+                        vec![log_table_header(locale).into_any_element()]
                     })
                     .child(
                         div()
@@ -259,8 +290,12 @@ impl Sbgui {
                             .children(if rows.is_empty() {
                                 vec![
                                     inline_empty(
-                                        "暂无日志",
-                                        "启动内核后这里会显示 sing-box 的输出。",
+                                        tr!(locale, "暂无日志", "No log lines"),
+                                        tr!(
+                                            locale,
+                                            "启动内核后这里会显示 sing-box 的输出。",
+                                            "sing-box writes here once the core starts.",
+                                        ),
                                     )
                                     .into_any_element(),
                                 ]

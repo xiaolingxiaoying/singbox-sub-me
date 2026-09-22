@@ -17,11 +17,13 @@ use crate::theme::{
     BLUE_2, BODY, BORDER, BORDER_STRONG, CYAN, FAINT, LABEL, LIST_PAGE, MINT, MUTED, PAD_CARD,
     RADIUS_CONTROL, SECTION, SURFACE, SURFACE_2, TEXT, WEIGHT_SEMIBOLD,
 };
+use crate::tr;
 
 impl Sbgui {
     // ---------------------------------------------------------- connections
 
     pub(crate) fn connections(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+        let locale = self.locale;
         let query = self.field(InputField::ConnFilter).text.trim().to_owned();
         let mut connections = self
             .paused_connections
@@ -47,14 +49,18 @@ impl Sbgui {
             .iter()
             .take(visible)
             .enumerate()
-            .map(|(index, connection)| connection_row(index, connection, cx))
+            .map(|(index, connection)| connection_row(index, connection, locale, cx))
             .collect();
 
         // The kit gives a management page one working surface: the sentence and
         // the tools on top, the table below. The count line and the filter share
         // a row so the "how many" never competes with the search box.
         work_surface()
-            .child(page_head("内核运行期间经过本机代理的连接，实时列在这里。"))
+            .child(page_head(tr!(
+                locale,
+                "内核运行期间经过本机代理的连接，实时列在这里。",
+                "Connections that the running core is proxying right now.",
+            )))
             .child(
                 div()
                     .mt(px(18.0))
@@ -74,13 +80,26 @@ impl Sbgui {
                             .child(status_dot(if total > 0 { MINT } else { FAINT }))
                             .child(div().text_size(px(LABEL)).text_color(rgb(MUTED)).child(
                                 if query.is_empty() {
-                                    format!(
-                                        "{total} 条活动连接 · 代理 {proxied} · 直连 {direct} · 按下载流量排序"
+                                    tr!(
+                                        locale,
+                                        format!(
+                                            "{total} 条活动连接 · 代理 {proxied} · 直连 {direct} · 按下载流量排序"
+                                        ),
+                                        format!(
+                                            "{total} active · proxied {proxied} · direct {direct} · by download"
+                                        )
                                     )
                                 } else {
-                                    format!(
-                                        "匹配 {} / {total} 条 · 按下载流量排序",
-                                        connections.len()
+                                    tr!(
+                                        locale,
+                                        format!(
+                                            "匹配 {} / {total} 条 · 按下载流量排序",
+                                            connections.len()
+                                        ),
+                                        format!(
+                                            "Matched {} / {total} · by download",
+                                            connections.len()
+                                        )
                                     )
                                 },
                             )),
@@ -95,7 +114,11 @@ impl Sbgui {
                                 FieldSpec {
                                     field: InputField::ConnFilter,
                                     id: "conn-filter",
-                                    placeholder: "按主机 / 目标 / 规则筛选…",
+                                    placeholder: tr!(
+                                        locale,
+                                        "按主机 / 目标 / 规则筛选…",
+                                        "Filter by host / destination / rule…",
+                                    ),
                                     width: 240.0,
                                 },
                                 window,
@@ -104,9 +127,9 @@ impl Sbgui {
                             .child(self.utility_toggle(
                                 "pause-connections",
                                 if self.paused_connections.is_some() {
-                                    "继续刷新"
+                                    tr!(locale, "继续刷新", "Resume")
                                 } else {
-                                    "暂停刷新"
+                                    tr!(locale, "暂停刷新", "Pause")
                                 },
                                 self.paused_connections.is_some(),
                                 cx,
@@ -121,9 +144,9 @@ impl Sbgui {
                             .child(self.button(
                                 "close-all",
                                 if self.confirm_close_all {
-                                    "再次点击确认"
+                                    tr!(locale, "再次点击确认", "Click again to confirm")
                                 } else {
-                                    "关闭全部"
+                                    tr!(locale, "关闭全部", "Close all")
                                 },
                                 Tone::Danger,
                                 None,
@@ -163,21 +186,34 @@ impl Sbgui {
                                 .child(
                                     div()
                                         .min_w(px(920.0))
-                                        .child(connection_header())
+                                        .child(connection_header(locale))
                                         .children(rows)
                                         .children(
                                             (connections.len() > LIST_PAGE
                                                 || self.show_all_connections)
                                                 .then(|| {
                                                     self.list_more(
-                                                        if self.show_all_connections {
-                                                            format!("收起，先看前 {LIST_PAGE} 条")
-                                                        } else {
-                                                            format!(
-                                                                "显示全部 {} 条连接",
-                                                                connections.len()
-                                                            )
-                                                        },
+                                                        tr!(
+                                                            locale,
+                                                            if self.show_all_connections {
+                                                                format!("收起，先看前 {LIST_PAGE} 条")
+                                                            } else {
+                                                                format!(
+                                                                    "显示全部 {} 条连接",
+                                                                    connections.len()
+                                                                )
+                                                            },
+                                                            if self.show_all_connections {
+                                                                format!(
+                                                                    "Show fewer: the first {LIST_PAGE}"
+                                                                )
+                                                            } else {
+                                                                format!(
+                                                                    "Show all {} connections",
+                                                                    connections.len()
+                                                                )
+                                                            },
+                                                        ),
                                                         "connections-more",
                                                         cx,
                                                         |view| {
@@ -213,7 +249,7 @@ impl Sbgui {
                                             .text_size(px(SECTION))
                                             .font_weight(WEIGHT_SEMIBOLD)
                                             .text_color(rgb(TEXT))
-                                            .child("连接详情"),
+                                            .child(tr!(locale, "连接详情", "Connection detail")),
                                     )
                                     .child(
                                         div()
@@ -234,19 +270,19 @@ impl Sbgui {
                                             )),
                                     ),
                             )
-                            .child(setting_line("远程目标", &connection_target(connection)))
+                            .child(setting_line(tr!(locale, "远程目标", "Destination"), &connection_target(connection)))
                             .child(setting_line(
-                                "命中规则",
+                                tr!(locale, "命中规则", "Rule"),
                                 if connection.rule.is_empty() {
-                                    "未匹配"
+                                    tr!(locale, "未匹配", "No match")
                                 } else {
                                     &connection.rule
                                 },
                             ))
-                            .child(setting_line("使用节点", &connection_chain(connection)))
-                            .child(setting_line("协议", &connection.metadata.network))
+                            .child(setting_line(tr!(locale, "使用节点", "Node"), &connection_chain(connection, locale)))
+                            .child(setting_line(tr!(locale, "协议", "Protocol"), &connection.metadata.network))
                             .child(setting_line(
-                                "累计流量",
+                                tr!(locale, "累计流量", "Traffic"),
                                 &format!(
                                     "↓ {} · ↑ {}",
                                     human_bytes(connection.download),
@@ -254,9 +290,9 @@ impl Sbgui {
                                 ),
                             ))
                             .child(setting_line(
-                                "建立时间",
+                                tr!(locale, "建立时间", "Started"),
                                 if connection.start.is_empty() {
-                                    "刚刚"
+                                    tr!(locale, "刚刚", "Just now")
                                 } else {
                                     &connection.start
                                 },
@@ -282,7 +318,7 @@ impl Sbgui {
                                         .text_size(px(SECTION))
                                         .font_weight(WEIGHT_SEMIBOLD)
                                         .text_color(rgb(TEXT))
-                                        .child("暂无活动连接"),
+                                        .child(tr!(locale, "暂无活动连接", "No active connections")),
                                 )
                                 .child(
                                     div()
@@ -290,16 +326,18 @@ impl Sbgui {
                                         .text_size(px(BODY))
                                         .line_height(px(21.0))
                                         .text_color(rgb(MUTED))
-                                        .child(
+                                        .child(tr!(
+                                            locale,
                                             "内核运行后，经过本机代理的连接会实时显示在这里。",
-                                        ),
+                                            "Once the core runs, proxied connections appear here live.",
+                                        )),
                                 )
                                 .when(
                                     !(self.snapshot.core_running || self.snapshot.starting),
                                     |block| {
                                         block.child(self.button(
                                             "start-core-from-connections",
-                                            "启动内核",
+                                            tr!(locale, "启动内核", "Start core"),
                                             Tone::Accent,
                                             Some("power"),
                                             cx,
@@ -313,8 +351,12 @@ impl Sbgui {
                         })
                         .when(total > 0, |block| {
                             block.child(inline_empty(
-                                "无匹配连接",
-                                "换个关键字，或按 Esc 清空筛选。",
+                                tr!(locale, "无匹配连接", "No matching connections"),
+                                tr!(
+                                    locale,
+                                    "换个关键字，或按 Esc 清空筛选。",
+                                    "Try another keyword, or press Esc to clear the filter.",
+                                ),
                             ))
                         }),
                 )

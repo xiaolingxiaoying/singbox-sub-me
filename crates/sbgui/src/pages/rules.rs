@@ -17,12 +17,14 @@ use crate::theme::{
     BODY, BORDER, CYAN, FAINT, LABEL, LIST_PAGE, META, MINT, MUTED, RADIUS_CONTROL, ROW_HOVER,
     SURFACE, WEIGHT_MEDIUM,
 };
+use crate::tr;
 
 impl Sbgui {
     // --------------------------------------------------------------- rules
 
     pub(crate) fn rules(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let rules = &self.snapshot.rules;
+        let locale = self.locale;
         let rule_sets = &self.snapshot.rule_sets;
         let count = rules.len();
         let query = self
@@ -47,15 +49,19 @@ impl Sbgui {
         let rows: Vec<gpui::AnyElement> = matched
             .iter()
             .take(visible)
-            .map(|(index, rule)| rule_row(*index, rule))
+            .map(|(index, rule)| rule_row(*index, rule, locale))
             .collect();
 
         work_surface()
             .child(
-                page_head("当前配置里的路由规则：每条决定匹配的流量走哪个出站。").child(
+                page_head(tr!(
+                    locale,
+                    "当前配置里的路由规则：每条决定匹配的流量走哪个出站。",
+                    "The route rules of the active profile: each one sends matching traffic to an outbound."
+                )).child(
                     self.action(
                         "refresh-rules",
-                        "刷新状态",
+                        tr!(locale, "刷新状态", "Refresh"),
                         Tone::Neutral,
                         cx,
                         ClientCommand::Refresh,
@@ -86,12 +92,21 @@ impl Sbgui {
                             .child(div().text_size(px(LABEL)).text_color(rgb(MUTED)).child(
                                 if count > 0 {
                                     if query.is_empty() {
-                                        format!("当前配置 · {count} 条规则")
+                                        tr!(
+                                            locale,
+                                            format!("当前配置 · {count} 条规则"),
+                                            format!("Active profile · {count} rules")
+                                        )
                                     } else {
-                                        format!("匹配 {} / {count} 条规则", matched.len())
+                                        tr!(
+                                            locale,
+                                            format!("匹配 {} / {count} 条规则", matched.len()),
+                                            format!("Matched {} / {count} rules", matched.len())
+                                        )
                                     }
                                 } else {
-                                    "等待激活配置".to_owned()
+                                    tr!(locale, "等待激活配置", "Waiting for an active profile")
+                                        .to_owned()
                                 },
                             )),
                     )
@@ -99,7 +114,11 @@ impl Sbgui {
                         FieldSpec {
                             field: InputField::RuleSearch,
                             id: "rule-search",
-                            placeholder: "搜索匹配条件或出站…",
+                            placeholder: tr!(
+                                locale,
+                                "搜索匹配条件或出站…",
+                                "Search a match or an outbound…",
+                            ),
                             width: 280.0,
                         },
                         window,
@@ -111,8 +130,12 @@ impl Sbgui {
             .children((!rule_sets.is_empty()).then(|| {
                 accordion(
                     "rule-sets-toggle",
-                    "规则集",
-                    format!("{} 个 · 展开查看来源", rule_sets.len()),
+                    tr!(locale, "规则集", "Rule sets"),
+                    tr!(
+                        locale,
+                        format!("{} 个 · 展开查看来源", rule_sets.len()),
+                        format!("{} · expand to see where they come from", rule_sets.len())
+                    ),
                     self.show_rule_sets,
                     cx,
                     |view| view.show_rule_sets = !view.show_rule_sets,
@@ -155,7 +178,7 @@ impl Sbgui {
                                         .text_size(px(META))
                                         .text_color(rgb(MUTED))
                                         .child(if set.url.is_empty() {
-                                            "（本地规则集）".to_owned()
+                                            tr!(locale, "（本地规则集）", "(local rule set)").to_owned()
                                         } else {
                                             set.url.clone()
                                         }),
@@ -176,15 +199,19 @@ impl Sbgui {
                     .child(
                         table_head_row()
                             .child(table_col("#", Some(40.0)))
-                            .child(table_col("类型", Some(96.0)))
-                            .child(table_col("匹配条件", None))
-                            .child(table_col("出站", Some(170.0))),
+                            .child(table_col(tr!(locale, "类型", "Type"), Some(96.0)))
+                            .child(table_col(tr!(locale, "匹配条件", "Match"), None))
+                            .child(table_col(tr!(locale, "出站", "Outbound"), Some(170.0))),
                     )
                     .children(if rows.is_empty() {
                         vec![
                             inline_empty(
-                                "暂无可读规则",
-                                "启动内核或激活订阅后，这里会显示当前配置的路由规则。",
+                                tr!(locale, "暂无可读规则", "No rules to show"),
+                                tr!(
+                                    locale,
+                                    "启动内核或激活订阅后，这里会显示当前配置的路由规则。",
+                                    "Start the core or activate a subscription to load its rules.",
+                                ),
                             )
                             .into_any_element(),
                         ]
@@ -195,11 +222,19 @@ impl Sbgui {
                     // starts capped and opens on demand.
                     .children((matched.len() > LIST_PAGE || self.show_all_rules).then(|| {
                         self.list_more(
-                            if self.show_all_rules {
-                                format!("收起，先看前 {LIST_PAGE} 条")
-                            } else {
-                                format!("显示全部 {} 条规则", matched.len())
-                            },
+                            tr!(
+                                locale,
+                                if self.show_all_rules {
+                                    format!("收起，先看前 {LIST_PAGE} 条")
+                                } else {
+                                    format!("显示全部 {} 条规则", matched.len())
+                                },
+                                if self.show_all_rules {
+                                    format!("Show fewer: the first {LIST_PAGE}")
+                                } else {
+                                    format!("Show all {} rules", matched.len())
+                                },
+                            ),
                             "rules-more",
                             cx,
                             |view| view.show_all_rules = !view.show_all_rules,

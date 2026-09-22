@@ -143,9 +143,12 @@ pub(crate) enum LogLevelFilter {
 }
 
 impl LogLevelFilter {
-    pub(crate) fn label(self) -> &'static str {
+    /// The chip the logs page filters by. Four of the five are level names the
+    /// terminal client shows untranslated, so only the first needs both
+    /// languages.
+    pub(crate) fn label(self, locale: Locale) -> &'static str {
         match self {
-            Self::All => "全部",
+            Self::All => tr!(locale, "全部", "All"),
             // The chips are thresholds, matching the terminal client.
             Self::Debug => "Debug+",
             Self::Info => "Info+",
@@ -180,29 +183,49 @@ impl SettingsSection {
         ]
     }
 
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn label(self, locale: Locale) -> &'static str {
         match self {
-            Self::General => "常规",
-            Self::Network => "网络与端口",
-            Self::Core => "内核",
+            Self::General => tr!(locale, "常规", "General"),
+            Self::Network => tr!(locale, "网络与端口", "Network & ports"),
+            Self::Core => tr!(locale, "内核", "Core"),
             Self::Tun => "TUN",
-            Self::Automation => "自动化",
-            Self::Appearance => "外观",
-            Self::Advanced => "高级",
+            Self::Automation => tr!(locale, "自动化", "Automation"),
+            Self::Appearance => tr!(locale, "外观", "Appearance"),
+            Self::Advanced => tr!(locale, "高级", "Advanced"),
         }
     }
 
     /// Why the section exists, shown under its name in the settings rail so a
     /// row is 66 px of answer instead of one bare word.
-    pub(crate) fn blurb(self) -> &'static str {
+    pub(crate) fn blurb(self, locale: Locale) -> &'static str {
         match self {
-            Self::General => "订阅与本地配置档案",
-            Self::Network => "流量模式、端口与测试地址",
-            Self::Core => "sing-box 版本、镜像与更新",
-            Self::Tun => "虚拟网卡与系统路由",
-            Self::Automation => "自动启动与自动更新",
-            Self::Appearance => "主题与字体",
-            Self::Advanced => "数据目录与配置安全",
+            Self::General => tr!(
+                locale,
+                "订阅与本地配置档案",
+                "Subscriptions and local profiles"
+            ),
+            Self::Network => tr!(
+                locale,
+                "流量模式、端口与测试地址",
+                "Traffic mode, ports and the test address"
+            ),
+            Self::Core => tr!(
+                locale,
+                "sing-box 版本、镜像与更新",
+                "sing-box version, mirror and updates"
+            ),
+            Self::Tun => tr!(
+                locale,
+                "虚拟网卡与系统路由",
+                "Virtual adapter and system routes"
+            ),
+            Self::Automation => tr!(locale, "自动启动与自动更新", "Auto start and auto update"),
+            Self::Appearance => tr!(locale, "主题与字体", "Theme and fonts"),
+            Self::Advanced => tr!(
+                locale,
+                "数据目录与配置安全",
+                "Data directory and config safety"
+            ),
         }
     }
 

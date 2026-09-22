@@ -8,6 +8,7 @@
 //! branch is its own expression, so `format!` works on both sides.
 
 use client_core::clash_api::OutboundMode;
+use client_core::system_proxy::TrafficMode;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Locale {
@@ -36,7 +37,7 @@ impl Locale {
 
 #[macro_export]
 macro_rules! tr {
-    ($locale:expr, $zh:expr, $en:expr) => {
+    ($locale:expr, $zh:expr, $en:expr $(,)?) => {
         if $locale == $crate::lang::Locale::En {
             $en
         } else {
@@ -54,6 +55,13 @@ pub(crate) fn outbound_mode(mode: OutboundMode, locale: Locale) -> &'static str 
         OutboundMode::Rule => tr!(locale, "规则", "Rule"),
         OutboundMode::Global => tr!(locale, "全局", "Global"),
         OutboundMode::Direct => tr!(locale, "直连", "Direct"),
+    }
+}
+
+pub(crate) fn traffic_mode(mode: TrafficMode, locale: Locale) -> &'static str {
+    match mode {
+        TrafficMode::SystemProxy => tr!(locale, "系统代理", "System proxy"),
+        TrafficMode::Tun => "TUN",
     }
 }
 

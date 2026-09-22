@@ -14,12 +14,14 @@ use gpui::{
     StatefulInteractiveElement, Styled, div, px, rgb, svg,
 };
 
+use crate::lang::Locale;
 use crate::state::{Page, Sbgui};
 use crate::theme::{
     AMBER, BLUE, BLUE_2, BODY, BORDER, CYAN, DANGER, DISPLAY, FAINT, GAP_ITEM, LABEL, META, MINT,
     MUTED, PAD_SURFACE_X, PAD_SURFACE_Y, RADIUS, RADIUS_CONTROL, ROW_HOVER, ROW_X, ROW_Y, SECTION,
     SURFACE, SURFACE_2, TEXT, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD,
 };
+use crate::tr;
 
 // Small embedded SVGs keep icon weight consistent and survive standalone packaging.
 pub(crate) fn icon(name: &str, color: u32, size: f32) -> impl IntoElement {
@@ -480,10 +482,13 @@ pub(crate) fn legend(color: u32, label: &'static str, value: u64) -> impl IntoEl
 /// One rule row: the kit's 39 px data row, with the matcher's own type split
 /// out of the condition so a wall of rules scans down two columns instead of
 /// one long sentence.
-pub(crate) fn rule_row(index: usize, rule: &RouteRuleSnapshot) -> gpui::AnyElement {
+pub(crate) fn rule_row(index: usize, rule: &RouteRuleSnapshot, locale: Locale) -> gpui::AnyElement {
     let (kind, condition) = match rule.matcher.split_once(" · ") {
         Some((kind, condition)) => (kind.to_owned(), condition.to_owned()),
-        None => ("条件".to_owned(), rule.matcher.clone()),
+        None => (
+            tr!(locale, "条件", "Condition").to_owned(),
+            rule.matcher.clone(),
+        ),
     };
     div()
         .id(format!("rule-row-{index}"))
@@ -532,7 +537,7 @@ pub(crate) fn rule_row(index: usize, rule: &RouteRuleSnapshot) -> gpui::AnyEleme
         .into_any_element()
 }
 
-pub(crate) fn log_table_header() -> impl IntoElement {
+pub(crate) fn log_table_header(locale: Locale) -> impl IntoElement {
     div()
         .px(px(ROW_X))
         .py(px(10.0))
@@ -544,9 +549,9 @@ pub(crate) fn log_table_header() -> impl IntoElement {
         .border_color(rgb(BORDER))
         .text_size(px(META))
         .text_color(rgb(MUTED))
-        .child(div().w(px(76.0)).child("级别"))
-        .child(div().w(px(110.0)).child("来源"))
-        .child(div().flex_1().child("内容"))
+        .child(div().w(px(76.0)).child(tr!(locale, "级别", "Level")))
+        .child(div().w(px(110.0)).child(tr!(locale, "来源", "Source")))
+        .child(div().flex_1().child(tr!(locale, "内容", "Message")))
 }
 
 pub(crate) fn log_row(index: usize, source: &str, line: &str, wrap: bool) -> gpui::AnyElement {
@@ -604,7 +609,7 @@ pub(crate) fn log_row(index: usize, source: &str, line: &str, wrap: bool) -> gpu
         .into_any_element()
 }
 
-pub(crate) fn connection_header() -> impl IntoElement {
+pub(crate) fn connection_header(locale: Locale) -> impl IntoElement {
     div()
         .min_w(px(920.0))
         .px(px(ROW_X))
@@ -615,18 +620,23 @@ pub(crate) fn connection_header() -> impl IntoElement {
         .bg(rgb(SURFACE_2))
         .text_size(px(META))
         .text_color(rgb(MUTED))
-        .child(div().w(px(150.0)).child("应用 / 入口"))
-        .child(div().flex_1().child("远程目标"))
-        .child(div().w(px(64.0)).child("协议"))
-        .child(div().w(px(150.0)).child("命中规则"))
-        .child(div().w(px(130.0)).child("累计流量"))
-        .child(div().w(px(100.0)).child("建立时间"))
+        .child(
+            div()
+                .w(px(150.0))
+                .child(tr!(locale, "应用 / 入口", "App / inbound")),
+        )
+        .child(div().flex_1().child(tr!(locale, "远程目标", "Destination")))
+        .child(div().w(px(64.0)).child(tr!(locale, "协议", "Protocol")))
+        .child(div().w(px(150.0)).child(tr!(locale, "命中规则", "Rule")))
+        .child(div().w(px(130.0)).child(tr!(locale, "累计流量", "Traffic")))
+        .child(div().w(px(100.0)).child(tr!(locale, "建立时间", "Started")))
         .child(div().w(px(48.0)).child(""))
 }
 
 pub(crate) fn connection_row(
     index: usize,
     connection: &Connection,
+    locale: Locale,
     cx: &mut Context<Sbgui>,
 ) -> gpui::AnyElement {
     let id = connection.id.clone();
@@ -636,7 +646,7 @@ pub(crate) fn connection_row(
     } else if !connection.metadata.process_path.is_empty() {
         connection.metadata.process_path.clone()
     } else {
-        "系统代理".to_owned()
+        tr!(locale, "系统代理", "System proxy").to_owned()
     };
     div()
         .id(index)
@@ -690,7 +700,7 @@ pub(crate) fn connection_row(
                 .truncate()
                 .text_color(rgb(MUTED))
                 .child(if connection.rule.is_empty() {
-                    "未匹配".to_owned()
+                    tr!(locale, "未匹配", "No match").to_owned()
                 } else {
                     connection.rule.clone()
                 }),
@@ -713,7 +723,7 @@ pub(crate) fn connection_row(
                 .truncate()
                 .text_color(rgb(MUTED))
                 .child(if connection.start.is_empty() {
-                    "刚刚".to_owned()
+                    tr!(locale, "刚刚", "Just now").to_owned()
                 } else {
                     connection.start.clone()
                 }),
@@ -730,7 +740,7 @@ pub(crate) fn connection_row(
                     view.send(ClientCommand::CloseConnection(id.clone()));
                     cx.notify();
                 }))
-                .child("断开"),
+                .child(tr!(locale, "断开", "Close")),
         )
         .into_any_element()
 }
@@ -845,10 +855,14 @@ pub(crate) fn empty_state(
             .text_color(rgb(CYAN))
             .hover(|style| style.bg(rgb(SURFACE_2)))
             .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
-                if label.contains("启动") {
+                // The button routes by its own wording, so the test has to
+                // know both languages: an English label matched only against
+                // Chinese text would quietly land on Settings.
+                let lower = label.to_lowercase();
+                if label.contains("启动") || lower.contains("start") {
                     view.send(ClientCommand::StartCore);
                 } else {
-                    view.page = if label.contains("订阅") {
+                    view.page = if label.contains("订阅") || lower.contains("subscription") {
                         Page::Subscriptions
                     } else {
                         Page::Settings
@@ -961,9 +975,9 @@ pub(crate) fn connection_target(connection: &Connection) -> String {
     }
 }
 
-pub(crate) fn connection_chain(connection: &Connection) -> String {
+pub(crate) fn connection_chain(connection: &Connection, locale: Locale) -> String {
     if connection.chains.is_empty() {
-        "直连".to_owned()
+        tr!(locale, "直连", "Direct").to_owned()
     } else {
         connection
             .chains

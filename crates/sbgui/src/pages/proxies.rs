@@ -13,21 +13,31 @@ use crate::theme::{
     BLUE_2, BODY, BORDER, CYAN, DANGER, FAINT, GAP_SECTION, LABEL, META, MUTED, NAV_ACTIVE, RADIUS,
     RADIUS_CONTROL, ROW_X, SURFACE, SURFACE_2, TEXT, WEIGHT_MEDIUM, WEIGHT_NORMAL,
 };
+use crate::tr;
 
 impl Sbgui {
     // -------------------------------------------------------------- proxies
 
     pub(crate) fn proxies(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let groups = &self.snapshot.proxy_groups;
+        let locale = self.locale;
         let Some(group) = self.selected_group() else {
             return div().child(empty_state(
-                "暂无代理组",
+                tr!(locale, "暂无代理组", "No proxy groups yet"),
                 if self.snapshot.core_running {
-                    "正在等待内核返回代理组，请稍后查看。"
+                    tr!(
+                        locale,
+                        "正在等待内核返回代理组，请稍后查看。",
+                        "Waiting for the core to report its groups."
+                    )
                 } else {
-                    "导入订阅并启动内核后，在这里选择节点。"
+                    tr!(
+                        locale,
+                        "导入订阅并启动内核后，在这里选择节点。",
+                        "Import a subscription and start the core to choose a node here."
+                    )
                 },
-                Some("去订阅管理"),
+                Some(tr!(locale, "去订阅管理", "Open subscriptions")),
                 cx,
             ));
         };
@@ -38,6 +48,7 @@ impl Sbgui {
             .trim()
             .to_lowercase();
         let card_view = self.node_card_view;
+        let total_nodes = groups.iter().map(|item| item.members.len()).sum::<usize>();
         let members = group
             .members
             .iter()
@@ -48,11 +59,11 @@ impl Sbgui {
                 let failed = group.failed.contains(member);
                 let delay = group.delays.get(member).copied();
                 let label = if failed {
-                    "超时".to_owned()
+                    tr!(locale, "超时", "Timeout").to_owned()
                 } else {
                     delay
                         .map(|d| format!("{d} ms"))
-                        .unwrap_or_else(|| "测试".to_owned())
+                        .unwrap_or_else(|| tr!(locale, "测试", "Test").to_owned())
                 };
                 let color = if failed { DANGER } else { delay_color(delay) };
                 let group_name = group.name.clone();
@@ -112,7 +123,7 @@ impl Sbgui {
                             .truncate()
                             .child(display_name),
                     )
-                    .children(selected.then(|| pill("当前", CYAN)))
+                    .children(selected.then(|| pill(tr!(locale, "当前", "Active"), CYAN)))
                     .child(
                         div()
                             .id(format!("delay-{index}"))
@@ -205,16 +216,11 @@ impl Sbgui {
                             .justify_between()
                             .gap(px(12.0))
                             .flex_wrap()
-                            .child(
-                                div()
-                                    .text_size(px(META))
-                                    .text_color(rgb(MUTED))
-                                    .child(format!(
-                                        "{} 个代理组 · {} 个节点",
-                                        groups.len(),
-                                        groups.iter().map(|item| item.members.len()).sum::<usize>()
-                                    )),
-                            )
+                            .child(div().text_size(px(META)).text_color(rgb(MUTED)).child(tr!(
+                                locale,
+                                format!("{} 个代理组 · {} 个节点", groups.len(), total_nodes),
+                                format!("{} proxy groups · {} nodes", groups.len(), total_nodes)
+                            )))
                             .child(
                                 div()
                                     .flex()
@@ -224,7 +230,7 @@ impl Sbgui {
                                         FieldSpec {
                                             field: InputField::ProxySearch,
                                             id: "proxy-search",
-                                            placeholder: "搜索节点…",
+                                            placeholder: tr!(locale, "搜索节点…", "Search nodes…"),
                                             width: 210.0,
                                         },
                                         window,
@@ -232,7 +238,7 @@ impl Sbgui {
                                     ))
                                     .child(self.action(
                                         "test-group-toolbar",
-                                        "全部测速",
+                                        tr!(locale, "全部测速", "Test all"),
                                         Tone::Neutral,
                                         cx,
                                         ClientCommand::TestGroup(group.name.clone()),
@@ -247,14 +253,14 @@ impl Sbgui {
                                             .overflow_hidden()
                                             .child(self.view_mode(
                                                 "node-list-view",
-                                                "列表",
+                                                tr!(locale, "列表", "List"),
                                                 !card_view,
                                                 cx,
                                                 false,
                                             ))
                                             .child(self.view_mode(
                                                 "node-card-view",
-                                                "卡片",
+                                                tr!(locale, "卡片", "Cards"),
                                                 card_view,
                                                 cx,
                                                 true,
@@ -269,15 +275,28 @@ impl Sbgui {
                             .px(px(4.0))
                             .text_size(px(META))
                             .text_color(rgb(MUTED))
-                            .child(format!(
-                                "{} · {} 个节点 · {}",
-                                clean_proxy_label(&group.name),
-                                group.members.len(),
-                                if automatic {
-                                    "自动选择，点击节点不会切换"
-                                } else {
-                                    "点击节点即可切换"
-                                }
+                            .child(tr!(
+                                locale,
+                                format!(
+                                    "{} · {} 个节点 · {}",
+                                    clean_proxy_label(&group.name),
+                                    group.members.len(),
+                                    if automatic {
+                                        "自动选择，点击节点不会切换"
+                                    } else {
+                                        "点击节点即可切换"
+                                    }
+                                ),
+                                format!(
+                                    "{} · {} nodes · {}",
+                                    clean_proxy_label(&group.name),
+                                    group.members.len(),
+                                    if automatic {
+                                        "Auto select; clicking a node does not switch"
+                                    } else {
+                                        "Click a node to switch"
+                                    }
+                                )
                             )),
                     )
                     .child(
