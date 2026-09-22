@@ -5,11 +5,13 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -649,13 +651,25 @@ pub(crate) fn initialize_ip_fallback_subscription(fixture: &TempDir, port: u16) 
 }
 
 pub(crate) fn free_high_tcp_port() -> u16 {
+    // Binding an ephemeral port and releasing it does not reserve it: the OS
+    // hands the same number to the next test in the same run, and two servers
+    // then answer each other's clients — one saw ConnectionReset, another a 404
+    // from a subscription it never asked for. Ports are therefore never handed
+    // out twice inside one test process.
+    static TAKEN: std::sync::OnceLock<Mutex<HashSet<u16>>> = std::sync::OnceLock::new();
+    let taken = TAKEN.get_or_init(|| Mutex::new(HashSet::new()));
     loop {
         let listener = TcpListener::bind("127.0.0.1:0").expect("an ephemeral port is available");
         let port = listener
             .local_addr()
             .expect("ephemeral listener has an address")
             .port();
-        if port >= 10000 {
+        drop(listener);
+        if port < 10000 {
+            continue;
+        }
+        let mut guard = taken.lock().expect("port bookkeeping is not poisoned");
+        if guard.insert(port) {
             return port;
         }
     }
