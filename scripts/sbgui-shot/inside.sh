@@ -13,6 +13,7 @@ if [[ "${1:-}" == "--capture" ]]; then
   # sing-box it spawned: the survivor holds the mixed port and the next page
   # then auto-starts into "端口已被占用" and shows an empty table.
   pkill -f '/.config/sbgui/core/sing-box' 2>/dev/null
+  pkill -f slow_origin.py 2>/dev/null
   pkill sbgui 2>/dev/null
   sleep 1
   "$bin" >/tmp/sbgui.log 2>&1 &
@@ -20,12 +21,53 @@ if [[ "${1:-}" == "--capture" ]]; then
   # GPUI needs a mapped window plus a few snapshot ticks (the engine publishes
   # at ~4/s) before the frame is worth looking at.
   sleep 6
-  sleep 9
-  # Known gap: the connections table body is still never captured. clash_api
-  # lists only live connections, and every request the fixture can make either
-  # fails (the demo nodes point at closed local ports) or finishes before the
-  # frame is shot; a held-open CONNECT did not show up either. Verifying that
-  # table needs a reachable outbound, not more screenshot plumbing.
+  if [ "$page" = "connections" ]; then
+    # clash_api lists live connections only, so the table body could never be
+    # photographed: a request that finished before the frame was already gone,
+    # and a tunnel to one of the demo's closed node ports is not a connection.
+    # The slow origin keeps requests open while bytes flow. The URL host must be
+    # an IP literal: `localhost` is sniffed as a domain, ip_is_private does not
+    # match domains, and the request then falls through to the final urltest
+    # group and dies on a dial to a node that is not running.
+    for port in 8098 8099; do
+      python3 /src/scripts/sbgui-shot/fixture/slow_origin.py $port 30 >/tmp/origin-$port.log 2>&1 &
+    done
+    # Wait for every port this depends on, not just a fixed sleep: python needs
+    # a moment to import http.server and bind, and a request fired at a port
+    # that is not listening yet still exits 0 — the proxy answers it with an
+    # error, so the harness reports success while nothing is in flight.
+    for want in 2080 8098 8099; do
+      for _ in $(seq 1 30); do
+        (exec 3<>/dev/tcp/127.0.0.1/$want) 2>/dev/null && break
+        sleep 1
+      done
+    done
+    rm -f /tmp/curl.status
+    for url in http://127.0.0.1:8098/ http://127.0.0.1:8099/ http://127.0.0.1:8099/img; do
+      (curl -s -x http://127.0.0.1:2080 --max-time 40 "$url" -o /dev/null
+       echo "$url exit=$?" >>/tmp/curl.status) &
+    done
+    sleep 6
+    # Three numbers say which half of the chain is broken: whether the request
+    # reached the proxy at all, what the core logged about it, and what the
+    # controller answers. Without them an empty table is only a guess. The
+    # controller endpoint and secret are regenerated on every launch, so they
+    # have to be read back out of the runtime config rather than assumed.
+    echo "    curl: $(tr '\n' ' ' </tmp/curl.status 2>/dev/null)"
+    echo "    core log: $(tail -4 "$HOME/.config/sbgui/cache/core.log" 2>/dev/null | tr '\n' '|')"
+    echo "    api rows: $(python3 - <<'PY' 2>&1 | tail -1
+import json, os, urllib.request
+cfg = json.load(open(os.path.expanduser("~/.config/sbgui/cache/active-config.json")))
+api = cfg["experimental"]["clash_api"]
+req = urllib.request.Request("http://%s/connections" % api["external_controller"],
+                             headers={"Authorization": "Bearer " + api["secret"]})
+rows = json.load(urllib.request.urlopen(req, timeout=5))["connections"]
+print(len(rows), [(c["metadata"]["host"], c["metadata"]["destinationPort"]) for c in rows])
+PY
+)"
+  else
+    sleep 3
+  fi
   if ! import -window root "$out/$size-$page.png" 2>>/tmp/import.log; then
     echo "CAPTURE FAILED for $size-$page"
     tail -5 /tmp/import.log 2>/dev/null | sed 's/^/    import: /'

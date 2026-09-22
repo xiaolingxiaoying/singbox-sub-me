@@ -17,7 +17,16 @@ FIXTURE=${FIXTURE_DIR:-$(dirname "$0")/fixture}
 NOW=$(date +%s)
 
 mkdir -p "$DIR/cache/profiles" "$DIR/core"
-cp "$FIXTURE/active-config.json" "$DIR/cache/active-config.json"
+
+# sing-box resolves a relative cache_file.path against the process's working
+# directory, which under the harness is the /src bind mount. The core then dies
+# on "initialize cache-file: timeout" before it ever listens, so pin the path
+# inside the data directory instead of trusting the cwd.
+seed_config() {
+  sed 's|"path": "cache.db"|"path": "'"$DIR"'/cache.db"|' \
+    "$FIXTURE/active-config.json" >"$1"
+}
+seed_config "$DIR/cache/active-config.json"
 
 # Two profiles: the active one carries traffic metadata headers on purpose so
 # the usage line, the reset countdown and the "never updated" case are all on
@@ -40,7 +49,7 @@ EOF
 
 for name in "家庭实验室" "备用出口"; do
   id=$(printf '%s' "$name" | sha256sum | cut -d' ' -f1)
-  cp "$FIXTURE/active-config.json" "$DIR/cache/profiles/$id.json"
+  seed_config "$DIR/cache/profiles/$id.json"
 done
 
 cat >"$DIR/settings.toml" <<EOF
