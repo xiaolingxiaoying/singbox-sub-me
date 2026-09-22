@@ -16,8 +16,8 @@ use gpui::{
 
 use crate::state::{Page, Sbgui};
 use crate::theme::{
-    AMBER, BLUE_2, BODY, BORDER, CYAN, DANGER, FAINT, LABEL, META, MINT, MUTED, PAD_CARD, RADIUS,
-    ROW_X, ROW_Y, SECTION, SURFACE, SURFACE_2, TEXT, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD,
+    AMBER, BLUE, BLUE_2, BODY, BORDER, CYAN, DANGER, FAINT, LABEL, META, MINT, MUTED, PAD_CARD,
+    RADIUS, ROW_X, ROW_Y, SECTION, SURFACE, SURFACE_2, TEXT, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD,
 };
 
 // Small embedded SVGs keep icon weight consistent and survive standalone packaging.
@@ -169,7 +169,7 @@ pub(crate) fn traffic_panel(snapshot: &ClientSnapshot) -> impl IntoElement {
                 .items_center()
                 .gap(px(20.0))
                 .child(legend(CYAN, "下载", snapshot.download_speed))
-                .child(legend(MINT, "上传", snapshot.upload_speed))
+                .child(legend(BLUE, "上传", snapshot.upload_speed))
                 .child(
                     div()
                         .flex_1()
@@ -259,7 +259,7 @@ fn traffic_chart(samples: Vec<(u64, u64)>, peak: u64) -> impl IntoElement {
                     }
                 }
                 if let Ok(path) = path.build() {
-                    window.paint_path(path, rgb(if upload { MINT } else { CYAN }));
+                    window.paint_path(path, rgb(if upload { BLUE } else { CYAN }));
                 }
             }
         },

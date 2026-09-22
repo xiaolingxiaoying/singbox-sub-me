@@ -7,15 +7,15 @@ use client_core::system_proxy::TrafficMode;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     ClickEvent, Context, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
-    StatefulInteractiveElement, Styled, Window, WindowControlArea, div, img, px, rgb,
+    StatefulInteractiveElement, Styled, Window, WindowControlArea, div, img, px, rgb, rgba,
 };
 
 use crate::components::{clean_proxy_label, icon, side_rate};
 use crate::state::{FieldSpec, Page, Sbgui, Tone};
 use crate::theme::{
-    BODY, BORDER, BRAND_ICON_PATH, CONTENT_MAX, CONTENT_PAD, CYAN, CYAN_DARK, DANGER, FAINT,
-    GAP_ITEM, LABEL, META, MINT, MUTED, NAV_ACTIVE, SECTION, SIDEBAR_W, SURFACE, SURFACE_2, TEXT,
-    TITLE, TITLEBAR_H, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD, tone_colors,
+    BLUE, BODY, BORDER, BRAND_ICON_PATH, CONTENT_MAX, CONTENT_PAD, CYAN, CYAN_DARK, DANGER, FAINT,
+    GAP_ITEM, LABEL, META, MINT, MUTED, NAV_ACTIVE, RADIUS_CONTROL, SECTION, SIDEBAR_W, SURFACE,
+    SURFACE_2, TEXT, TITLE, TITLEBAR_H, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD, tone_colors,
 };
 
 impl Sbgui {
@@ -160,10 +160,21 @@ impl Sbgui {
                             .w_full()
                             .h(px(44.0))
                             .px(px(12.0))
-                            .rounded(px(10.0))
+                            .rounded(px(RADIUS_CONTROL))
                             .flex()
                             .items_center()
                             .gap(px(11.0))
+                            // The selected destination carries a 3 px inset bar.
+                            // It is laid out for every row and only painted when
+                            // selected, so the labels stay in one column.
+                            .child(
+                                div()
+                                    .w(px(3.0))
+                                    .h(px(18.0))
+                                    .flex_shrink_0()
+                                    .rounded(px(2.0))
+                                    .bg(if active { rgb(CYAN) } else { rgba(0x0000_0000) }),
+                            )
                             .bg(rgb(if active { NAV_ACTIVE } else { SURFACE }))
                             .cursor_pointer()
                             .hover(move |style| {
@@ -215,7 +226,7 @@ impl Sbgui {
                     .gap(px(12.0))
                     .text_size(px(META))
                     .child(side_rate("下载", snapshot.download_speed, CYAN))
-                    .child(side_rate("上传", snapshot.upload_speed, MINT)),
+                    .child(side_rate("上传", snapshot.upload_speed, BLUE)),
             )
     }
 
@@ -363,7 +374,7 @@ impl Sbgui {
                     .flex_shrink_0()
                     .px(px(12.0))
                     .py(px(8.0))
-                    .rounded(px(9.0))
+                    .rounded(px(RADIUS_CONTROL))
                     .bg(rgb(SURFACE))
                     .border_1()
                     .border_color(rgb(BORDER))
@@ -437,7 +448,7 @@ impl Sbgui {
                     .id("global-core-menu")
                     .size(px(34.0))
                     .flex_shrink_0()
-                    .rounded(px(9.0))
+                    .rounded(px(RADIUS_CONTROL))
                     .bg(rgb(SURFACE))
                     .border_1()
                     .border_color(rgb(BORDER))
@@ -474,7 +485,7 @@ impl Sbgui {
             .flex_shrink_0()
             .px(px(12.0))
             .py(px(8.0))
-            .rounded(px(9.0))
+            .rounded(px(RADIUS_CONTROL))
             .bg(rgb(SURFACE))
             .border_1()
             .border_color(rgb(BORDER))
@@ -523,7 +534,7 @@ impl Sbgui {
             .id(id)
             .px(px(14.0))
             .py(px(8.0))
-            .rounded(px(9.0))
+            .rounded(px(RADIUS_CONTROL))
             .bg(rgb(bg))
             .border_1()
             .border_color(rgb(edge))
@@ -585,7 +596,7 @@ impl Sbgui {
             .min_w(px(120.0))
             .px(px(12.0))
             .py(px(9.0))
-            .rounded(px(9.0))
+            .rounded(px(RADIUS_CONTROL))
             .bg(rgb(SURFACE))
             .border_1()
             .border_color(rgb(if focused { CYAN } else { BORDER }))

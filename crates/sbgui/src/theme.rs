@@ -30,6 +30,10 @@ pub(crate) const CYAN_DARK: u32 = 0x08766d;
 
 pub(crate) const BLUE_2: u32 = 0xdef4f1;
 
+/// The upload series only. Teal is download and anything actionable; green is
+/// health, so a rate chart needs a third hue rather than reusing one.
+pub(crate) const BLUE: u32 = 0x3b82f6;
+
 pub(crate) const NAV_ACTIVE: u32 = 0xdef4f1;
 
 /// The kit keeps two teal steps only, so the accent's edge shares the darker
@@ -65,6 +69,10 @@ pub(crate) const WEIGHT_SEMIBOLD: FontWeight = FontWeight(600.0);
 // The rhythm follows layout.md: 12 px between surfaces, 18-26 px inside one,
 // and radii kept inside the 7-13 px band.
 pub(crate) const RADIUS: f32 = 13.0;
+
+/// Chips, buttons, fields and nav rows. The kit keeps controls visibly
+/// tighter than surfaces, and nothing goes below 7 px.
+pub(crate) const RADIUS_CONTROL: f32 = 7.0;
 
 pub(crate) const WINDOW_RADIUS: f32 = 16.0;
 
