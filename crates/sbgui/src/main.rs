@@ -34,9 +34,13 @@ use anyhow::Result;
 use client_core::settings::{Profiles, Settings};
 use client_core::{ClientController, settings};
 use gpui::{
-    App, AppContext as _, AssetSource, Bounds, SharedString, TitlebarOptions, Window, WindowBounds,
+    App, AppContext as _, AssetSource, Bounds, SharedString, TitlebarOptions, WindowBounds,
     WindowOptions, px, size,
 };
+// Only the Windows chrome takes a `&Window`; the title bar itself lives in
+// chrome.rs, so an unconditional import would be unused on Linux.
+#[cfg(windows)]
+use gpui::Window;
 use gpui_platform::application;
 
 use crate::state::{Sbgui, env_window_size};
