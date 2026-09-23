@@ -729,6 +729,19 @@ L2（WSL，`-p sbctl -p client-core -p sbtui`）同样 fmt 0 / clippy 0 / **364 
 是同一个 127.0.0.1 地址，洪水会把它们一起限成 429——必须放在该 server 实例的最后，
 或为限流单独起一个实例。
 
+### Phase 3 字段级工作：`tun_stack` 进注册表（已完成）
+
+- `SingBoxVersionProfile` 加 `tun_stack: Option<&'static str>`，五条现有条目全填 `Some("mixed")`；
+  `render/singbox.rs` 不再无条件写字面量，改为按 profile 条件插入。**金标准一字未动**
+  （`stack` 原本就是该对象里最后一个键，条件插入保持同样的键序，两种 map 实现下都成立）。
+- 测试 `the_tun_stack_is_taken_from_the_profile_that_rendered_the_artifact` 两半：
+  逐条 profile 断言"工件里的 stack == 注册表声明的 stack"；再用一份**改过的** profile
+  （`Some("system")` 与 `None`）走同一条渲染路径，断言值跟着变、且声明 None 时不留键。
+  只有前半是必要的——1.15 加进注册表时，唯一的改动点就是这一行。
+- 变异检验：把条件插入改回硬编码 `"mixed"` → 新测试判红。
+- 同一段里剩下的字段（`rule_set_download_detour`、`sniff_override_destination`）本轮未做：
+  前者 1.14 已弃用而后者被 §4.2 真核探针否掉，都不是能靠"加个字段"推进的事。
+
 ### L3（Docker 验收）第一次真的跑起来了：结果是红的，且红在本轮没碰过的地方
 
 按 §6 的配方补了一条可执行脚本 `.scratch/run-l3.sh`（两个 Linux 产物在 WSL ext4 里出，

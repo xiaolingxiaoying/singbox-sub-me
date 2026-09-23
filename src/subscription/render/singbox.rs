@@ -132,9 +132,14 @@ pub(crate) fn sing_box_full(
         "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
         "mtu": 9000,
         "auto_route": true,
-        "strict_route": true,
-        "stack": "mixed"
+        "strict_route": true
     });
+    // Inserted before the legacy `sniff` key below, so the object keeps the
+    // same key order — and therefore the same bytes — as when stack was a
+    // literal here. The goldens are the proof, not this comment.
+    if let Some(stack) = profile.tun_stack {
+        tun["stack"] = json!(stack);
+    }
     if legacy_route {
         // 1.10 has no route rule actions; protocol sniffing is configured on
         // the inbound and DNS is hijacked through a special `dns` outbound.
@@ -459,6 +464,53 @@ fn server_tls(tls_server_name: &str, certificate: &Value, alpn: &[&str]) -> Valu
 
 #[cfg(test)]
 mod tests {
+    use super::sing_box_full;
+    /// Two halves, because a field that is only ever read is not yet honoured:
+    /// every generated profile must carry exactly the stack its own entry
+    /// declares, and a profile that declares none must not inherit one.
+    #[test]
+    fn the_tun_stack_is_taken_from_the_profile_that_rendered_the_artifact() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let (_store, config, _) = seed_direct_subscription(&fixture);
+        let artifacts = generated_artifacts(&config, fixture.path()).expect("artifacts generate");
+        for profile in SING_BOX_VERSION_PROFILES {
+            let name = SubscriptionFormat::SingBoxVersion(profile.version)
+                .artifact_name()
+                .into_owned();
+            let contents = artifacts
+                .iter()
+                .find(|(artifact, _)| *artifact == name)
+                .map(|(_, contents)| contents)
+                .unwrap_or_else(|| panic!("missing profile artifact {name}"));
+            let value: serde_json::Value = serde_json::from_str(contents).expect("profile is JSON");
+            let stack = value["inbounds"][0].get("stack").and_then(|v| v.as_str());
+            assert_eq!(
+                stack, profile.tun_stack,
+                "the {} profile must carry the stack its registry entry declares",
+                profile.version
+            );
+        }
+
+        // The registry says "mixed" for every minor today, so the loop above
+        // alone cannot tell a honoured field from a literal. This is the case
+        // that can: a 1.15 entry that moved on, rendered through the same path.
+        let mut moved_on = *crate::subscription::latest_version_profile();
+        moved_on.tun_stack = Some("system");
+        let nodes = crate::canonical::nodes(&config);
+        let rendered = sing_box_full(&config, &nodes, &moved_on).expect("renders");
+        let value: serde_json::Value = serde_json::from_str(&rendered).expect("rendered JSON");
+        assert_eq!(value["inbounds"][0]["stack"], "system");
+
+        moved_on.tun_stack = None;
+        let rendered = sing_box_full(&config, &nodes, &moved_on).expect("renders");
+        let value: serde_json::Value = serde_json::from_str(&rendered).expect("rendered JSON");
+        assert!(
+            value["inbounds"][0].get("stack").is_none(),
+            "a profile that declares no stack must not inherit one"
+        );
+        assert_eq!(value["inbounds"][0]["type"], "tun");
+    }
+
     #[cfg(unix)]
     use std::fs;
 

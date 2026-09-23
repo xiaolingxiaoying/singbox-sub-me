@@ -113,6 +113,14 @@ pub struct SingBoxVersionProfile {
     pub version: ClientVersion,
     pub supported: &'static str,
     pub notes: &'static str,
+    /// The TUN `stack` this minor accepts, or `None` to omit the key.
+    ///
+    /// `mixed` was deprecated for 1.15, and a value that survives being
+    /// written unconditionally into every profile is exactly how the third
+    /// copy of a stale default outlives the version it belonged to. Keyed per
+    /// minor so a registry entry is the only place a stack change has to be
+    /// made.
+    pub tun_stack: Option<&'static str>,
     /// Pre-1.12 cores only accept the legacy DNS server format (address
     /// strings plus a top-level `dns.fakeip` object); 1.12+ requires the
     /// typed server objects this tool generates for them.
@@ -142,6 +150,7 @@ pub const SING_BOX_VERSION_PROFILES: &[SingBoxVersionProfile] = &[
         route_rule_actions: false,
         supports_anytls: false,
         supports_store_dns: false,
+        tun_stack: Some("mixed"),
     },
     SingBoxVersionProfile {
         version: ClientVersion::new(1, 11),
@@ -151,6 +160,7 @@ pub const SING_BOX_VERSION_PROFILES: &[SingBoxVersionProfile] = &[
         route_rule_actions: true,
         supports_anytls: false,
         supports_store_dns: false,
+        tun_stack: Some("mixed"),
     },
     SingBoxVersionProfile {
         version: ClientVersion::new(1, 12),
@@ -160,6 +170,7 @@ pub const SING_BOX_VERSION_PROFILES: &[SingBoxVersionProfile] = &[
         route_rule_actions: true,
         supports_anytls: true,
         supports_store_dns: false,
+        tun_stack: Some("mixed"),
     },
     SingBoxVersionProfile {
         version: ClientVersion::new(1, 13),
@@ -169,6 +180,7 @@ pub const SING_BOX_VERSION_PROFILES: &[SingBoxVersionProfile] = &[
         route_rule_actions: true,
         supports_anytls: true,
         supports_store_dns: false,
+        tun_stack: Some("mixed"),
     },
     SingBoxVersionProfile {
         version: ClientVersion::new(1, 14),
@@ -178,6 +190,7 @@ pub const SING_BOX_VERSION_PROFILES: &[SingBoxVersionProfile] = &[
         route_rule_actions: true,
         supports_anytls: true,
         supports_store_dns: true,
+        tun_stack: Some("mixed"),
     },
 ];
 
