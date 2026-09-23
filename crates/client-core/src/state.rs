@@ -474,6 +474,15 @@ impl Default for ClientSnapshot {
     }
 }
 
+/// One entry of the client event history, paired with the record that produced
+/// it. `record` is `None` for a line a call site wrote as a bare string (one of
+/// the sites issue 02 has not converted), so a UI can render the coded ones in
+/// its own language and fall back to `text` for the rest.
+pub struct EventLine<'a> {
+    pub text: &'a str,
+    pub record: Option<&'a crate::event_code::EventRecord>,
+}
+
 impl ClientSnapshot {
     /// The group the user's node choice actually lives in. See
     /// [`find_selector_group`].
@@ -489,6 +498,26 @@ impl ClientSnapshot {
         self.event_records
             .back()
             .filter(|record| record.render_zh() == self.status)
+    }
+
+    /// Walks `events` and `event_records` together. The records are an in-order
+    /// subsequence, so a record is consumed only when its rendered Chinese line
+    /// matches the current string; a line with no record yet stays unpaired.
+    pub fn event_lines(&self) -> Vec<EventLine<'_>> {
+        let mut records = self.event_records.iter();
+        let mut pending = records.next();
+        let mut lines = Vec::with_capacity(self.events.len());
+        for text in &self.events {
+            let mut record = None;
+            if let Some(candidate) = pending
+                && candidate.render_zh() == *text
+            {
+                record = Some(candidate);
+                pending = records.next();
+            }
+            lines.push(EventLine { text, record });
+        }
+        lines
     }
 
     /// Pushes a UI-level event line, keeping a bounded history.
@@ -750,6 +779,30 @@ mod tests {
         // record stale; the accessor has to say so.
         snapshot.status = "尚未迁移的状态".to_owned();
         assert_eq!(snapshot.latest_event(), None);
+    }
+
+    /// `event_lines` pairs each string with the record that produced it. The
+    /// records are an in-order subsequence, so a bare string between two coded
+    /// events must stay unpaired without consuming the later record.
+    #[test]
+    fn event_lines_pair_records_with_the_lines_they_produced() {
+        use crate::event_code::{EventCode, EventRecord};
+        let ready = EventRecord::new(EventCode::CoreReadyToStart, Vec::new());
+        let hint = EventRecord::new(EventCode::CoreNotInstalledHint, Vec::new());
+        let mut snapshot = ClientSnapshot::default();
+        snapshot.push_record(ready.clone());
+        snapshot.push_event("尚未迁移的普通事件");
+        snapshot.push_record(hint.clone());
+
+        let lines = snapshot.event_lines();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].record, Some(&ready));
+        assert_eq!(
+            lines[1].record, None,
+            "a bare string between records must not steal the later record"
+        );
+        assert_eq!(lines[1].text, "尚未迁移的普通事件");
+        assert_eq!(lines[2].record, Some(&hint));
     }
 
     #[test]
