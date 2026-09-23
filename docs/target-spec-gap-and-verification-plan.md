@@ -35,8 +35,8 @@
 - **G4** 策略组薄：sing-box 固定 1 selector + 1 urltest + direct，Clash 固定 3 组；无 fallback / load-balancing / 区域分组。
 - **G5** 节点原生协议链接**已生成但从不展示**：`sbctl sub` 只打印订阅 URL（`src/cli/commands/serve.rs:52-121`），`sbctl nodes` 只打印 `protocol: TRANSPORT port`（`src/lifecycle.rs:531-544`），index 页根本不碰 `canonical::nodes`（`src/index_page.rs:37-78`）。
 - **G6** `subscription-userinfo` 缺 `profile-update-interval`（Clash/Verge/Shadowrocket 会认这个键）。
-- **G7** "最新稳定版往前 5 个版本"是**写死的 1.10–1.14 固定带，不会滑动**：`SING_BOX_VERSION_PROFILES` 是常量数组（`src/subscription/profile.rs:136-182`），`latest_version_profile()` 返回 `.last()`（`:185-189`），`sing-box-full.json` 就用它（`src/subscription/artifacts.rs:298`）。上游一发 1.15：服务端装 1.15，`sing-box-full.json` 仍指向 1.14，`sing-box-1.15.json` 直接 404。真核校验存在但被 `#[ignore]` 且环境变量缺失时**静默跳过**（`tests/version_profiles.rs:62-65`）。
-- **G8** 无按源 IP 限流（只有并发上限）。
+- **G7** "最新稳定版往前 5 个版本"是**写死的 1.10–1.14 固定带，不会滑动**：`SING_BOX_VERSION_PROFILES` 是常量数组（`src/subscription/profile.rs:136-182`），`latest_version_profile()` 返回 `.last()`（`:185-189`），`sing-box-full.json` 就用它（`src/subscription/artifacts.rs:298`）。上游一发 1.15：服务端装 1.15，`sing-box-full.json` 仍指向 1.14，`sing-box-1.15.json` 直接 404。真核校验存在但被 `#[ignore]` 且环境变量缺失时**静默跳过**（`tests/version_profiles.rs:62-65`）。**→ 部分关闭**：静默跳过与 CI 带检查已在 Phase 0.5 解决，"已装内核比表更新"改为只告警并在 `status` / `status --json` 暴露已在 Phase 3(4) 解决；仍未做的是 §Phase 3(3) 的运行期选目标（要改公开 `generated_artifacts` 签名）。
+- **G8** 无按源 IP 限流（只有并发上限）。**→ 2026-09-23 已关闭**，见 §Phase 7 与 §11 的 PR(G8) 小节。
 - **G9** TUI 的"覆写配置文件内容"：客户端侧完全没有查看/编辑能力，唯一的 override 是内部自动的（`crates/client-core/src/core.rs:160-184`、`:549-587`）。
 - **G10** TUI 的"显示入站"：整个客户端树没有任何一处读取 `config["inbounds"]`；规则视图还是藏在 Logs 页里的一个开关（`crates/sbtui/src/view/logs.rs:16-20`）。
 - **G11** TUN 不是"开关"：内核运行时切换被直接拒绝（`crates/client-core/src/controller.rs:626-630`），全仓无提权路径、无服务模式。
@@ -768,6 +768,21 @@ L2（WSL，`-p sbctl -p client-core -p sbtui`）同样 fmt 0 / clippy 0 / **364 
 
 (b) `ClientTemplate` 轴（`Standard` 必须字节复现今天）+ G3 规则集及其 `minimal` 内联孪生
 （这两件是同一件事：孪生列表是模板的数据）。
+
+### Phase 3(4)：已装内核高于版本表顶时"只告警、不断服"（已完成）
+
+- `profile.rs` 新增 `band_warning_for`（纯函数，输入 `ClientVersion`）、`parse_kernel_version`、
+  `installed_kernel_version`（唯一一层 I/O，任何失败都 `None`）与 `kernel_band_warning` 组合入口。
+- **只报一个方向**：等于表顶（健康态）与低于表顶都沉默。理由是告警一旦成为背景噪音，
+  真正的缺口就会被淹没；旧内核本来就由各自的 per-minor profile 服务，没有可警告的东西。
+- 暴露面：`sbctl status` 末尾一行 + `status --json` 的 `kernel_version_warning`（键恒在，
+  无告警时为 `null`）。JSON 契约由 `tests/cli` 断言，**把字段删掉那条断言就判红**（变异检验过）。
+  人类可读那半只有一行 `println!`，走的是与 JSON 完全相同的表达式，未单独再测。
+- 比较按 `(major, minor)` 归一：注册表存 minor（`1.14`）而内核报完整版本（`1.14.1`），
+  不归一的话每台正常安装的机器都会天天看到误报。
+- **本项未含**：`sbctl restart` / `regenerate` 成功后的同一条打印（§Phase 3(4) 后半句），
+  以及 §Phase 3(3) 的 `resolve_full_profile`（要先改公开 `generated_artifacts` 的签名）。
+  两者继续记在 task #9。
 
 ### 已验证状态（2026-09-23 收尾）
 

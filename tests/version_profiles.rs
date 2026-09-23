@@ -8,7 +8,10 @@
 use std::path::Path;
 
 use sbctl::config::{DeploymentConfig, ManagedProtocol, SubscriptionMode};
-use sbctl::subscription::{SING_BOX_VERSION_PROFILES, SubscriptionFormat, generated_artifacts};
+use sbctl::subscription::{
+    ClientVersion, SING_BOX_VERSION_PROFILES, SubscriptionFormat, band_warning_for,
+    generated_artifacts, installed_kernel_version, kernel_band_warning, parse_kernel_version,
+};
 
 #[test]
 #[ignore = "requires real sing-box cores; run by the CI sing-box-profiles job"]
@@ -186,4 +189,99 @@ fn server_config_passes_the_latest_real_core_check() {
     sbctl::subscription::check_sing_box_config(Path::new(&binary), server).unwrap_or_else(
         |error| panic!("the latest sing-box rejected the generated server config: {error}"),
     );
+}
+
+/// The band check reports one direction only: a kernel this table cannot
+/// describe. Everything the registry already carries — including its newest
+/// entry, which is the healthy state — stays quiet, so the warning cannot decay
+/// into background noise that a real gap hides inside.
+#[test]
+fn only_a_kernel_newer_than_the_registry_top_draws_a_warning() {
+    let described = sbctl::subscription::latest_version_profile().version;
+    assert!(
+        band_warning_for(described).is_none(),
+        "the version the table is built for must not warn"
+    );
+    assert!(
+        band_warning_for(ClientVersion {
+            major: described.major,
+            minor: described.minor - 1,
+        })
+        .is_none(),
+        "an older kernel is served by its own profile, not by a warning"
+    );
+
+    for beyond in [
+        ClientVersion {
+            major: described.major,
+            minor: described.minor + 1,
+        },
+        ClientVersion {
+            major: described.major + 1,
+            minor: 0,
+        },
+    ] {
+        let warning =
+            band_warning_for(beyond).unwrap_or_else(|| panic!("{beyond} must draw a warning"));
+        assert!(
+            warning.contains(&beyond.to_string()),
+            "the warning has to name what is installed: {warning}"
+        );
+        assert!(
+            warning.contains(&described.to_string()),
+            "the warning has to name what the table describes: {warning}"
+        );
+        assert!(
+            warning.contains("不中断服务"),
+            "the warning must say out loud that nothing is being taken offline: {warning}"
+        );
+    }
+}
+
+/// The registry is keyed on minors, so the minor is all the report line may
+/// yield. A patch release must not read as a window the table failed to follow,
+/// and no unrelated stdout line may pass for a version at all.
+#[test]
+fn the_report_is_read_down_to_the_minor_the_registry_keys_on() {
+    assert_eq!(
+        parse_kernel_version("sing-box version 1.14.1")
+            .map(|version| (version.major, version.minor)),
+        Some((1, 14)),
+        "the patch number is dropped"
+    );
+    assert_eq!(
+        parse_kernel_version("sing-box version 1.15\n")
+            .map(|version| (version.major, version.minor)),
+        Some((1, 15)),
+        "a bare minor still parses"
+    );
+    for junk in [
+        "",
+        "sing-box version ",
+        "sing-box 1.14.1",
+        "1.14.1",
+        "garbage.1",
+        "sing-box version x.y",
+        "sing-box version 1.",
+    ] {
+        assert!(
+            parse_kernel_version(junk).is_none(),
+            "{junk:?} must not look like a version"
+        );
+    }
+}
+
+/// The whole point of routing this through `status` is that it can never become
+/// an outage: no binary, an unreadable binary, and a binary that exits nonzero
+/// all have to be silent rather than an error.
+#[test]
+fn a_kernel_that_cannot_be_asked_stays_silent() {
+    let missing = Path::new(if cfg!(windows) {
+        "N:\\not-a-sing-box.bin"
+    } else {
+        "/not/a/sing-box"
+    });
+    assert!(installed_kernel_version(missing).is_none());
+    assert!(kernel_band_warning(None).is_none());
+    assert!(kernel_band_warning(Some(missing)).is_none());
 }

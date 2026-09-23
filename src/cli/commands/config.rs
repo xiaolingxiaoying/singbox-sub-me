@@ -182,7 +182,7 @@ fn run_config_override(root: &Path, command: OverrideCommand) -> ExitCode {
 
 /// Resolves the sing-box binary for an override validation: an explicit path,
 /// the managed installation path, or a `sing-box` available on `PATH`.
-fn resolve_sing_box_bin(root: &Path, explicit: Option<PathBuf>) -> Option<PathBuf> {
+pub(crate) fn resolve_sing_box_bin(root: &Path, explicit: Option<PathBuf>) -> Option<PathBuf> {
     if let Some(binary) = explicit {
         return Some(binary);
     }

@@ -61,6 +61,12 @@ fn status_json_reports_the_current_period_without_exposing_credentials() {
         !stdout.contains(&credential),
         "status --json must not expose the Subscription credential"
     );
+    // The band check is part of the status contract: the key is always present, null
+    // when the installed kernel is one the version table already describes.
+    assert!(
+        stdout.contains("\"kernel_version_warning\""),
+        "status --json must expose the kernel band check"
+    );
     let status: serde_json::Value =
         serde_json::from_str(&stdout).expect("status --json emits valid JSON");
     assert_eq!(status["configured"], true);
