@@ -129,6 +129,46 @@ kill "$serve_pid" 2>/dev/null || true
 wait "$serve_pid" 2>/dev/null || true
 test "$(stat -c '%Y %s' "$root/var/lib/sbctl/state.json")" = "$state_before" || fail 'subscription reads changed accounting state'
 
+# Rate limiting is a real listener property, not just a unit-test one: once an
+# address exhausts its per-source budget, a correct credential and a wrong one
+# are answered byte-for-byte alike, so waiting cannot be traded for a
+# credential oracle. The flood would also throttle every later assertion that
+# shares 127.0.0.1, so it runs in its own server instance, started after the one
+# above is stopped, with a request cap large enough to outlive the loop.
+"$sbctl" --root "$root" serve --max-requests 2000 >"$work/flood.out" 2>"$work/flood.err" &
+flood_pid=$!
+sleep 1
+throttled_valid=false
+indistinguishable=false
+attempt=0
+while [ "$attempt" -lt 240 ]; do
+  valid=$(curl --silent --show-error --include "http://127.0.0.1:2080/sub/$credential/uri")
+  wrong=$(curl --silent --show-error --include "http://127.0.0.1:2080/sub/wrong-credential/uri")
+  case "$valid" in
+    "HTTP/1.1 429"*)
+      throttled_valid=true
+      if [ "$valid" = "$wrong" ]; then
+        indistinguishable=true
+        break
+      fi
+      ;;
+  esac
+  attempt=$((attempt + 1))
+done
+test "$throttled_valid" = true || fail 'the per-address budget never reached the response path'
+test "$indistinguishable" = true || fail 'a throttled probe could tell a real credential from a wrong one'
+case "$valid" in
+  "HTTP/1.1 5"*) fail "throttled valid response was a server error: $valid" ;;
+esac
+case "$wrong" in
+  "HTTP/1.1 5"*) fail "throttled wrong response was a server error: $wrong" ;;
+esac
+if printf '%s' "$valid" | grep -F -- "$credential" >/dev/null; then
+  fail 'throttled response repeated the credential it is guarding'
+fi
+kill "$flood_pid" 2>/dev/null || true
+wait "$flood_pid" 2>/dev/null || true
+
 # A broken accounting state degrades the response instead of taking the
 # subscription offline: the real artifact is served (200) with no fabricated
 # `subscription-userinfo`, and the diagnostic stays redacted. Invalid
