@@ -586,6 +586,14 @@ fn core_platform() -> (&'static str, &'static str) {
 /// Rewrites the `inbounds` section of a subscription config for the TUI's
 /// local runtime: mixed proxy inbound (system proxy) or tun inbound (global).
 /// Everything else the subscription carries stays untouched.
+///
+/// In TUN mode the profile's *own* tun inbound is reused rather than replaced.
+/// Its `stack`, addresses and route options are what that profile was built
+/// and tested for, and a client that substitutes its own defaults can hand the
+/// kernel a stack the profile has moved away from — the reason sing-box
+/// profiles pinned `stack` per minor in the first place. Keys the profile left
+/// out fall back to this client's defaults, and the tag is forced so the
+/// runtime always has the one it looks up.
 pub fn adapt_inbounds(
     config_text: &str,
     mode: crate::system_proxy::TrafficMode,
@@ -593,7 +601,7 @@ pub fn adapt_inbounds(
 ) -> Result<String> {
     let mut value: serde_json::Value =
         serde_json::from_str(config_text).context("the active configuration is not JSON")?;
-    let mut inbounds = match mode {
+    let inbounds = match mode {
         crate::system_proxy::TrafficMode::SystemProxy => serde_json::json!([
             {
                 "type": "mixed",
@@ -602,8 +610,8 @@ pub fn adapt_inbounds(
                 "listen_port": mixed_port
             }
         ]),
-        crate::system_proxy::TrafficMode::Tun => serde_json::json!([
-            {
+        crate::system_proxy::TrafficMode::Tun => {
+            let mut tun = serde_json::json!({
                 "type": "tun",
                 "tag": "tun-in",
                 "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
@@ -611,8 +619,30 @@ pub fn adapt_inbounds(
                 "auto_route": true,
                 "strict_route": true,
                 "stack": "mixed"
+            });
+            if let Some(profile_tun) = value
+                .get("inbounds")
+                .and_then(|inbounds| inbounds.as_array())
+                .and_then(|inbounds| {
+                    inbounds
+                        .iter()
+                        .find(|inbound| inbound.get("type").and_then(|t| t.as_str()) == Some("tun"))
+                })
+            {
+                if let (Some(tun_object), Some(profile_object)) =
+                    (tun.as_object_mut(), profile_tun.as_object())
+                {
+                    for (key, profile_value) in profile_object {
+                        tun_object.insert(key.clone(), profile_value.clone());
+                    }
+                }
+                // The runtime addresses the local inbound by tag, so a profile
+                // that named it differently must not win that one field.
+                tun["tag"] = serde_json::Value::String("tun-in".to_owned());
+                tun["type"] = serde_json::Value::String("tun".to_owned());
             }
-        ]),
+            serde_json::Value::Array(vec![tun])
+        }
     };
     if let Some(route) = value.get_mut("route").and_then(|r| r.as_object_mut()) {
         // A local runtime always needs the outbound interface autodetected;
@@ -622,7 +652,7 @@ pub fn adapt_inbounds(
             serde_json::Value::Bool(true),
         );
     }
-    value["inbounds"] = std::mem::take(&mut inbounds);
+    value["inbounds"] = inbounds;
     Ok(serde_json::to_string_pretty(&value)?)
 }
 
@@ -872,5 +902,46 @@ mod tests {
         assert_eq!(restart_backoff(3), Duration::from_secs(16));
         assert_eq!(restart_backoff(4), Duration::from_secs(30));
         assert_eq!(restart_backoff(10), Duration::from_secs(30));
+    }
+
+    /// The client used to substitute its own TUN literal for whatever the
+    /// profile declared, so a profile that had moved on to a different stack,
+    /// address range or mtu silently got this client defaults back. The profile
+    /// declaration now wins; the client only fills gaps and keeps the one tag it
+    /// looks the inbound up by.
+    #[test]
+    fn a_profile_that_declares_its_own_tun_inbound_keeps_those_settings() {
+        let profile = r#"{"inbounds":[{"type":"tun","tag":"profile-tun","stack":"system","address":["10.0.0.1/32"],"mtu":1280,"strict_route":false}],"route":{"final":"direct"}}"#;
+        let adapted = adapt_inbounds(profile, crate::system_proxy::TrafficMode::Tun, 2080)
+            .expect("a profile with a tun inbound adapts");
+        let value: serde_json::Value = serde_json::from_str(&adapted).expect("adapted JSON");
+        let tun = &value["inbounds"][0];
+        assert_eq!(tun["stack"], "system", "the profile stack must survive");
+        assert_eq!(tun["address"][0], "10.0.0.1/32", "so must its addresses");
+        assert_eq!(tun["mtu"], serde_json::json!(1280));
+        assert_eq!(tun["strict_route"], serde_json::json!(false));
+        assert_eq!(tun["tag"], "tun-in", "the runtime addresses it by tag");
+        assert_eq!(tun["type"], "tun");
+        assert_eq!(
+            value["route"]["auto_detect_interface"],
+            serde_json::json!(true),
+            "the local runtime still needs the interface autodetected"
+        );
+    }
+
+    /// The other half: a subscription that declares no tun inbound keeps getting
+    /// exactly the defaults this client always synthesised, so the change above
+    /// cannot be an excuse for a behaviour shift on the common path.
+    #[test]
+    fn a_profile_without_a_tun_inbound_still_gets_the_client_defaults() {
+        let profile = r#"{"inbounds":[{"type":"mixed","tag":"x","listen":"127.0.0.1","listen_port":7890}],"route":{}}"#;
+        let adapted = adapt_inbounds(profile, crate::system_proxy::TrafficMode::Tun, 2080)
+            .expect("a subscription without a tun inbound adapts");
+        let value: serde_json::Value = serde_json::from_str(&adapted).expect("adapted JSON");
+        let inbounds = value["inbounds"].as_array().expect("an inbound list");
+        assert_eq!(inbounds.len(), 1, "the local runtime owns the inbound list");
+        assert_eq!(inbounds[0]["stack"], "mixed");
+        assert_eq!(inbounds[0]["tag"], "tun-in");
+        assert_eq!(inbounds[0]["mtu"], serde_json::json!(9000));
     }
 }

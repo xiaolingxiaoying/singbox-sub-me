@@ -769,6 +769,26 @@ L2（WSL，`-p sbctl -p client-core -p sbtui`）同样 fmt 0 / clippy 0 / **364 
 (b) `ClientTemplate` 轴（`Standard` 必须字节复现今天）+ G3 规则集及其 `minimal` 内联孪生
 （这两件是同一件事：孪生列表是模板的数据）。
 
+### Phase 6 / Phase 3 交界处：客户端不再覆盖 profile 自己的 TUN 设置（已完成）
+
+计划里"第三份 `stack:"mixed"` 必须同步，加一条测试断言客户端注入的 TUN inbound 匹配它所启动自的那个
+profile"这一条，实测比预想的更糟：`adapt_inbounds` 在 TUN 模式下**整段替换** `inbounds`，
+所以 profile 自己声明的 `stack`、`address`、`mtu`、`strict_route` 全被客户端的字面量覆盖。
+这不是"两处常量不同步"，是客户端把 profile 已经前进过的选择拉回旧默认值——
+1.15 弃用 `stack:"mixed"` 的时候会以最难发现的方式发生。
+
+- 现在 TUN 模式**复用 profile 的 tun inbound**：profile 声明的键逐个覆盖到默认对象上，
+  缺的仍由客户端补，只有 `tag`（运行时按它找这个入站）与 `type` 由客户端钉住。
+  SystemProxy 模式语义不变：那条路径本就要把 tun 换掉，保留它反而会让流量绕过系统代理。
+- 两条测试：`a_profile_that_declares_its_own_tun_inbound_keeps_those_settings`
+  （profile 说 `system`/1280/自定义地址就必须原样保留）与
+  `a_profile_without_a_tun_inbound_still_gets_the_client_defaults`（没有声明时默认值一字未变，
+  防止这次修改在常见路径上偷改行为）。变异检验：把复用逻辑删掉 → 前者判红
+  （`left: "mixed", right: "system"`），后者仍绿。
+- **本项未含**：`SingBoxVersionProfile` 的 `tun_stack: Option<&str>` 等字段级工作
+  （§Phase 3 "字段级工作" 一段）仍开着——那要的是"服务端按 minor 决定 stack"，
+  与这里"客户端别覆盖服务端已决定的值"是两件事。
+
 ### Phase 3(3)：`sing-box-full.json` 改为**问内核**再选目标（已完成）
 
 - 新增 `select_full_profile`（纯函数，判定通过 `accepts(&Profile, &rendered)` 闭包注入，
