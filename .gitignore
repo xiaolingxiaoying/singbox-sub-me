@@ -34,6 +34,7 @@ dist/
 .impeccable/
 /.zcodeignore
 node_modules/
+.vite/
 
 # Local Linux sing-box binary for the headless GUI harness (never committed).
 .scratch/sbgui-demo-bin/
@@ -54,4 +55,7 @@ node_modules/
 /.scratch/sbgui-*
 !/.scratch/sbgui-progressive-workspace/
 /.scratch/win11-vm/
+# L5 evidence pulled out of the VMware guest (PNGs, manifests, transcripts).
+/.scratch/winvm/
 /.scratch/refactor-structure-20260921/
+/.scratch/proto-flex/
