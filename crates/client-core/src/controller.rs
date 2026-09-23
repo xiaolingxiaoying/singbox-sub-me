@@ -227,6 +227,7 @@ impl Engine {
             let (rules, rule_sets) = crate::state::parse_route_rules(&text);
             snapshot.rules = rules;
             snapshot.rule_sets = rule_sets;
+            snapshot.inbounds = crate::state::parse_inbounds(&text);
         }
         Self {
             dir,
@@ -714,6 +715,7 @@ impl Engine {
                 engine.snapshot.core_runtime_version = Some(started.version);
                 (engine.snapshot.rules, engine.snapshot.rule_sets) =
                     crate::state::parse_route_rules(&started.config);
+                engine.snapshot.inbounds = crate::state::parse_inbounds(&started.config);
                 engine.snapshot.core_running = true;
                 engine.healthy_since = Some(Instant::now());
                 engine.restart_at = None;

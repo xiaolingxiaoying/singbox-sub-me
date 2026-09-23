@@ -317,6 +317,7 @@ mod render_tests {
         let mut delays = HashMap::new();
         delays.insert("东京-A".to_owned(), 42_u64);
         ClientSnapshot {
+            inbounds: Vec::new(),
             core_running: true,
             current_node: Some("东京-A".to_owned()),
             traffic_mode: TrafficMode::Tun,

@@ -190,6 +190,56 @@ pub struct RuleSetSummary {
 /// render. Matching conditions collapse into one human line; both clients
 /// previously parsed this themselves from `cache/active-config.json`, so the
 /// engine now publishes it once and the UIs stay identical.
+/// One inbound of the configuration the core was actually started from.
+///
+/// The client used to describe only what it creates itself (the mixed or tun
+/// inbound it injects), never what the imported subscription declares, so an
+/// operator could not see that a profile listens on something unexpected
+/// without opening the JSON by hand.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct InboundInfo {
+    /// `mixed`, `tun`, `shadowsocks`, ...
+    pub kind: String,
+    pub tag: String,
+    /// The literal `listen` value; empty when the inbound binds every address.
+    pub listen: String,
+    /// 0 when the inbound declares no port (a tun inbound, for instance).
+    pub port: u16,
+}
+
+/// Reads the top-level `inbounds` array. Bad or absent JSON yields no inbounds
+/// rather than an error: this feeds a status view, not a decision.
+pub fn parse_inbounds(config_text: &str) -> Vec<InboundInfo> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(config_text) else {
+        return Vec::new();
+    };
+    let Some(inbounds) = value.get("inbounds").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    inbounds
+        .iter()
+        .map(|inbound| {
+            let text = |key: &str| {
+                inbound
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            InboundInfo {
+                kind: text("type"),
+                tag: text("tag"),
+                listen: text("listen"),
+                port: inbound
+                    .get("listen_port")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|port| u16::try_from(port).ok())
+                    .unwrap_or(0),
+            }
+        })
+        .collect()
+}
+
 pub fn parse_route_rules(config_text: &str) -> (Vec<RouteRuleSnapshot>, Vec<RuleSetSummary>) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(config_text) else {
         return (Vec::new(), Vec::new());
@@ -348,6 +398,9 @@ pub struct ClientSnapshot {
     pub active_connections: usize,
     pub proxy_groups: Vec<ProxyGroupSnapshot>,
     pub connections: ConnectionsSnapshot,
+    /// The inbounds of the configuration the running core started from; empty
+    /// while nothing has been started and no cached configuration exists.
+    pub inbounds: Vec<InboundInfo>,
     pub core_logs: VecDeque<String>,
     pub events: VecDeque<String>,
     /// The structured twin of [`Self::events`]: the authoritative record list a
@@ -409,6 +462,7 @@ impl Default for ClientSnapshot {
             memory_used: 0,
             rules: Vec::new(),
             rule_sets: Vec::new(),
+            inbounds: Vec::new(),
             subscription_usage: None,
             settings: SettingsSnapshot::default(),
             status: "就绪。先导入订阅，再启动内核。".to_owned(),
@@ -680,6 +734,54 @@ mod tests {
             ..Default::default()
         };
         assert!(!selector.is_auto());
+    }
+
+    #[test]
+    fn parse_inbounds_reports_what_the_started_configuration_listens_on() {
+        let config = r#"{"inbounds":[
+            {"type":"mixed","tag":"mixed-in","listen":"127.0.0.1","listen_port":2080},
+            {"type":"tun","tag":"tun-in","address":["172.19.0.1/30"],"stack":"mixed"},
+            {"type":"shadowsocks","tag":"ss","listen":"::","listen_port":8443}
+        ]}"#;
+        let parsed = parse_inbounds(config);
+        assert_eq!(parsed.len(), 3, "every declared inbound is listed");
+        assert_eq!(parsed[0].kind, "mixed");
+        assert_eq!(parsed[0].port, 2080);
+        assert_eq!(parsed[0].listen, "127.0.0.1");
+        assert_eq!(
+            parsed[1].port, 0,
+            "a tun inbound declares no port, and 0 is how that is shown"
+        );
+        assert_eq!(parsed[1].listen, "", "no listen means every address");
+        assert_eq!(parsed[2].listen, "::", "an IPv6 literal survives verbatim");
+    }
+
+    #[test]
+    fn parse_inbounds_tolerates_a_missing_or_unparsable_configuration() {
+        for junk in [
+            "not json",
+            "",
+            "{}",
+            r#"{"inbounds":null}"#,
+            r#"{"inbounds":{}}"#,
+        ] {
+            assert!(
+                parse_inbounds(junk).is_empty(),
+                "{junk:?} has no inbounds to report"
+            );
+        }
+        let odd = r#"{"inbounds":[{"type":"mixed","listen_port":"2080"},{"listen_port":99999}],"route":{}}"#;
+        let parsed = parse_inbounds(odd);
+        assert_eq!(parsed.len(), 2, "an unmapped entry still occupies its row");
+        assert_eq!(
+            parsed[0].port, 0,
+            "a string port is not a number, and guessing would misreport what is listening"
+        );
+        assert_eq!(
+            parsed[1].port, 0,
+            "a port above u16 range is not shown as a port"
+        );
+        assert_eq!(parsed[1].kind, "", "an entry with no type is still counted");
     }
 
     #[test]
