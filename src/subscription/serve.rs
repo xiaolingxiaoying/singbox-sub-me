@@ -388,25 +388,7 @@ fn subscription_http_response(
             // not take the subscription itself offline. The failure is logged
             // redacted and the artifact is served without traffic metadata.
             let userinfo = match crate::traffic::report(store, config) {
-                Ok(traffic) => {
-                    // subscription-userinfo follows the common client convention:
-                    // upload and download are the bytes used in the current period,
-                    // while `total` is the configured monthly allowance. Keep the
-                    // historical used-total value when no allowance is configured so
-                    // unlimited deployments remain informative.
-                    let quota = if traffic.monthly_traffic_limit > 0 {
-                        traffic.monthly_traffic_limit
-                    } else {
-                        traffic.total()
-                    };
-                    Some(format!(
-                        "upload={}; download={}; total={}; expire={}",
-                        traffic.transmitted,
-                        traffic.received,
-                        quota,
-                        traffic.next_reset.timestamp()
-                    ))
-                }
+                Ok(traffic) => Some(subscription_userinfo(&traffic)),
                 Err(error) => {
                     eprintln!(
                         "subscription traffic metadata unavailable: {}",
@@ -429,6 +411,43 @@ fn subscription_http_response(
                 .expect("valid subscription response")
         }
     }
+}
+
+/// How often a client app should re-download the subscription, in hours, as
+/// advertised by `profile-update-interval`.
+///
+/// This is a policy statement toward client apps, not a description of the
+/// server: the deployment regenerates artifacts when its configuration or
+/// nodes change, and a client that ignores the hint costs nothing. Twenty-four
+/// hours matches the cadence the generated profiles already use for their own
+/// remote resources, and going lower would make every client app poll the
+/// credential'd URL on a schedule the operator never asked for.
+const PROFILE_UPDATE_INTERVAL_HOURS: u32 = 24;
+
+/// The `subscription-userinfo` header value.
+///
+/// subscription-userinfo follows the common client convention: upload and
+/// download are the bytes used in the current period, while `total` is the
+/// configured monthly allowance. Keep the historical used-total value when no
+/// allowance is configured so unlimited deployments remain informative.
+///
+/// The key order is the wire contract: client apps parse the four traffic keys
+/// by position-insensitive name but display them in this order, so a new key
+/// goes last and never between the existing ones.
+fn subscription_userinfo(traffic: &crate::traffic::TrafficReport) -> String {
+    let quota = if traffic.monthly_traffic_limit > 0 {
+        traffic.monthly_traffic_limit
+    } else {
+        traffic.total()
+    };
+    format!(
+        "upload={}; download={}; total={}; expire={}; profile-update-interval={}",
+        traffic.transmitted,
+        traffic.received,
+        quota,
+        traffic.next_reset.timestamp(),
+        PROFILE_UPDATE_INTERVAL_HOURS
+    )
 }
 
 /// A scannable SVG QR code of the given format's subscription URL. The QR
@@ -819,6 +838,40 @@ mod tests {
             "the artifact body still serves"
         );
         handler.await.expect("handler completes").expect("no error");
+    }
+
+    /// The header is a wire contract parsed by third-party client apps, so its
+    /// names and order are the product: the four traffic keys stay as they were
+    /// and `profile-update-interval` is appended last rather than inserted.
+    #[test]
+    fn the_userinfo_header_locks_its_key_order_and_names() {
+        use chrono::TimeZone;
+        let report = crate::traffic::TrafficReport {
+            interface: "eth0".into(),
+            received: 36,
+            transmitted: 71,
+            total_adjustment: 0,
+            monthly_traffic_limit: 999,
+            accounting_period: "2026-09".into(),
+            next_reset: chrono::Utc
+                .timestamp_opt(1_767_225_600, 0)
+                .single()
+                .expect("the timestamp is unambiguous"),
+        };
+        assert_eq!(
+            super::subscription_userinfo(&report),
+            "upload=71; download=36; total=999; expire=1767225600; profile-update-interval=24"
+        );
+        let unlimited = crate::traffic::TrafficReport {
+            monthly_traffic_limit: 0,
+            total_adjustment: 5,
+            ..report
+        };
+        assert_eq!(
+            super::subscription_userinfo(&unlimited),
+            "upload=71; download=36; total=112; expire=1767225600; profile-update-interval=24",
+            "without an allowance `total` keeps reporting the bytes used"
+        );
     }
 
     #[tokio::test]

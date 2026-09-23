@@ -102,6 +102,7 @@ for path in sing-box.json sing-box-full.json sing-box-1.12.json sing-box-1.13.js
   response=$(curl --silent --show-error --include "http://127.0.0.1:2080/sub/$credential/$path")
   contains "$response" 'HTTP/1.1 200 OK'
   contains "$response" 'subscription-userinfo: upload=71; download=36; total=999; expire='
+  contains "$response" '; profile-update-interval=24'
 done
 for path in "qr/uri" index; do
   response=$(curl --silent --show-error --include "http://127.0.0.1:2080/sub/$credential/$path")
@@ -178,6 +179,7 @@ sleep 1
 pending_response=$(curl --silent --show-error --include "http://127.0.0.1:2089/sub/$pending_credential/uri")
 contains "$pending_response" 'HTTP/1.1 200 OK'
 contains "$pending_response" 'subscription-userinfo: upload=0; download=0; total=0; expire='
+contains "$pending_response" '; profile-update-interval=24'
 curl --silent --output /dev/null "http://127.0.0.1:2089/sub/wrong-credential/uri"
 
 # status --json reports the current period without exposing the credential.
