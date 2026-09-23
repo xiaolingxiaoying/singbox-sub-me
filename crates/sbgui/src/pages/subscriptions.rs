@@ -51,6 +51,16 @@ impl Sbgui {
     pub(crate) fn subscriptions(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let profiles = self.snapshot.profiles.clone();
         let locale = self.locale;
+        // Below roughly 940px of window the fixed "last updated" column and the
+        // original minimum track widths no longer leave room for the action
+        // buttons, which used to be clipped off the right edge of the table.
+        // Drop that column and let the two text tracks shrink; the horizontal
+        // scroller around the table is the hard guarantee.
+        let narrow = window.viewport_size().width < px(940.0);
+        // The action cell is fixed so the header lines up with the rows: its
+        // content is wider than the "Actions" label, and an auto width would
+        // shift the grow columns per row.
+        let action_width = if narrow { 150.0 } else { 170.0 };
         let usage = self.snapshot.subscription_usage;
         let node_count = self
             .snapshot
@@ -296,7 +306,7 @@ impl Sbgui {
                     // subscription stops updating, and it never fits in one
                     // line, so it truncates rather than wrapping.
                     .child(
-                        grow_col(1.4, 200.0)
+                        grow_col(1.4, if narrow { 120.0 } else { 200.0 })
                             .child(
                                 div()
                                     .flex()
@@ -327,7 +337,7 @@ impl Sbgui {
                     )
                     .child(
                         div()
-                            .w(px(72.0))
+                            .w(px(if narrow { 64.0 } else { 72.0 }))
                             .flex_shrink_0()
                             .flex()
                             .items_center()
@@ -347,17 +357,20 @@ impl Sbgui {
                                 tr!(locale, "未启用", "Inactive")
                             }),
                     )
-                    .child(grow_col(1.2, 170.0).children(usage_cell))
+                    .child(grow_col(1.2, if narrow { 130.0 } else { 170.0 }).children(usage_cell))
+                    .when(!narrow, |row| {
+                        row.child(
+                            div()
+                                .w(px(72.0))
+                                .flex_shrink_0()
+                                .text_size(px(META))
+                                .text_color(rgb(MUTED))
+                                .child(age_label(profile.last_updated, locale)),
+                        )
+                    })
                     .child(
                         div()
-                            .w(px(72.0))
-                            .flex_shrink_0()
-                            .text_size(px(META))
-                            .text_color(rgb(MUTED))
-                            .child(age_label(profile.last_updated, locale)),
-                    )
-                    .child(
-                        div()
+                            .w(px(action_width))
                             .flex()
                             .flex_shrink_0()
                             .items_center()
@@ -424,24 +437,44 @@ impl Sbgui {
                 .border_1()
                 .border_color(rgb(BORDER))
                 .overflow_hidden()
-                .flex()
-                .flex_col()
                 .child(
-                    table_head_row()
-                        .child(grow_col(1.4, 200.0).child(tr!(locale, "名称", "Name")))
-                        .child(table_col(tr!(locale, "状态", "Status"), Some(72.0)))
-                        .child(grow_col(1.2, 170.0).child(tr!(
-                            locale,
-                            "流量与节点",
-                            "Usage & nodes"
-                        )))
-                        .child(table_col(
-                            tr!(locale, "上次更新", "Last updated"),
-                            Some(72.0),
-                        ))
-                        .child(div().flex_shrink_0().child(tr!(locale, "操作", "Actions"))),
-                )
-                .children(rows),
+                    div()
+                        .id("subscriptions-horizontal")
+                        .w_full()
+                        .overflow_x_scroll()
+                        .child(
+                            div()
+                                .min_w(px(600.0))
+                                .child(
+                                    table_head_row()
+                                        .child(
+                                            grow_col(1.4, if narrow { 120.0 } else { 200.0 })
+                                                .child(tr!(locale, "名称", "Name")),
+                                        )
+                                        .child(table_col(
+                                            tr!(locale, "状态", "Status"),
+                                            Some(if narrow { 64.0 } else { 72.0 }),
+                                        ))
+                                        .child(
+                                            grow_col(1.2, if narrow { 130.0 } else { 170.0 })
+                                                .child(tr!(locale, "流量与节点", "Usage & nodes")),
+                                        )
+                                        .when(!narrow, |head| {
+                                            head.child(table_col(
+                                                tr!(locale, "上次更新", "Last updated"),
+                                                Some(72.0),
+                                            ))
+                                        })
+                                        .child(
+                                            div()
+                                                .w(px(action_width))
+                                                .flex_shrink_0()
+                                                .child(tr!(locale, "操作", "Actions")),
+                                        ),
+                                )
+                                .children(rows),
+                        ),
+                ),
         )
     }
 
