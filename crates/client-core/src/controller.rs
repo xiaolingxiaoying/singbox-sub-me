@@ -78,7 +78,17 @@ impl ClientController {
         // Bounded on purpose: UIs poll `snapshot()`, so an event stream that
         // nobody drains must not grow without limit.
         let (event_tx, event_rx) = mpsc::channel(EVENT_BACKLOG);
-        let shared = Arc::new(Mutex::new(ClientSnapshot::default()));
+        // Seed the pre-publish window with a record, not the default Chinese
+        // string: a UI that reads before the engine's first publish must be
+        // able to render its own language.
+        let mut initial = ClientSnapshot::default();
+        initial.push_record(crate::event_code::EventRecord::new(
+            crate::event_code::EventCode::ReadyToImportFirstProfile,
+            vec![],
+        ));
+        initial.status = initial.event_records.back().unwrap().render_zh();
+        initial.status_level = Some(crate::event_code::EventLevel::Info);
+        let shared = Arc::new(Mutex::new(initial));
         let worker = shared.clone();
         // Lets a UI wait for the engine to finish reaping its child instead of
         // racing process exit against it; see [`Self::shutdown`].
@@ -207,19 +217,24 @@ impl Engine {
         let core_version = core_installed
             .then(|| core::detect_version(&core_path).ok())
             .flatten();
-        let mut snapshot = ClientSnapshot::default();
-        snapshot.settings = (&settings).into();
-        snapshot.traffic_mode = settings.traffic_mode;
-        snapshot.core_installed = core_installed;
-        snapshot.core_version = core_version;
-        snapshot.active_profile = profiles
-            .active_profile()
-            .map(|profile| ProfileSummary::from_profile(profile, true));
-        snapshot.profiles = profile_summaries(&profiles);
-        snapshot.status = match &store_unreadable {
-            Some(reason) => format!("本地存储无法读取，改动不会被保存：{reason}"),
-            None if snapshot.core_installed => "就绪。按“启动内核”开始。".to_owned(),
-            None => "就绪。先下载 sing-box 内核，再导入订阅。".to_owned(),
+        let mut snapshot = ClientSnapshot {
+            settings: (&settings).into(),
+            traffic_mode: settings.traffic_mode,
+            core_installed,
+            core_version,
+            active_profile: profiles
+                .active_profile()
+                .map(|profile| ProfileSummary::from_profile(profile, true)),
+            profiles: profile_summaries(&profiles),
+            ..ClientSnapshot::default()
+        };
+        // The initial status is a record, not a bare string, so an English UI
+        // renders it in English. `note_event` still writes `snapshot.status`
+        // (Chinese), keeping the string history byte-identical.
+        let (status_code, status_args) = match &store_unreadable {
+            Some(reason) => (EventCode::StoreUnreadable, vec![reason.clone()]),
+            None if core_installed => (EventCode::CoreReadyToStart, vec![]),
+            None => (EventCode::CoreNotInstalledHint, vec![]),
         };
         // The active configuration from a previous run is still the rules
         // source until the next start rewrites it.
@@ -229,7 +244,7 @@ impl Engine {
             snapshot.rule_sets = rule_sets;
             snapshot.inbounds = crate::state::parse_inbounds(&text);
         }
-        Self {
+        let mut engine = Self {
             dir,
             settings,
             profiles,
@@ -251,7 +266,9 @@ impl Engine {
             pending: None,
             healthy_since: None,
             store_unreadable,
-        }
+        };
+        engine.note_event(status_code, status_args);
+        engine
     }
 
     async fn run(
@@ -1508,9 +1525,14 @@ mod tests {
     async fn a_recorded_event_also_lands_in_the_string_history() {
         let dir = tempfile::tempdir().unwrap();
         let mut engine = test_engine(dir.path()).await;
+        // `test_engine` already carries the engine's own initial-status record,
+        // so pin the growth relative to that baseline rather than assuming an
+        // empty history; the pairing and exact strings are still asserted.
+        let events_before = engine.snapshot.events.len();
+        let records_before = engine.snapshot.event_records.len();
         engine.note_event(EventCode::CoreStatusCheckFailed, vec!["boom".into()]);
-        assert_eq!(engine.snapshot.events.len(), 1);
-        assert_eq!(engine.snapshot.event_records.len(), 1);
+        assert_eq!(engine.snapshot.events.len(), events_before + 1);
+        assert_eq!(engine.snapshot.event_records.len(), records_before + 1);
         assert_eq!(
             engine.snapshot.events.back().map(String::as_str),
             Some("检测内核状态失败: boom"),

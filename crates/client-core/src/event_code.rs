@@ -98,6 +98,16 @@ pub enum EventCode {
     CoreExitedUnexpectedly,
     /// `{0}` is the error from `try_wait` on the core child.
     CoreStatusCheckFailed,
+    /// `{0}` is why the store could not be read; saving is refused until it is
+    /// fixed, so this is the initial status a UI shows when persistence is off.
+    StoreUnreadable,
+    /// The store loaded and the core is installed, so starting it is the next
+    /// step. This is the engine's initial status in that case.
+    CoreReadyToStart,
+    /// The store loaded but no core is installed yet: download it first.
+    CoreNotInstalledHint,
+    /// Nothing has been imported yet: a subscription comes before starting.
+    ReadyToImportFirstProfile,
 }
 
 impl EventCode {
@@ -118,6 +128,10 @@ impl EventCode {
         EventCode::LocalProfileNeedsNoUpdate,
         EventCode::ProfileUrlUpdated,
         EventCode::ProfileDeleted,
+        EventCode::StoreUnreadable,
+        EventCode::CoreReadyToStart,
+        EventCode::CoreNotInstalledHint,
+        EventCode::ReadyToImportFirstProfile,
     ];
 
     pub fn zh(self) -> &'static str {
@@ -136,6 +150,10 @@ impl EventCode {
             Self::LocalProfileNeedsNoUpdate => "本地档案无需更新",
             Self::ProfileUrlUpdated => "已更新档案 {0} 的订阅链接",
             Self::ProfileDeleted => "已删除订阅 {0}",
+            Self::StoreUnreadable => "本地存储无法读取，改动不会被保存：{0}",
+            Self::CoreReadyToStart => "就绪。按“启动内核”开始。",
+            Self::CoreNotInstalledHint => "就绪。先下载 sing-box 内核，再导入订阅。",
+            Self::ReadyToImportFirstProfile => "就绪。先导入订阅，再启动内核。",
         }
     }
 
@@ -157,6 +175,16 @@ impl EventCode {
             Self::LocalProfileNeedsNoUpdate => "The local profile has no link to update",
             Self::ProfileUrlUpdated => "Updated the subscription link of profile {0}",
             Self::ProfileDeleted => "Deleted subscription {0}",
+            Self::StoreUnreadable => {
+                "Local storage could not be read; changes will not be saved: {0}"
+            }
+            Self::CoreReadyToStart => "Ready. Press “Start core” to begin.",
+            Self::CoreNotInstalledHint => {
+                "Ready. Download the sing-box core first, then import a subscription."
+            }
+            Self::ReadyToImportFirstProfile => {
+                "Ready. Import a subscription first, then start the core."
+            }
         }
     }
 
@@ -174,7 +202,11 @@ impl EventCode {
             | Self::CoreStopped
             | Self::LocalProfileNeedsNoUpdate
             | Self::ProfileUrlUpdated
-            | Self::ProfileDeleted => EventLevel::Info,
+            | Self::ProfileDeleted
+            | Self::StoreUnreadable
+            | Self::CoreReadyToStart
+            | Self::CoreNotInstalledHint
+            | Self::ReadyToImportFirstProfile => EventLevel::Info,
         }
     }
 }

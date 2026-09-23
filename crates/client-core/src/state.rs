@@ -481,6 +481,11 @@ impl ClientSnapshot {
         find_selector_group(&self.proxy_groups, &self.rules)
     }
 
+    /// The most recent engine event a UI renders in its own language.
+    pub fn latest_event(&self) -> Option<&crate::event_code::EventRecord> {
+        self.event_records.back()
+    }
+
     /// Pushes a UI-level event line, keeping a bounded history.
     pub fn push_event(&mut self, message: impl Into<String>) {
         self.events.push_back(message.into());
