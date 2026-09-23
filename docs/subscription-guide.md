@@ -101,5 +101,6 @@ sbctl config override clear     # 删除并重新生成
 ## 安全边界
 
 - 凭据只走 URL path；query 参数、错误凭据、未知路径一律 404。
+- 按源 IP 限流：同一地址可在瞬间花掉 60 次请求的突发额度，之后每秒只恢复一次；超出时返回 `429` + `Retry-After`。计费和判定都发生在读 URL 之前，所以**被限流时真凭据与错凭据的响应完全相同**（都带同样的头、空正文、不回显凭据），探测者无法用"是否 429"来反查某个订阅是否存在。ACME 挑战路径不受此限：它由 Let's Encrypt 的服务器发起，掐断它等于让证书续期失败。
 - 所有响应带 `Cache-Control: no-store`；订阅凭据泄露时执行 `sbctl credential rotate` 全部作废。
 - IP fallback 模式为明文 HTTP，仅建议无域名时临时使用。

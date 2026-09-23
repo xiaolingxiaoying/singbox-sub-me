@@ -259,7 +259,7 @@ canonical nodes → template（内置）→ client_rule_profile（是否用 CDN�
 | G5 | `tests/cli`：index 响应含每条节点 URI；`sbctl status nodes --uri` 输出 N 行且**不含 credential**；金标准证明 `uri` 工件字节中性 | U, C, D |
 | G6 | header-shape 测试（键序 + 四个既有键完整 + 新键存在）+ 账期故障降级测试保持"不伪造 header" | U, C, D |
 | G7 | 连续性单测；CI 对 `releases/latest` 的带检查；`resolve_full_profile` 用"拒绝 `.last()` 的桩内核"单测；模拟滑动时发布门判红 | U, C, D + CI |
-| G8 | 令牌桶单测（假时钟，统一 404 保持）；验收腿断言被 flood 时仍返回 404 而非 5xx | U, D |
+| G8 | 令牌桶单测用 fixture 时钟（突发、每秒一个的回补、长时间空闲不回攒超过突发、地址之间互不影响、无欠费的地址不留在表里）；**再加一条过真实 listener 的接线测试**，断言限流确实在请求路径上，且被限流时"真凭据"与"错凭据"的响应**逐字节相同**、不含 credential。实现选择与 §Phase 7 字面不同：超限回 **429 + Retry-After** 而不是 404，理由见 §11 的 PR(G8) 小节 | U；D 腿的洪水断言**尚未加**（见同一小节的坑） |
 | G9 | 合并语义单测（共享 `deep_merge`）、TUI 配置页金标准、带 override 启动的冒烟测试（假核） | U, X, W |
 | G10 | `TestBackend` 对 Rules tab 的金标准（入站 + 规则）；`parse_inbounds` 单测 | U, X |
 | G11 | `SetTrafficMode{restart:true}` 先停后起的单测；**TUN 本身只能在 W 证明** | U, D, W |
@@ -694,6 +694,40 @@ G6 的 header 门在 Linux 上同样为绿，且**在 mihomo 之前**没有让�
    在改动**之前**通过：`mihomo accepted subscription-clash.yaml` + `subscription-clash-1.18.yaml`。
    这条基线是 Phase 2 PR(c)（Clash `sniffers` / `dns-hijack`）的前置判据——没有它，改完再跑就是
    单变量对照缺失（§9 的排期陷阱）。CI 的 `mihomo-profiles` 作业用的是同一个 pin。
+
+### Phase 7（G8）：按源 IP 的令牌桶（已完成）
+
+`serve.rs` 新增 `IpBudget`：单地址瞬间可花掉 `REQUEST_BURST = 60` 次，之后
+`REQUEST_REFILL = 1/秒` 回补，空闲不会回攒超过 60。计费点放在
+`subscription_http_response` **读 method 与 path 之前**，因此：
+
+- 真凭据与错凭据在被限流时得到**逐字节相同**的响应（测试直接断言 `valid == invalid`），
+  探测者换不到"这个订阅是否存在"的信息——§Phase 7 要保的那条性质成立；
+- 与计划字面的偏离：**超限回 `429 + Retry-After`，不是 404**。理由是 404 会让客户端 App
+  把订阅判成"已失效"（不少客户端会显示失效或自动删除档案），而 429 会被按 `Retry-After` 重试；
+  两者对探测者同样不可区分，但对真实用户只有一个是谎报。这条偏离写进了
+  `docs/subscription-guide.md`。
+- **ACME 挑战路径不受限**（`serve_direct_socket_activated` 处注释说明）：那条路径由
+  Let's Encrypt 的验证服务器发起，掐断它等于让证书续期失败，进而把整个 HTTPS 拉下线。
+- 读不到 peer 地址时**放过**（fail open）：fail closed 会在任何平台意外隐藏 peer 时
+  把所有订阅一起停掉。这层是公平/滥用下限，不是安全边界，注释里写明了。
+- 表大小有界：满额地址等同"没见过"，直接丢弃；只有在为新地址计费时做一次清扫（热路径不扫），
+  并且超过 `MAX_TRACKED_PEERS = 4096` 时整表清空——能凑出四千人真实握手的攻击者不是这层防的对象。
+
+**证据**：5 条 fixture 时钟单测 + 1 条过真实 listener 的接线测试；三条变异各自判红——
+把计费点从响应函数里摘掉 → 接线测试红（179 里它一个）；把回补写死成 0 → 恢复测试红；
+把清扫短路 → 表大小测试红（65 ≠ 1）。中途有一次"变异后测试仍绿"其实是**变异版本没被编译出结果、
+grep 拿到的是上一轮输出**，重跑并显式看退出码才判定，属于 §feedback 的同型坑。
+
+宿主门：fmt 0、clippy 0、`-p sbctl --lib` 179 全绿、`cargo test --workspace`
+**364 全绿 / 0 失败**—— burst=60 的取值让既有 CLI 门（单进程最多 17 次请求）与
+`tests/acceptance/verify.sh` 都不受影响，没有把绿门改成红门。
+L2（WSL，`-p sbctl -p client-core -p sbtui`）同样 fmt 0 / clippy 0 / **364 全绿**，
+即令牌桶与两条平台相关门在 Linux 上一起过。
+
+**未完成**：D 腿（`verify.sh`）的洪水断言还没加。加的时候有个坑：同一进程里后续断言用的
+是同一个 127.0.0.1 地址，洪水会把它们一起限成 429——必须放在该 server 实例的最后，
+或为限流单独起一个实例。
 
 ### Phase 2 PR(c) 的 Clash 半边：G2 嗅探（已完成，但**结论与原计划不同**）
 
