@@ -1,6 +1,6 @@
 # 合并分支、统一版本基线
 
-Status: ready-for-agent
+Status: resolved
 Type: task
 
 ## 目标
@@ -24,3 +24,13 @@ Type: task
 - `origin/master` 包含 a5fe586 之后的所有提交与本次修复。
 - `cargo metadata` 报告版本 `0.2.0`。
 - GitHub CI（fmt / python unittest / clippy / workspace test / release_trust / prototype / windows-static / sbtui-macos / sing-box-profiles / mihomo-profiles）全绿。
+
+## Comments
+
+2026-09-23 完成：
+
+- `master` 已 fast-forward 到 `cf71377` 并推送；`origin/master` = `cf71377`。
+- `Cargo.toml`/`Cargo.lock` 已升 `0.2.0`。
+- GitHub Actions 运行 35806947307 在 `cf71377` 上 **success**（7m42s），
+  含 Linux workspace 测试（新增的 S1 回归与 S2 单测在其内）。
+

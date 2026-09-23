@@ -38,6 +38,7 @@ Status: ready-for-agent
 | 1 P0 | `issues/04-production-release-keys.md` | S3：生产公钥/签名 secret（维护者） | — |
 | 1 P0 | `issues/05-acceptance-singbox-rollback-regression.md` | S4：验收脚本补故障回滚与旧断言 | 02 |
 | 1 P0 | `.scratch/sbgui-progressive-workspace/issues/01-connections-poll-flake.md` | G1：连接页轮询停摆 | 01 |
+| 1 P0 | `.scratch/gui-completion/issues/04-subscriptions-narrow-actions.md` | G2：860×640 操作列被裁（已修复） | — |
 | 1 P0 | `.scratch/sbgui-progressive-workspace/issues/05-connections-columns-truncation.md` | G4：连接列截断（并入 G1 轮次） | 01 |
 | 2 服务端 | `issues/06-node-share-links.md` | S7：节点分享链接展示 | 01 |
 | 2 服务端 | `issues/07-mihomo-sniffer-template.md` | S8：mihomo sniffer | 01 |
