@@ -24,7 +24,6 @@ gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "739f
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6.2"
 windows = { version = "0.61.3", features = ["Win32_Graphics_Dwm"] }
-tray-icon = "0.21"
 
 # GPUI gates its Linux desktop backends behind features; without an explicit
 # opt-in a Linux build silently falls back to the headless renderer and never

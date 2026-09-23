@@ -2,8 +2,19 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <!-- Build with WiX v4 after placing sbgui.exe, sbtui.exe and ly.exe in
        packaging/windows/bin. User data under %APPDATA% is intentionally not
-       part of this component and is therefore preserved on uninstall. -->
-  <Package Name="sbtui" Manufacturer="sbtui" Version="0.1.0" UpgradeCode="7A4F2F52-2DA9-4C3B-86D2-8E6F6A8D2E31">
+       part of this component and is therefore preserved on uninstall.
+
+       Package/@Version is what the MSI reports and what MajorUpgrade compares,
+       so it must track the release version in the root Cargo.toml (the version
+       the release tag carries) rather than the sbtui/sbgui crate versions,
+       which are still 0.1.0 placeholders and do not gate packaging.
+
+       wintun.dll is deliberately NOT packaged here: the client resolves it as
+       <data-dir>/core/wintun.dll (crates/client-core/src/settings.rs) and
+       extracts it from the sing-box release zip while downloading the core
+       (crates/client-core/src/core.rs). Shipping a copy in Program Files would
+       be a second, stale source of truth. See packaging/windows/README.md. -->
+  <Package Name="sbtui" Manufacturer="sbtui" Version="0.2.0" UpgradeCode="7A4F2F52-2DA9-4C3B-86D2-8E6F6A8D2E31">
     <MajorUpgrade DowngradeErrorMessage="A newer version of sbtui is already installed." />
     <MediaTemplate EmbedCab="yes" />
     <StandardDirectory Id="ProgramFiles64Folder">
@@ -17,8 +28,12 @@
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder">
       <Directory Id="ApplicationProgramsFolder" Name="sbtui">
+        <!-- One Start Menu entry per launchable binary: the GUI opens the GUI,
+             the TUI opens the TUI. `ly` needs no entry because it is a PATH
+             launcher for the same TUI, not a separate product. -->
         <Component Id="StartMenuShortcut" Guid="*">
-          <Shortcut Id="LaunchShortcut" Name="sbtui" Target="[INSTALLFOLDER]sbgui.exe" />
+          <Shortcut Id="SbguiShortcut" Name="sbgui" Target="[INSTALLFOLDER]sbgui.exe" />
+          <Shortcut Id="SbtuiShortcut" Name="sbtui" Target="[INSTALLFOLDER]sbtui.exe" />
           <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
           <RegistryValue Root="HKCU" Key="Software\sbtui" Name="installed" Type="integer" Value="1" KeyPath="yes" />
         </Component>
