@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 
 use crate::clash_api::{ClashApi, OutboundMode};
 use crate::command::SettingsPatch;
+use crate::event_code::{EventCode, EventRecord};
 use crate::format::now_epoch;
 use crate::settings::{self, Profiles, Settings};
 use crate::state::{ClientSnapshot, ProfileSummary, ProxyGroupSnapshot};
@@ -263,7 +264,7 @@ impl Engine {
         {
             self.snapshot.busy = Some("自动启动内核".into());
             if let Err(error) = self.start_core().await {
-                self.note(format!("自动启动失败: {error}"));
+                self.note_event(EventCode::CoreAutoStartFailed, vec![error.to_string()]);
             }
             if self.pending.is_none() {
                 self.snapshot.busy = None;
@@ -300,7 +301,7 @@ impl Engine {
                     ClientCommand::StopCore | ClientCommand::RestartCore
                 )
             {
-                self.note("操作正在进行，请等待完成或停止内核以取消");
+                self.note_event(EventCode::OperationAlreadyRunning, vec![]);
                 self.publish(&shared);
                 continue;
             }
@@ -467,7 +468,9 @@ impl Engine {
                 self.start_core().await
             }
             ClientCommand::ToggleSystemProxy => self.toggle_system_proxy(),
-            ClientCommand::SetTrafficMode(mode) => self.set_traffic_mode(mode),
+            ClientCommand::SetTrafficMode { mode, restart } => {
+                self.set_traffic_mode(mode, restart).await
+            }
             ClientCommand::SetOutboundMode(mode) => self.set_outbound_mode(mode),
             ClientCommand::SwitchProfile(name) => self.switch_profile(name),
             ClientCommand::SwitchNode { group, node } => self.switch_node(group, node),
@@ -523,16 +526,50 @@ impl Engine {
         }
     }
 
-    fn set_traffic_mode(&mut self, mode: TrafficMode) -> Result<()> {
-        if self.snapshot.core_running {
-            anyhow::bail!("切换流量模式前请先停止内核");
-        }
+    /// Persists and publishes a traffic mode. Split from the restart sequencing
+    /// so the rollback path can call it twice without duplicating the writes.
+    fn apply_traffic_mode(&mut self, mode: TrafficMode) -> Result<()> {
         self.settings.traffic_mode = mode;
         self.save_settings()?;
         self.snapshot.traffic_mode = mode;
         self.snapshot.settings.traffic_mode = mode;
-        self.note(format!("流量模式: {}", mode.label()));
         Ok(())
+    }
+
+    /// Switches the traffic mode, restarting the core when the caller accepts it.
+    ///
+    /// The mode decides the generated `inbounds`, so a running core cannot pick
+    /// it up: previously the change was simply refused, which left the toggle
+    /// reading as a preference for the next launch rather than a switch. If the
+    /// restarted core will not come up in the new mode — TUN without the
+    /// privilege, or a missing `wintun.dll` — the previous mode is restored and
+    /// started again, because ADR-0003 promises that a failed change leaves the
+    /// deployment working rather than half-applied.
+    async fn set_traffic_mode(&mut self, mode: TrafficMode, restart: bool) -> Result<()> {
+        if !self.snapshot.core_running {
+            self.apply_traffic_mode(mode)?;
+            self.note(format!("流量模式: {}", mode.label()));
+            return Ok(());
+        }
+        if !restart {
+            anyhow::bail!("内核正在运行；切换流量模式需要重启内核，请先停止内核或改用带重启的切换");
+        }
+        let previous = self.settings.traffic_mode;
+        self.apply_traffic_mode(mode)?;
+        self.stop_core().await;
+        match self.start_core().await {
+            Ok(()) => {
+                self.note(format!("流量模式: {}（内核已重启）", mode.label()));
+                Ok(())
+            }
+            Err(error) => {
+                eprintln!("切换流量模式失败: {error}");
+                self.apply_traffic_mode(previous)?;
+                self.stop_core().await;
+                let _ = self.start_core().await;
+                Err(anyhow::anyhow!("切换流量模式失败，已恢复原模式: {error}"))
+            }
+        }
     }
 
     fn set_outbound_mode(&mut self, mode: OutboundMode) -> Result<()> {
@@ -563,7 +600,7 @@ impl Engine {
             .active_profile()
             .map(|profile| ProfileSummary::from_profile(profile, true));
         self.snapshot.profiles = profile_summaries(&self.profiles);
-        self.note(format!("已激活档案 {name}"));
+        self.note_event(EventCode::ProfileActivated, vec![name.to_string()]);
         Ok(())
     }
 
@@ -632,7 +669,7 @@ impl Engine {
         self.save_settings()?;
         self.snapshot.settings = (&self.settings).into();
         self.snapshot.traffic_mode = self.settings.traffic_mode;
-        self.note("设置已保存");
+        self.note_event(EventCode::SettingsSaved, vec![]);
         Ok(())
     }
 
@@ -721,7 +758,7 @@ impl Engine {
         self.snapshot.connections = Default::default();
         self.snapshot.active_connections = 0;
         self.snapshot.current_node = None;
-        self.note("内核已停止");
+        self.note_event(EventCode::CoreStopped, vec![]);
     }
 
     fn toggle_system_proxy(&mut self) -> Result<()> {
@@ -789,7 +826,7 @@ impl Engine {
             .context("没有激活的订阅档案")?
             .clone();
         if profile.url.is_empty() {
-            self.note("本地档案无需更新");
+            self.note_event(EventCode::LocalProfileNeedsNoUpdate, vec![]);
             return Ok(());
         }
         let mirror = self.settings.mirror.clone();
@@ -960,7 +997,7 @@ impl Engine {
         profile.source = source;
         self.save_profiles()?;
         self.snapshot.profiles = profile_summaries(&self.profiles);
-        self.note(format!("已更新档案 {name} 的订阅链接"));
+        self.note_event(EventCode::ProfileUrlUpdated, vec![name.to_string()]);
         Ok(())
     }
 
@@ -993,7 +1030,7 @@ impl Engine {
             .active_profile()
             .map(|profile| ProfileSummary::from_profile(profile, true));
         self.snapshot.subscription_usage = None;
-        self.note(format!("已删除订阅 {name}"));
+        self.note_event(EventCode::ProfileDeleted, vec![name.to_string()]);
         Ok(())
     }
 
@@ -1007,30 +1044,42 @@ impl Engine {
                 return;
             }
             self.reset_restarts_after_stable_run();
-            let now = Instant::now();
-            if now.duration_since(self.last_connections_at) >= CONNECTIONS_EVERY {
-                self.last_connections_at = now;
+            // A refresh slot is stamped only once its request has run to
+            // completion, and the stamp is the completion instant: the engine's
+            // inner `select!` drops this future whenever a command arrives, and
+            // a stamp taken before the await would burn the slot while nothing
+            // was fetched -- freezing traffic, memory and the connection table
+            // together even though the core is healthy.
+            if Instant::now().duration_since(self.last_connections_at) >= CONNECTIONS_EVERY {
                 self.refresh_connections().await;
+                self.last_connections_at = Instant::now();
             }
-            if now.duration_since(self.last_traffic_at) >= TRAFFIC_EVERY {
-                self.last_traffic_at = now;
+            if Instant::now().duration_since(self.last_traffic_at) >= TRAFFIC_EVERY {
                 self.refresh_traffic().await;
                 match self.api.memory().await {
                     Ok(memory) => self.snapshot.memory_used = memory,
                     Err(_) => self.snapshot.memory_used = 0,
                 }
+                self.last_traffic_at = Instant::now();
             }
-            if now.duration_since(self.last_proxies_at) >= PROXIES_EVERY {
-                self.last_proxies_at = now;
+            if Instant::now().duration_since(self.last_proxies_at) >= PROXIES_EVERY {
                 if let Err(error) = self.refresh_proxies().await {
-                    self.note(format!("刷新代理组失败: {error}"));
+                    self.note_event(EventCode::ProxyGroupRefreshFailed, vec![error.to_string()]);
                 }
+                self.last_proxies_at = Instant::now();
             }
-            if self.pending.is_none()
-                && self.auto_update_due()
-                && let Err(error) = self.update_subscription().await
-            {
-                self.note(format!("自动更新订阅失败: {error}"));
+            let auto_update = self.pending.is_none() && self.auto_update_due();
+            if auto_update {
+                if let Err(error) = self.update_subscription().await {
+                    self.note_event(
+                        EventCode::SubscriptionAutoUpdateFailed,
+                        vec![error.to_string()],
+                    );
+                }
+                // Paired with `auto_update_due` being side-effect free: this is
+                // the longest request in the pass, so it is the one most likely
+                // to be dropped mid-flight.
+                self.last_auto_update = Some(Instant::now());
             }
         } else {
             // Drop stale runtime state that only makes sense while the core runs.
@@ -1043,7 +1092,7 @@ impl Engine {
             {
                 self.restart_at = None;
                 if let Err(error) = self.start_core().await {
-                    self.note(format!("自动重启失败: {error}"));
+                    self.note_event(EventCode::CoreAutoRestartFailed, vec![error.to_string()]);
                     self.schedule_restart();
                 }
             }
@@ -1083,7 +1132,9 @@ impl Engine {
                 ));
                 self.snapshot.connections = snapshot;
             }
-            Err(error) => self.note(format!("刷新连接失败: {error}")),
+            Err(error) => {
+                self.note_event(EventCode::ConnectionRefreshFailed, vec![error.to_string()])
+            }
         }
     }
 
@@ -1108,11 +1159,10 @@ impl Engine {
             group.delays = merged.clone();
             group.failed = self.failed.clone();
         }
-        self.snapshot.current_node = snapshots
-            .iter()
-            .find(|group| group.name == crate::clash_api::SELECTOR_TAG)
-            .map(|group| group.current.clone())
-            .or_else(|| self.snapshot.current_node.clone());
+        self.snapshot.current_node =
+            crate::state::find_selector_group(&snapshots, &self.snapshot.rules)
+                .map(|group| group.current.clone())
+                .or_else(|| self.snapshot.current_node.clone());
         self.snapshot.proxy_groups = snapshots;
         self.snapshot.outbound_mode = self.api.mode().await.unwrap_or(self.snapshot.outbound_mode);
         Ok(())
@@ -1142,13 +1192,13 @@ impl Engine {
         match handle.child.try_wait() {
             Ok(Some(status)) => {
                 self.child = None;
-                self.note(format!("内核意外退出（{status}），准备自动重启"));
+                self.note_event(EventCode::CoreExitedUnexpectedly, vec![status.to_string()]);
                 self.schedule_restart();
                 true
             }
             Ok(None) => false,
             Err(error) => {
-                self.note(format!("检测内核状态失败: {error}"));
+                self.note_event(EventCode::CoreStatusCheckFailed, vec![error.to_string()]);
                 false
             }
         }
@@ -1251,7 +1301,7 @@ impl Engine {
         self.log_offset = self.log_offset.saturating_add(consumed as u64);
     }
 
-    fn auto_update_due(&mut self) -> bool {
+    fn auto_update_due(&self) -> bool {
         let minutes = self.settings.auto_update_minutes;
         if minutes == 0 || self.profiles.active.is_none() {
             return false;
@@ -1259,20 +1309,30 @@ impl Engine {
         // The interval comes straight from a text field, so a huge value must
         // degrade to "effectively never" rather than overflow.
         let interval = Duration::from_secs(minutes.saturating_mul(60));
-        let due = match self.last_auto_update {
+        match self.last_auto_update {
             Some(last) => last.elapsed() >= interval,
             None => true,
-        };
-        if due {
-            self.last_auto_update = Some(Instant::now());
         }
-        due
     }
 
     fn note(&mut self, message: impl Into<String>) {
         let message = message.into();
         self.snapshot.status = message.clone();
+        // No code, so no level: the UIs keep their legacy guess for this line.
+        self.snapshot.status_level = None;
         self.snapshot.push_event(message);
+    }
+
+    /// The structured form of [`Self::note`]: the record carries the code and
+    /// its arguments, and the Chinese line is derived from them so today's
+    /// string-only consumers keep working while the vocabulary is filled in.
+    /// Prefer this for any new engine event — a literal here is what the
+    /// English interface cannot render.
+    fn note_event(&mut self, code: EventCode, args: Vec<String>) {
+        let record = EventRecord::new(code, args);
+        self.snapshot.status_level = Some(record.level());
+        self.snapshot.status = record.render_zh();
+        self.snapshot.push_record(record);
     }
 }
 
@@ -1372,6 +1432,216 @@ mod tests {
         engine.healthy_since = Some(Instant::now() - STABLE_RUN);
         engine.reset_restarts_after_stable_run();
         assert_eq!(engine.restart_attempts, 0);
+    }
+
+    /// A clash_api stub whose `/connections` reply is deliberately slow, so a
+    /// test can drop a `poll()` while the request is in flight.
+    async fn slow_connections_api(count: usize) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut request = [0_u8; 1024];
+                    let read = stream.read(&mut request).await.unwrap_or(0);
+                    let first_line = String::from_utf8_lossy(&request[..read])
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .to_owned();
+                    let path = first_line.split_whitespace().nth(1).unwrap_or_default();
+                    let body = if path.starts_with("/connections") {
+                        tokio::time::sleep(Duration::from_millis(400)).await;
+                        serde_json::json!({
+                            "uploadTotal": 1_000 * count as u64,
+                            "downloadTotal": 2_000 * count as u64,
+                            "connections": (0..count)
+                                .map(|index| serde_json::json!({
+                                    "id": index.to_string(),
+                                    "upload": index,
+                                    "download": index,
+                                    "start": "2026-09-23T00:00:00Z",
+                                    "rule": "MATCH",
+                                    "chains": ["🚀节点选择"],
+                                    "metadata": {
+                                        "destinationIP": "1.1.1.1",
+                                        "process": "fixture",
+                                    },
+                                }))
+                                .collect::<Vec<_>>(),
+                        })
+                        .to_string()
+                    } else {
+                        "{}".to_owned()
+                    };
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: \
+                         {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        base
+    }
+
+    /// `poll()` is cancelled whenever a command wins the engine's inner
+    /// `select!`, so any refresh slot it consumed without finishing the
+    /// request must remain open. Otherwise traffic, memory and the connection
+    /// table freeze together while the core is demonstrably fine.
+    /// A core that comes up and dies again immediately must not buy itself a
+    /// fresh allowance of restarts. Only a run long enough to count as healthy
+    /// clears the counter; otherwise a crash loop whose rounds each last under
+    /// `STABLE_RUN` would retry forever and hide a persistent cause such as a
+    /// stale core still bound to the clash_api port.
+    /// While the vocabulary is being filled in, the event history exists twice:
+    /// strings for today's consumers, records for the language-aware ones. If
+    /// they drift, the English and Chinese interfaces show different histories,
+    /// so the pairing is pinned here along with the exact Chinese text each
+    /// converted call site used to build by hand.
+    #[tokio::test]
+    async fn a_recorded_event_also_lands_in_the_string_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = test_engine(dir.path()).await;
+        engine.note_event(EventCode::CoreStatusCheckFailed, vec!["boom".into()]);
+        assert_eq!(engine.snapshot.events.len(), 1);
+        assert_eq!(engine.snapshot.event_records.len(), 1);
+        assert_eq!(
+            engine.snapshot.events.back().map(String::as_str),
+            Some("检测内核状态失败: boom"),
+            "the rendered Chinese line must be the string the call site replaced"
+        );
+        assert_eq!(engine.snapshot.status, "检测内核状态失败: boom");
+        assert_eq!(
+            engine.snapshot.event_records.back().unwrap().render_en(),
+            "Could not read the core's status: boom"
+        );
+    }
+
+    /// The toggle must be a switch, not a preference for the next launch: with
+    /// the core running, a caller that has not accepted a restart is refused
+    /// rather than silently deferred, and nothing is persisted.
+    #[tokio::test]
+    async fn a_mode_switch_while_the_core_runs_is_refused_without_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = test_engine(dir.path()).await;
+        engine.snapshot.core_running = true;
+        assert_eq!(engine.settings.traffic_mode, TrafficMode::SystemProxy);
+        let error = engine
+            .apply(ClientCommand::SetTrafficMode {
+                mode: TrafficMode::Tun,
+                restart: false,
+            })
+            .await
+            .expect_err("a running core must refuse a switch that has not accepted a restart");
+        // Asserting only `is_err` is not enough: attempting the switch and having
+        // the restarted core fail produces an error too, and the rollback makes
+        // the settings assertions pass. The refusal has to name the way out.
+        let message = error.to_string();
+        assert!(
+            message.contains("重启内核"),
+            "the refusal must name the action required, got: {message}"
+        );
+        assert_eq!(
+            engine.settings.traffic_mode,
+            TrafficMode::SystemProxy,
+            "a refused switch must not persist the mode"
+        );
+        assert_eq!(engine.snapshot.traffic_mode, TrafficMode::SystemProxy);
+    }
+
+    #[tokio::test]
+    async fn a_mode_switch_with_the_core_stopped_applies_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = test_engine(dir.path()).await;
+        engine
+            .apply(ClientCommand::SetTrafficMode {
+                mode: TrafficMode::Tun,
+                restart: true,
+            })
+            .await
+            .expect("a stopped core applies the mode directly");
+        assert_eq!(engine.settings.traffic_mode, TrafficMode::Tun);
+        assert_eq!(engine.snapshot.traffic_mode, TrafficMode::Tun);
+        assert_eq!(engine.snapshot.settings.traffic_mode, TrafficMode::Tun);
+        // The persisted store, not just memory: the mode has to survive the
+        // client exiting without a cooperative stop.
+        let reloaded = settings::Settings::load_or_create(&engine.dir).expect("settings reload");
+        assert_eq!(reloaded.traffic_mode, TrafficMode::Tun);
+    }
+
+    #[tokio::test]
+    async fn a_brief_success_does_not_reset_the_restart_allowance() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = test_engine(dir.path()).await;
+        engine.restart_attempts = 3;
+        engine.healthy_since = Some(Instant::now());
+        engine.reset_restarts_after_stable_run();
+        assert_eq!(
+            engine.restart_attempts, 3,
+            "a sub-STABLE_RUN success must not clear the counter"
+        );
+        engine.schedule_restart();
+        assert_eq!(
+            engine.restart_attempts, 4,
+            "the next crash continues the same allowance rather than restarting at 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_poll_does_not_consume_the_connections_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = slow_connections_api(3).await;
+        let mut engine = test_engine(dir.path()).await;
+        engine.api = ClashApi::new(&base);
+        engine.snapshot.core_running = true;
+        engine.last_connections_at = Instant::now() - CONNECTIONS_EVERY;
+
+        {
+            let poll = engine.poll();
+            tokio::pin!(poll);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(80), poll.as_mut())
+                    .await
+                    .is_err(),
+                "the stub should still be in flight when the future is dropped"
+            );
+        }
+        assert_eq!(engine.snapshot.active_connections, 0);
+
+        engine.poll().await;
+        assert_eq!(
+            engine.snapshot.active_connections, 3,
+            "a cancelled poll must not spend the slot without fetching \
+             (active_connections: {})",
+            engine.snapshot.active_connections
+        );
+    }
+
+    /// Guard for the fix above, not a red-first repro: deferring the stamp must
+    /// not turn an unreachable core into a retry loop every tick. A request that
+    /// fails on its own still consumes its slot.
+    #[tokio::test]
+    async fn a_failed_refresh_still_consumes_its_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = test_engine(dir.path()).await;
+        let addr = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap()
+        };
+        engine.api = ClashApi::new(&format!("http://{addr}"));
+        engine.snapshot.core_running = true;
+        let seeded = Instant::now() - CONNECTIONS_EVERY;
+        engine.last_connections_at = seeded;
+        engine.poll().await;
+        assert!(
+            engine.last_connections_at > seeded,
+            "a refused request must still consume the slot, or every tick \
+             re-requests a dead core"
+        );
     }
 
     #[tokio::test]

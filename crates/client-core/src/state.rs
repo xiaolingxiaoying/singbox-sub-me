@@ -62,6 +62,39 @@ impl From<ProxyGroup> for ProxyGroupSnapshot {
     }
 }
 
+/// The group that holds the user's manual node choice.
+///
+/// Both clients used to compare against the literal `🚀节点选择`, which is only
+/// the tag *this project's own sing-box profile* emits: the Mihomo artifact
+/// names the same idea `🌍选择代理节点`, and a third-party subscription names it
+/// something else again, so "current node" quietly went stale there. The core
+/// already answers the question through `route.final`, so ask it first, then
+/// fall back to a group's *shape* rather than to another hard-coded name.
+pub fn find_selector_group<'a>(
+    groups: &'a [ProxyGroupSnapshot],
+    rules: &[RouteRuleSnapshot],
+) -> Option<&'a ProxyGroupSnapshot> {
+    let final_outbound = rules
+        .iter()
+        .find(|rule| rule.kind == RuleKind::Final)
+        .map(|rule| rule.outbound.as_str());
+    groups
+        .iter()
+        .find(|group| Some(group.name.as_str()) == final_outbound)
+        .or_else(|| {
+            groups
+                .iter()
+                .find(|group| group.name == crate::clash_api::SELECTOR_TAG)
+        })
+        .or_else(|| {
+            groups
+                .iter()
+                .find(|group| group.kind.eq_ignore_ascii_case("selector"))
+        })
+        .or_else(|| groups.iter().find(|group| !group.is_auto()))
+        .or_else(|| groups.first())
+}
+
 /// One `{up, down}` traffic sample for the dashboard history graph.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrafficPoint {
@@ -317,6 +350,10 @@ pub struct ClientSnapshot {
     pub connections: ConnectionsSnapshot,
     pub core_logs: VecDeque<String>,
     pub events: VecDeque<String>,
+    /// The structured twin of [`Self::events`]: the authoritative record list a
+    /// UI renders in its own language. Same order, same cap, written only by
+    /// [`ClientSnapshot::push_record`].
+    pub event_records: VecDeque<crate::event_code::EventRecord>,
     pub core_version: Option<String>,
     pub core_installed: bool,
     /// The version the running core reports through clash_api; `None` while
@@ -333,6 +370,11 @@ pub struct ClientSnapshot {
     pub subscription_usage: Option<SubscriptionUserinfo>,
     pub settings: SettingsSnapshot,
     pub status: String,
+    /// How severe the current `status` is, when the engine knows. `None` means
+    /// the line came from a call site that has not moved to
+    /// [`crate::event_code::EventCode`] yet, and the UIs fall back to their
+    /// legacy Chinese-substring guess for it.
+    pub status_level: Option<crate::event_code::EventLevel>,
     pub outbound_mode: OutboundMode,
     /// The command currently being applied, if any.
     pub busy: Option<String>,
@@ -360,6 +402,7 @@ impl Default for ClientSnapshot {
             connections: ConnectionsSnapshot::default(),
             core_logs: VecDeque::new(),
             events: VecDeque::new(),
+            event_records: VecDeque::new(),
             core_version: None,
             core_installed: false,
             core_runtime_version: None,
@@ -369,6 +412,7 @@ impl Default for ClientSnapshot {
             subscription_usage: None,
             settings: SettingsSnapshot::default(),
             status: "就绪。先导入订阅，再启动内核。".to_owned(),
+            status_level: None,
             outbound_mode: OutboundMode::Rule,
             busy: None,
             restart_attempts: 0,
@@ -377,12 +421,32 @@ impl Default for ClientSnapshot {
 }
 
 impl ClientSnapshot {
+    /// The group the user's node choice actually lives in. See
+    /// [`find_selector_group`].
+    pub fn selector_group(&self) -> Option<&ProxyGroupSnapshot> {
+        find_selector_group(&self.proxy_groups, &self.rules)
+    }
+
     /// Pushes a UI-level event line, keeping a bounded history.
     pub fn push_event(&mut self, message: impl Into<String>) {
         self.events.push_back(message.into());
         while self.events.len() > 200 {
             self.events.pop_front();
         }
+    }
+
+    /// Records one engine event in both shapes: the structured record is the
+    /// authoritative one a UI renders in its own language, and the Chinese line
+    /// keeps today's string-only consumers working until every call site has
+    /// moved. Both lists are written here and nowhere else, so they cannot
+    /// drift apart. See [`crate::event_code`] and issue 02.
+    pub fn push_record(&mut self, record: crate::event_code::EventRecord) {
+        let line = record.render_zh();
+        while self.event_records.len() >= 200 {
+            self.event_records.pop_front();
+        }
+        self.event_records.push_back(record);
+        self.push_event(line);
     }
 
     /// Pushes a kernel log line, keeping a bounded history.
@@ -485,6 +549,99 @@ pub fn log_level_shown(minimum: Option<LogLevel>, line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn group(name: &str, kind: &str) -> ProxyGroupSnapshot {
+        ProxyGroupSnapshot {
+            name: name.to_owned(),
+            kind: kind.to_owned(),
+            current: "东京-A".to_owned(),
+            members: vec!["东京-A".to_owned()],
+            delays: HashMap::new(),
+            failed: Vec::new(),
+        }
+    }
+
+    fn final_rule(outbound: &str) -> RouteRuleSnapshot {
+        RouteRuleSnapshot {
+            kind: RuleKind::Final,
+            value: None,
+            outbound: outbound.to_owned(),
+        }
+    }
+
+    /// A Mihomo subscription has no `🚀节点选择` anywhere, so the literal
+    /// comparison both clients used made "current node" go stale there. The
+    /// core's `route.final` names the group, so it has to win.
+    #[test]
+    fn the_selector_group_follows_route_final_not_a_hardcoded_name() {
+        let groups = vec![
+            group("♻️自动选择", "urltest"),
+            group("🌍选择代理节点", "select"),
+        ];
+        assert_eq!(
+            find_selector_group(&groups, &[final_rule("🌍选择代理节点")]).map(|g| g.name.as_str()),
+            Some("🌍选择代理节点")
+        );
+        // With no final rule to follow, the manual group still wins over the
+        // automatic one — the ordering here is what keeps the old behaviour for
+        // this project's own profile.
+        assert_eq!(
+            find_selector_group(&groups, &[]).map(|g| g.name.as_str()),
+            Some("🌍选择代理节点")
+        );
+    }
+
+    /// Two manual groups, and only `route.final` says which one the user's
+    /// choice lives in. Without that arm the fallbacks pick the first non-auto
+    /// group, which is the wrong one — so this is the case that makes the
+    /// ordering above actually constrained: deleting the `route.final` arm
+    /// turns it red, which the test before it does not.
+    #[test]
+    fn route_final_decides_when_more_than_one_manual_group_exists() {
+        let groups = vec![
+            group("🌍选择代理节点", "select"),
+            group("地区选择", "select"),
+        ];
+        assert_eq!(
+            find_selector_group(&groups, &[final_rule("地区选择")]).map(|g| g.name.as_str()),
+            Some("地区选择"),
+            "`route.final` must outrank group order"
+        );
+        assert_eq!(
+            find_selector_group(&groups, &[]).map(|g| g.name.as_str()),
+            Some("🌍选择代理节点"),
+            "with nothing to go on, the first manual group is the guess"
+        );
+    }
+
+    #[test]
+    fn the_selector_group_still_finds_this_projects_own_profile() {
+        let groups = vec![
+            group("🚀节点选择", "selector"),
+            group("♻️自动选择", "urltest"),
+            group("direct", "direct"),
+        ];
+        assert_eq!(
+            find_selector_group(&groups, &[final_rule("🚀节点选择")]).map(|g| g.name.as_str()),
+            Some("🚀节点选择")
+        );
+        assert_eq!(
+            find_selector_group(&groups, &[]).map(|g| g.name.as_str()),
+            Some("🚀节点选择")
+        );
+    }
+
+    /// Only automatic groups, or none at all: it must answer with *something*
+    /// rather than dropping the current-node display.
+    #[test]
+    fn the_selector_group_degrades_to_the_first_group_it_has() {
+        let auto_only = vec![group("♻️自动选择", "urltest")];
+        assert_eq!(
+            find_selector_group(&auto_only, &[]).map(|g| g.name.as_str()),
+            Some("♻️自动选择")
+        );
+        assert_eq!(find_selector_group(&[], &[]), None);
+    }
 
     #[test]
     fn traffic_history_is_bounded_and_peaks_over_both_directions() {

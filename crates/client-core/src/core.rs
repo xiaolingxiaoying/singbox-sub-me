@@ -236,14 +236,15 @@ pub async fn start(core: &Path, config: &Path, log_path: &Path) -> Result<CoreHa
         .open(log_path)
         .await
         .context("opening the core log file")?;
-    let child = Command::new(core)
+    let mut command = Command::new(core);
+    command
         .args(["run", "-c"])
         .arg(config)
         .stdout(Stdio::null())
         .stderr(Stdio::from(log_file.into_std().await))
-        .kill_on_drop(true)
-        .spawn()
-        .context("spawning the sing-box core")?;
+        .kill_on_drop(true);
+    prearm_orphan_guard(&mut command);
+    let child = command.spawn().context("spawning the sing-box core")?;
     let orphan_guard = attach_orphan_guard(child.id());
     Ok(CoreHandle {
         child,
@@ -313,12 +314,51 @@ fn attach_orphan_guard(pid: Option<u32>) -> bool {
     assigned.is_ok()
 }
 
-#[cfg(not(windows))]
+/// Asks the kernel to signal the core when this process goes away.
+///
+/// `PR_SET_PDEATHSIG` is set in the child between fork and exec, so it is armed
+/// before the core exists and cannot be missed. Failing inside the hook fails
+/// the spawn rather than leaving an unguarded core running, which is why
+/// [`attach_orphan_guard`] can report success unconditionally on Linux.
+#[cfg(target_os = "linux")]
+fn prearm_orphan_guard(command: &mut Command) {
+    let parent = std::process::id();
+    // SAFETY: the closure runs between fork and exec and calls only `prctl`
+    // and `getppid`, both async-signal-safe.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // The flag is only honoured while the parent is alive at the moment
+            // of death: if the parent already exited, the child was reparented
+            // and no signal will ever arrive. Closing that window here turns a
+            // silent orphan into a spawn failure the caller reports.
+            if libc::getppid() != parent as i32 {
+                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn prearm_orphan_guard(_command: &mut Command) {}
+
+/// Linux arms its guard before the spawn and cannot fail there without the
+/// spawn failing too, so reaching this point means the guarantee holds.
+#[cfg(target_os = "linux")]
 fn attach_orphan_guard(_pid: Option<u32>) -> bool {
-    // Unix delivers SIGTERM to the core through the cooperative shutdown path,
-    // and a killed client leaves its core behind; tracked as a follow-up
-    // (PR_SET_PDEATHSIG) rather than a per-start warning.
     true
+}
+
+/// macOS has no `PR_SET_PDEATHSIG` and no job object, so there is genuinely no
+/// guarantee to report: returning `false` here lets the caller say so instead of
+/// claiming protection it does not have. Closing the gap needs a launchd
+/// KeepAlive job or a supervisor process, which is a separate piece of work.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn attach_orphan_guard(_pid: Option<u32>) -> bool {
+    false
 }
 
 /// Exponential backoff for automatic core restarts after a crash: 2s, 4s,
@@ -589,6 +629,39 @@ pub fn adapt_inbounds(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Starting a core must arm the orphan guard without breaking the spawn, and
+    /// the reported guarantee has to be honest: Linux arms `PR_SET_PDEATHSIG`
+    /// before the child exists, macOS has no equivalent and must say so.
+    ///
+    /// This covers the wiring only. The end-to-end claim — that killing the
+    /// client really takes the core with it — needs a second process to die, so
+    /// it belongs to the L3 (Docker) acceptance step, not to a unit test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn starting_a_core_arms_the_orphan_guard_and_reports_it_truthfully() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("stub-core");
+        std::fs::write(&stub, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, "{}").unwrap();
+
+        let mut handle = start(&stub, &config, &dir.path().join("cache/core.log"))
+            .await
+            .expect("the stub core starts with the guard installed");
+        assert_eq!(
+            handle.orphan_guard,
+            cfg!(target_os = "linux"),
+            "the guard may only be claimed where the kernel actually provides one"
+        );
+        assert!(
+            handle.child.try_wait().unwrap().is_none(),
+            "the pre-exec hook must not break the spawn"
+        );
+        let _ = handle.child.kill().await;
+    }
 
     #[tokio::test]
     async fn a_dead_child_cannot_be_made_healthy_by_another_api() {

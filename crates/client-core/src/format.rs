@@ -50,6 +50,19 @@ pub fn age_label(epoch_seconds: u64) -> String {
     }
 }
 
+/// Whole seconds elapsed since an RFC3339 timestamp such as the core's
+/// connection `start` field; `None` when it is empty or unparseable.
+///
+/// An absolute timestamp is the wrong thing for a table column: at the width
+/// the column gets it renders as a truncated `2026-09-23T0…`, and every
+/// connection opened inside the same second looks identical. Both clients
+/// therefore show an age. The wording deliberately stays in the UIs (`tr!`) so
+/// this module keeps its language-free contract.
+pub fn seconds_since(start: &str) -> Option<u64> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(start).ok()?;
+    Some(now_epoch().saturating_sub(parsed.timestamp().max(0) as u64))
+}
+
 /// A one-line rendering of the subscription's traffic metadata, including the
 /// reset window when the provider advertises an expiry.
 pub fn usage_label(usage: Option<&SubscriptionUserinfo>) -> String {
@@ -107,6 +120,26 @@ mod tests {
         assert_eq!(human_bytes(512), "512 B");
         assert_eq!(human_bytes(2048), "2.0 KiB");
         assert_eq!(human_bytes(3 * 1024 * 1024), "3.0 MiB");
+    }
+
+    #[test]
+    fn seconds_since_reads_the_core_timestamp_and_rejects_junk() {
+        let two_minutes_ago = chrono::DateTime::from_timestamp(now_epoch() as i64 - 120, 0)
+            .expect("a recent epoch")
+            .to_rfc3339();
+        let elapsed = seconds_since(&two_minutes_ago).expect("an RFC3339 value parses");
+        assert!(
+            (119..=122).contains(&elapsed),
+            "a timestamp 120 seconds old must read as about 120, got {elapsed}"
+        );
+        assert_eq!(seconds_since(""), None, "an absent start stays absent");
+        assert_eq!(seconds_since("2026-09-23 01:00"), None);
+        // Clock skew that puts a connection in the future must read as new
+        // rather than wrapping a u64 subtraction around.
+        let future = chrono::DateTime::from_timestamp(now_epoch() as i64 + 3_600, 0)
+            .expect("a near-future epoch")
+            .to_rfc3339();
+        assert_eq!(seconds_since(&future), Some(0));
     }
 
     #[test]
