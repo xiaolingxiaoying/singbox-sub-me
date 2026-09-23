@@ -11,10 +11,23 @@ Type: task
 
 ## 动作（GitHub 仓库设置，只能由维护者执行）
 
-1. 生成独立生产 Ed25519 密钥对（不得复用 `scripts/dev-signing-key.hex`）。
-2. Repository variable `SBCTL_RELEASE_PUBLIC_KEY_HEX` = 生产公钥 hex。
-3. 创建 `release` Environment，配置 Environment secret `SBCTL_SIGNING_SEED` = 生产种子 hex。
-4. 用 `sbctl release sign` + `release verify`（带生产公钥构建）自检一次。
+1. 生成独立生产 Ed25519 密钥对（不得复用 `scripts/dev-signing-key.hex`）：
+
+   ```bash
+   # 离线机器上执行；私钥/种子不要进入仓库、CI 日志或工单
+   openssl genpkey -algorithm ED25519 -out sbctl-release.pem
+   # 32 字节 seed（hex，64 字符）→ GitHub secret
+   openssl pkey -in sbctl-release.pem -outform DER | tail -c 32 | xxd -p -c 64
+   # 32 字节公钥（hex，64 字符）→ GitHub variable
+   openssl pkey -in sbctl-release.pem -pubout -outform DER | tail -c 32 | xxd -p -c 64
+   ```
+
+2. Repository variable `SBCTL_RELEASE_PUBLIC_KEY_HEX` = 上一步公钥 hex。
+   GitHub → Settings → Secrets and variables → Actions → Variables。
+3. 创建 `release` Environment，配置 Environment secret `SBCTL_SIGNING_SEED` = 上一步 seed hex。
+   GitHub → Settings → Environments → New environment `release` → Environment secrets。
+4. 自检：用该公钥编译一次（`SBCTL_RELEASE_PUBLIC_KEY_HEX=<hex> cargo build --release -p sbctl`），
+   再执行 `sbctl release sign` + `release verify`（用 seed 文件）。
 5. 在工单追加脱敏证据：公钥指纹、配置时间、自检输出。
 
 ## 验收
