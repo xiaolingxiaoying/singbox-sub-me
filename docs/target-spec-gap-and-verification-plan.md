@@ -809,6 +809,23 @@ cli 91、client-core 71、sbtui 18、其余为零散目标）。10 个本地提�
 3. **注册表存的是 minor（`"1.14"`），内核报的是完整版本（`1.14.1`）。** 比较"已装版本是否
    高于表顶"必须按 `(major, minor)` 归一，否则 `1.14.1 > 1.14` 会在每次正常安装后误报。
 
+已实现的是第 3 条的归一（`parse_kernel_version` 丢补丁号），第 2 条的探测也已在
+`profile.rs` 落地并被 `status` / `status --json` 使用。**下一步尝试时先读这三条**，
+本轮在它们上面各撞过一次：
+
+4. `src/cli/commands/config.rs` 里**至少两个函数**以
+   `let result = store.load().and_then(|config| { let binary = sing_box_bin.unwrap_or_else(...) })`
+   开头，`regenerate` 不是唯一的；要给 `regenerate` 的成功分支加打印，锚点必须带它上面
+   那段"Regenerate always re-syncs…"注释，否则会命中两处。
+5. 产品解析出的托管内核路径是**无扩展名**的 `<root>/usr/local/bin/sing-box`，所以一个
+   "会报版本号的假内核"fixture 只能在 unix 上被执行；Windows 侧要覆盖同一条告警，必须走
+   `--sing-box-bin` 指到 `.cmd`。附带结论：`sbctl status` 的告警在 Windows 上永远不会响，
+   对 Linux 服务端工具无所谓，但别把它当成"两平台都测过"。
+6. 本仓库的工作树**混用 LF 与 CRLF**（同一轮里 `serve.rs` 被 rustfmt 归一成 LF，而
+   `status.rs`/`config.rs` 仍是 CRLF），脚本化改文件必须两种换行都试；本轮两次
+   "模式没命中"都是这个原因，而不是代码变了。
+
+
 
 ## 12. 收尾里程碑：什么只能证明"尚未失败"
 
