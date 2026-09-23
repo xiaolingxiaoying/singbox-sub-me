@@ -1,0 +1,33 @@
+=== control ===
+base config: ACCEPTED
+invented key bogus-key-xyz: [nope]: ACCEPTED
+=== candidates (a REJECTED bad value proves the key is real) ===
+top-level sniff: true: ACCEPTED
+top-level sniffers: [bogus]: ACCEPTED
+top-level sniffers: [domain,http,tls,quic]: ACCEPTED
+top-level sniffers: [dns,http,tls,quic]: ACCEPTED
+sniffing.enable+sniffers:[bogus]: ACCEPTED
+sniffing.enable+sniffers:[domain,http,tls,quic]: ACCEPTED
+top-level dns-hijack: [bogus]: ACCEPTED
+tun.dns-hijack: [bogus]: ACCEPTED
+tun.dns-hijack: [any:53]: ACCEPTED
+top-level sniff-port: [bogus]: ACCEPTED
+=== correct paths (v1.19.30: sniffer.sniffing list) ===
+type-error control mixed-port: not-a-number: REJECTED -- error msg="yaml: unmarshal errors:\n  line 15: mapping key \"mixed-port\" already defined at line 1"
+sniffer.enable+sniffing:[bogus]: REJECTED -- error msg="not find the sniffer[bogus]"
+sniffer.enable+sniffing:[domain,http,tls,quic]: REJECTED -- error msg="not find the sniffer[domain]"
+sniffer.enable+sniffing:[dns,http,tls,quic]: REJECTED -- error msg="not find the sniffer[dns]"
+sniffer.override-destination: true: REJECTED -- error msg="not find the sniffer[domain]"
+=== enumerate sniffer names, one per run ===
+sniffer.sniffing:[http]: ACCEPTED
+sniffer.sniffing:[tls]: ACCEPTED
+sniffer.sniffing:[quic]: ACCEPTED
+sniffer.sniffing:[domain]: REJECTED -- error msg="not find the sniffer[domain]"
+sniffer.sniffing:[dns]: REJECTED -- error msg="not find the sniffer[dns]"
+sniffer.sniffing:[rdp]: REJECTED -- error msg="not find the sniffer[rdp]"
+sniffer.sniffing:[sniff]: REJECTED -- error msg="not find the sniffer[sniff]"
+sniffer.sniffing:[mongo]: REJECTED -- error msg="not find the sniffer[mongo]"
+sniffer.sniffing:[pop3]: REJECTED -- error msg="not find the sniffer[pop3]"
+sniffer.sniffing:[smtp]: REJECTED -- error msg="not find the sniffer[smtp]"
+sniffer.sniffing:[imap]: REJECTED -- error msg="not find the sniffer[imap]"
+=== done ===

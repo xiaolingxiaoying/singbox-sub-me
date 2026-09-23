@@ -151,6 +151,58 @@ mod tests {
     use crate::config::{DeploymentConfig, ManagedProtocol, ProtocolPorts, SubscriptionMode};
     use crate::subscription::latest_version_profile;
 
+    /// mihomo ships with sniffing switched off, so both clash artifacts have to
+    /// enable it themselves. The names in the list are the ones the pinned core
+    /// accepts, established by feeding candidates to its own parser: the
+    /// `domain`/`dns` names that circulate in client guides are rejected with
+    /// `not find the sniffer[domain]`, and `dns-hijack` is already the default
+    /// under a `tun:` block this project has no business writing for a client.
+    #[test]
+    fn both_clash_artifacts_enable_the_sniffers_the_pinned_core_accepts() {
+        let config = DeploymentConfig::new(
+            SubscriptionMode::IpFallback,
+            "203.0.113.7".into(),
+            None,
+            Some(2080),
+            "ens3".into(),
+            vec![ManagedProtocol::VlessReality],
+            Some("www.cloudflare.com".into()),
+        )
+        .expect("an ip fallback deployment is valid");
+        let nodes = crate::canonical::nodes(&config);
+        let block = "sniffer:\n  enable: true\n  sniffing:\n    - http\n    - tls\n    - quic\n";
+
+        for (name, artifact) in [
+            (
+                "current clash",
+                clash(&config, &nodes).expect("clash generates"),
+            ),
+            (
+                "legacy clash",
+                clash_legacy(&config, &nodes).expect("legacy clash generates"),
+            ),
+        ] {
+            assert_eq!(
+                artifact.matches(block).count(),
+                1,
+                "{name} must enable sniffing exactly once"
+            );
+            for rejected in [
+                "dns-hijack",
+                "sniffers:",
+                "override-destination",
+                "- domain",
+                "- dns",
+            ] {
+                assert!(
+                    !artifact.contains(rejected),
+                    "{name} must not carry {rejected}: it is either already the core's \
+                     default or refused by the pinned mihomo parser"
+                );
+            }
+        }
+    }
+
     #[test]
     fn no_domain_ip_fallback_artifacts_use_the_fake_protocol_sni_and_insecure_tls() {
         let config = DeploymentConfig::new_with_ports(

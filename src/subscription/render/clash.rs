@@ -124,6 +124,36 @@ fn clash_dns(config: &DeploymentConfig) -> String {
     dns
 }
 
+/// The `sniffer:` block shared by both clash artifacts.
+///
+/// mihomo ships sniffing **off** (`Enable: false` in `DefaultRawConfig`, with no
+/// sniffer names selected), so a subscriber who never touches the client's own
+/// settings gets connections routed on the raw SNI/host only.
+///
+/// The list is `http`/`tls`/`quic` because that is exactly what the pinned core
+/// accepts: `.scratch/mihomo-sniff-probe.sh` runs candidate names through
+/// mihomo v1.19.30's own config parser, which rejects anything else with
+/// `not find the sniffer[domain]` — the `domain` and `dns` names some guides
+/// advertise do not exist in this build.
+///
+/// No `dns-hijack` is written on purpose. It lives under `tun:`, its default is
+/// already `0.0.0.0:53`, and emitting a `tun:` block from a subscription would
+/// overwrite whatever the client operator configured there.
+///
+/// `override-destination` stays unset: it makes a sniffed domain replace the
+/// original destination for the whole connection, which changes what the remote
+/// server sees, and that is not this project's call to make silently.
+fn clash_sniffer() -> &'static str {
+    concat!(
+        "sniffer:\n",
+        "  enable: true\n",
+        "  sniffing:\n",
+        "    - http\n",
+        "    - tls\n",
+        "    - quic\n"
+    )
+}
+
 pub(crate) fn clash(
     config: &DeploymentConfig,
     nodes: &[CanonicalNode],
@@ -187,6 +217,7 @@ pub(crate) fn clash(
         ));
     }
     output.push_str(&clash_dns(config));
+    output.push_str(clash_sniffer());
     Ok(output)
 }
 
@@ -208,5 +239,6 @@ pub(crate) fn clash_legacy(
         "  - MATCH,🌍选择代理节点\n",
     ));
     output.push_str(&clash_dns(config));
+    output.push_str(clash_sniffer());
     Ok(output)
 }

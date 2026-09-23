@@ -129,7 +129,8 @@ canonical nodes → template（内置）→ client_rule_profile（是否用 CDN�
 - 新建 `src/subscription/template.rs`：`enum ClientTemplate { Standard, Global, Split }` + `struct TemplateSpec { groups, rule_sets, inline_rules, dns, sniff, final_group }`。**`Standard` 必须逐字节复现今天的输出**（由 0.2 的金标准证明）。
 - `src/config.rs`：`client_template` 字段 `#[serde(default)]` → `Standard`；`--client-template` 参数（`src/cli/args.rs`）+ 向导项（`src/wizard.rs`）。
 - `render/singbox.rs` + `render/clash.rs`：消费 `TemplateSpec` 而非内联字面量。`src/override_template.rs` 语义不变，只补注释说明分层顺序。
-- **G2 嗅探**：~~sing-box 把 `:146` 的裸 `{"action":"sniff"}` 换成带 `sniff` 列表与 `override_destination`，两个可选键由新的 profile 布尔门控~~ —— **此路已被 Phase 0.5 的真核探针否决，见 §4.2**。Clash 侧 `render/clash.rs` 目前 `sniff` 匹配数为 **0**，补顶层 `sniffers: [domain, http, tls, quic]` + `dns-hijack: any:53`；legacy 分支用 `sniff: true`。sing-box 侧的"嗅探模板"可表达空间只有"有/无"两态，现有写法已经是正确的。
+- **G2 嗅探**：~~sing-box 把 `:146` 的裸 `{"action":"sniff"}` 换成带 `sniff` 列表与 `override_destination`，两个可选键由新的 profile 布尔门控~~ —— **此路已被 Phase 0.5 的真核探针否决，见 §4.2**。~~Clash 侧补顶层 `sniffers: [domain, http, tls, quic]` + `dns-hijack: any:53`；legacy 分支用 `sniff: true`~~ —— **这条也在 2026-09-23 被真核探针否决，三处皆错，见 §4.3**。实际落地：两份 Clash 工件统一追加
+  `sniffer: {enable: true, sniffing: [http, tls, quic]}`；不写 `dns-hijack`（它在 `tun:` 下、默认已是 `0.0.0.0:53`，从订阅里写 `tun:` 块会覆盖客户端自己的 TUN 设置）；不写 `override-destination`（它会让嗅探出的域名替换原始目的地址，属于不该静默代客户做的决定）。sing-box 侧的"嗅探模板"可表达空间只有"有/无"两态，现有写法已经是正确的。
 - **G3 外部资源**：规则集变成模板上的数据（`geosite/{cn,private,ads,proxy,openai,netflix,telegram}`、`geoip/{cn,private,lan}`），每项配一个由编译期内联列表渲染的 `minimal` 孪生。`client_rule_set_base_url` 保持唯一 CDN 旋钮。
 - **G5 节点原生链接展示**：三件事——(a) index 页在客户端矩阵与链接列表之间插入「节点与原生分享链接」区块（该页已在 256-bit credential 之后，暴露面等同 `uri` 工件，**不新增边界**）；(b) 从 `render/uri.rs:120` 抽出 `node_uri(config, node)`，用现有确定性测试（`artifacts.rs:499-534`）证明重构字节中性；(c) `sbctl status nodes --uri` 只输出到运维者自己的 stdout，按 ADR-0013 永不进 journal。**不要**加进 `sbctl sub` 的默认输出——那条命令常被管道进日志与截图。
 - **G6**：header 追加 `profile-update-interval=<小时>`；键序与四个既有键由 header-shape 测试锁死；账期故障时"宁可不发也不伪造 header"的降级行为（`serve.rs:410-416`、`verify.sh:131-134`）必须保持。
@@ -220,6 +221,27 @@ canonical nodes → template（内置）→ client_rule_profile（是否用 CDN�
 同一批内核还确认了：`generated_profiles_pass_a_real_sing_box_check` 在把断言从 `checked >= 1`
 收紧到 `checked == 5` 之后仍然全绿（1.10.7/1.11.15/1.12.25/1.13.21/1.14.1 各自接受自己的工件），
 带检查在 `SBCTL_UPSTREAM_LATEST=v1.14.1` 下通过。
+
+### 4.3 mihomo 嗅探键探针（Phase 2 PR(c) 产出，2026-09-23）
+
+计划原文写的是"顶层 `sniffers: [domain, http, tls, quic]` + `dns-hijack: any:53`，legacy 用
+`sniff: true`"。用 CI pin 的同一个核（mihomo **v1.19.30**，`~/bin/mihomo`）探针后，**三处全错**：
+
+| 计划里的写法 | 真核结果 |
+| --- | --- |
+| 顶层 `sniffers:` | 没有这个键；正确路径是 **`sniffer.sniffing:`**（`RawConfig` 里 sniffer 块的 tag 是 `sniffer`，列表字段的 tag 是 `sniffing`） |
+| 值含 `domain` / `dns` | `not find the sniffer[domain]`、`not find the sniffer[dns]`，被核**拒绝**；实测只有 `http`/`tls`/`quic` 通过 |
+| `sniff: true` | 顶层 `sniff` 不是布尔；`sniffer.sniff` 是 `map[string]RawSniffingConfig`（每个嗅探器的细分配置） |
+| `dns-hijack: any:53` | 它在 **`tun:`** 下，且默认值已经是 `0.0.0.0:53`；从订阅里输出 `tun:` 块会覆盖客户端自己的 TUN 设置 |
+
+探针方法与 §4.2 同源，并补了必要的一环：**`mihomo -t` 会静默忽略未知键**（控制项
+`bogus-key-xyz: [nope]` 被接受），所以"配置通过"不证明键存在。判据是**用错的值去打**：
+`sniffer.sniffing: [bogus]` 报 `not find the sniffer[bogus]`，才算这个键真的被解析。脚本
+`.scratch/mihomo-sniff-probe.sh`，输出 `.scratch/mihomo-sniff-probe.txt`。
+
+同时确认默认 `Enable: false` 且嗅探器列表为空——**G2 是真差距**，只是修复方式与计划写的不一样。
+落地后 `mihomo accepted subscription-clash.yaml` 与 `subscription-clash-1.18.yaml` 双双通过
+（真核门：`MIHOMO_BIN=~/bin/mihomo cargo test --test clash_mihomo -- --ignored`）。
 
 ---
 
