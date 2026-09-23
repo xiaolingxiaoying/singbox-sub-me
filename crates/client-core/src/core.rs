@@ -630,6 +630,78 @@ pub fn adapt_inbounds(
 mod tests {
     use super::*;
 
+    /// Finding #2 of the refactor report said the fixed-port probe was real code
+    /// with no test. The claim worth pinning is not "startup fails" but "startup
+    /// fails *before* the cached runtime configuration is rewritten": a refused
+    /// start that still clobbered the cache would lose the last known-good
+    /// profile the retry path depends on.
+    #[tokio::test]
+    async fn a_busy_mixed_port_is_refused_before_the_runtime_config_is_rewritten() {
+        let dir = tempfile::tempdir().expect("a data directory");
+        std::fs::create_dir_all(dir.path().join("cache")).expect("the cache directory");
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").expect("an ephemeral port");
+        let port = taken.local_addr().expect("the bound address").port();
+
+        let error = match super::start_managed(
+            dir.path(),
+            VALID_RAW,
+            crate::system_proxy::TrafficMode::SystemProxy,
+            port,
+        )
+        .await
+        {
+            Ok(_) => panic!("the mixed port is occupied, so startup must be refused"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("已被占用"),
+            "the refusal must name the reason rather than just fail: {message}"
+        );
+        assert!(
+            message.contains(&port.to_string()),
+            "the refusal must name the port the operator has to free: {message}"
+        );
+        assert!(
+            !dir.path().join("cache/active-config.json").exists(),
+            "a refused start must leave the cached runtime configuration alone"
+        );
+    }
+
+    /// The control that makes the assertion above mean something: with the port
+    /// free, startup walks past the probe and writes the cache before failing on
+    /// the absent core binary. If this test went red at the `exists()` line, the
+    /// refusal test would be passing for the wrong reason.
+    #[tokio::test]
+    async fn a_free_mixed_port_lets_startup_reach_the_config_write() {
+        let dir = tempfile::tempdir().expect("a data directory");
+        std::fs::create_dir_all(dir.path().join("cache")).expect("the cache directory");
+        let free = std::net::TcpListener::bind("127.0.0.1:0").expect("an ephemeral port");
+        let port = free.local_addr().expect("the bound address").port();
+        drop(free);
+
+        let outcome = super::start_managed(
+            dir.path(),
+            VALID_RAW,
+            crate::system_proxy::TrafficMode::SystemProxy,
+            port,
+        )
+        .await;
+        // Whether startup then fails depends on whether a core binary sits in the
+        // data directory, which this test does not provide; the point is that it
+        // got past the port probe.
+        assert!(
+            outcome.is_err(),
+            "no sing-box binary is installed in the data directory"
+        );
+        assert!(
+            dir.path().join("cache/active-config.json").exists(),
+            "startup has to pass the port probe and reach the config write"
+        );
+    }
+
+    const VALID_RAW: &str = r#"{"log":{"level":"info"},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}],"experimental":{"clash_api":{"external_controller":"127.0.0.1:9090"}}}"#;
+
     /// Starting a core must arm the orphan guard without breaking the spawn, and
     /// the reported guarantee has to be honest: Linux arms `PR_SET_PDEATHSIG`
     /// before the child exists, macOS has no equivalent and must say so.

@@ -729,6 +729,18 @@ L2（WSL，`-p sbctl -p client-core -p sbtui`）同样 fmt 0 / clippy 0 / **364 
 是同一个 127.0.0.1 地址，洪水会把它们一起限成 429——必须放在该 server 实例的最后，
 或为限流单独起一个实例。
 
+### Phase 8（G17）：两条无测试的已修路径（已完成）
+
+- **finding #2（固定口启动检测）**：新增 `a_busy_mixed_port_is_refused_before_the_runtime_config_is_rewritten`，
+  用另一个监听器占住 mixed 端口，重放原场景，并同时断言**拒绝理由**（含 `已被占用` 与端口号）与
+  `cache/active-config.json` **未被改写**——后半句才是这条路径的价值所在（拒启不能顺手毁掉上次
+  已知良好的运行配置）。配套对照 `a_free_mixed_port_lets_startup_reach_the_config_write`：端口空着时
+  启动会越过探测、把配置写下去再因缺少内核二进制而失败；没有这条对照，"`!exists()`" 可能只是
+  因为写盘本来就会失败而恒真。变异检验：把早探条件改成恒假 → 前者判红、对照仍绿。
+- **finding #5（短暂成功清零重启计数）**：`a_brief_success_does_not_reset_the_restart_allowance`
+  断言 sub-`STABLE_RUN` 的成功不清零，且下一次崩溃从 3 续到 4 而非从 1 重来。
+- 报告的 §五 表格两行已改为结案，并写明"条目 3/4/6 仍未复核"，不把整节当已验证。
+
 ### Phase 2 PR(c) 的 Clash 半边：G2 嗅探（已完成，但**结论与原计划不同**）
 
 计划写的"顶层 `sniffers: [domain, http, tls, quic]` + `dns-hijack: any:53`，legacy 用 `sniff: true`"

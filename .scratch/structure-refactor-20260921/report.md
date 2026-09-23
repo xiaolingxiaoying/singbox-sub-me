@@ -60,11 +60,13 @@ Type: task
 
 | 条目 | 今天能拿出的证据 | 还不能说什么 |
 | --- | --- | --- |
-| 2 固定端口判成功 | `core.rs:37` 起每次启动取新端点与密钥；`core.rs:51` 在改配置之前先用 `TcpListener::bind` 探 mixed 端口；`wait_ready` 盯子进程而不是端口回声 | 全仓 `grep` 不到覆盖这条的测试（`tests/` 里没有 restart/endpoint 相关命名）。原场景（上一次残留内核占住固定端口）没被重放过 |
-| 5 短暂成功清零重启计数 | `controller.rs:1160` 只在 `elapsed() >= STABLE_RUN`（60 秒）后清零；另一处清零在 `apply` 的 `StartCore` 分支（`:456`），且被 `!core_running && !starting` 拦住，属用户显式启动 | 同样没有测试。`crates/client-core` 里凡提到 `restart_attempts` 的只有实现文件本身 |
+| 2 固定端口判成功 | `core.rs:37` 起每次启动取新端点与密钥；`core.rs:51` 在改配置之前先用 `TcpListener::bind` 探 mixed 端口；`wait_ready` 盯子进程而不是端口回声 | **2026-09-23 结案**：`a_busy_mixed_port_is_refused_before_the_runtime_config_is_rewritten` 用另一个监听器占住端口，重放了"残留内核占住固定端口"的原场景，并断言拒绝理由（`已被占用` + 端口号）**和** `cache/active-config.json` 未被改写；对照测试 `a_free_mixed_port_lets_startup_reach_the_config_write` 证明后一条断言不是空判。变异检验：把早探的条件改成恒假 → 前者判红、后者仍绿 |
+| 5 短暂成功清零重启计数 | `controller.rs:1160` 只在 `elapsed() >= STABLE_RUN`（60 秒）后清零；另一处清零在 `apply` 的 `StartCore` 分支（`:456`），且被 `!core_running && !starting` 拦住，属用户显式启动 | **2026-09-23 结案**：`a_brief_success_does_not_reset_the_restart_allowance` 断言 sub-`STABLE_RUN` 的成功不清零，且下一次崩溃从 3 继续到 4 而不是从 1 重来 |
 | 3 缓存互相覆盖 / 4 旧订阅回退 / 6 长操作阻塞 | 今天没有复核 | 维持"未验证"，不要写成已修 |
 | 1 生产签名私钥 | 未变，属发布信任链，只有维护者能做 | v0.1.26 仍是开发密钥签名，见 `../sbctl-release/` |
 
-所以第二节那张表的"疑似已被覆盖"两行，今天的判定是：**代码路径确实换了，但回归测试这一半仍然缺**。要结案就得补能红的用例，不是补注释。
+所以第二节那张表的"疑似已被覆盖"两行，2026-09-22 的判定是：**代码路径确实换了，但回归测试这一半仍然缺**。
+2026-09-23 补齐了这两半（条目 2 与 5 各有一条能红的用例，且都过了变异检验），本节仅这两行结案；
+条目 3/4/6 仍未复核，"要结案就得补能红的用例，不是补注释"这条要求对它们继续有效。
 
 另外，GUI 侧的工单已从 6 条增到 7 条（`../sbgui-progressive-workspace/issues/`），其中 03、06 已按维护者裁决结案，07 是原型去 CSS Grid 之后留下的两栏分配偏差。
