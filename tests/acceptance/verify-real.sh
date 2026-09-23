@@ -64,6 +64,38 @@ $sbctl restart >/dev/null
 systemctl is-active --quiet sbctl.service || fail 'sbctl.service did not recover after restart'
 systemctl is-active --quiet sing-box.service || fail 'sing-box.service did not recover after restart'
 
+# A candidate that passes `sing-box check` and exits on start must fail the
+# update, restore the running binary, and leave the unit stable. This is the
+# Ubuntu VPS 2026-09-22 report section 6.13 regression: a single `is-active`
+# probe used to commit the crashing candidate while Restart=on-failure looped
+# it.
+broken_sing_box="$work/broken-sing-box"
+cat >"$broken_sing_box" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  check) exit 0 ;;
+  run) exit 1 ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod 0755 "$broken_sing_box"
+before_hash=$(sha256sum /usr/local/bin/sing-box | awk '{print $1}')
+if $sbctl sing-box update --artifact "$broken_sing_box" >"$work/broken-update.log" 2>&1; then
+  cat "$work/broken-update.log" >&2 || true
+  fail 'sing-box update accepted a candidate that crashes on start'
+fi
+after_hash=$(sha256sum /usr/local/bin/sing-box | awk '{print $1}')
+[ "$before_hash" = "$after_hash" ] || fail 'failed sing-box update did not restore the previous binary'
+systemctl is-active --quiet sing-box.service || fail 'sing-box.service did not recover after the rejected update'
+settled_restarts=$(systemctl show -p NRestarts --value sing-box.service)
+sleep 4
+later_restarts=$(systemctl show -p NRestarts --value sing-box.service)
+[ "$settled_restarts" = "$later_restarts" ] \
+  || fail "sing-box.service kept restarting after the rollback: $settled_restarts -> $later_restarts"
+response=$(curl --silent --show-error --include --retry 5 --retry-connrefused --retry-delay 1 \
+  "http://127.0.0.1:2080/sub/$credential/uri")
+contains "$response" 'HTTP/1.1 200 OK'
+
 test -f /etc/ufw/user.rules || {
   mkdir -p /etc/ufw
   printf 'firewall\n' >/etc/ufw/user.rules
@@ -89,13 +121,10 @@ ip_install_output=$(
     --http-port 2081 \
     --interface "$interface" \
     --reality-decoy-sni www.cloudflare.com \
-    --disable-protocol vmess-websocket \
-    --disable-protocol hysteria2 \
-    --disable-protocol tuic \
-    --disable-protocol anytls \
+    --protocol-sni www.bing.com \
     --sing-box-bin "$fake_sing_box"
 )
-contains "$ip_install_output" '启用协议: vless-reality'
+contains "$ip_install_output" '启用协议: vless-reality, vmess-websocket, hysteria2, tuic, anytls'
 systemctl is-active --quiet sbctl.service || fail 'IP fallback sbctl.service is not active'
 systemctl is-active --quiet sing-box.service || fail 'IP fallback sing-box.service is not active'
 
@@ -103,7 +132,11 @@ credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' /etc/sbctl/c
 response=$(curl --silent --show-error --include --retry 5 --retry-connrefused --retry-delay 1 \
   "http://127.0.0.1:2081/sub/$credential/uri")
 contains "$response" 'HTTP/1.1 200 OK'
-contains "$response" 'vless://'
+# A no-domain deployment uses self-signed certificates plus the disguised SNI,
+# so all five protocols must be advertised rather than only the Reality one.
+for scheme in 'vless://' 'vmess://' 'hysteria2://' 'tuic://' 'anytls://'; do
+  contains "$response" "$scheme"
+done
 
 # Direct mode: systemd itself owns TCP 80/443 through sbctl-http.socket and
 # passes both listeners to the non-root sbctl service via LISTEN_FDS.
@@ -135,6 +168,18 @@ systemctl is-active --quiet sing-box.service || fail 'Direct sing-box.service is
 service_user=$(systemctl show -p User --value sing-box.service)
 [ "$service_user" = sing-box ] || fail 'sing-box.service does not run as sing-box'
 id sing-box >/dev/null 2>&1 || fail 'dedicated sing-box account was not created'
+
+# The generated units must be valid for the host systemd: Ubuntu 22.04 used to
+# report `Unknown key name 'Sockets' in section 'Unit', ignoring` for the
+# Direct service unit.
+verify_output=$(systemd-analyze verify \
+  /etc/systemd/system/sbctl.service \
+  /etc/systemd/system/sbctl-http.socket \
+  /etc/systemd/system/sing-box.service \
+  /etc/systemd/system/sbctl-accounting-reset.service \
+  /etc/systemd/system/sbctl-accounting-reset.timer 2>&1 || true)
+printf '%s' "$verify_output" | grep -q 'Unknown key name' \
+  && fail "systemd reported an unknown unit key: $verify_output"
 
 direct_credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' /etc/sbctl/config.toml)
 direct_response=$(mktemp)

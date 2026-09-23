@@ -343,7 +343,7 @@ if "$sbctl" --root "$root" update --manifest "$work/manifest.json" --sbctl-artif
 fi
 test "$(cat "$root/usr/local/bin/sbctl")" = 'known-good sbctl' || fail 'failed update changed sbctl'
 test "$(cat "$root/usr/local/bin/sing-box")" = 'known-good sing-box' || fail 'failed update changed sing-box'
-test -d "$root/var/lib/sbctl/rollback" || fail 'failed update did not keep a rollback point'
+test -d "$root/var/backups/sbctl/rollback" || fail 'failed update did not keep a rollback point'
 
 # Uninstall preserves unrelated proxy/firewall files by default; --purge only removes sbctl data.
 fixture_seed_uninstall
