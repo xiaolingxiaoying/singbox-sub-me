@@ -344,8 +344,20 @@ impl Engine {
         // Child handles and pending jobs are owned by this engine. Preserve
         // the UI's explicit OS-proxy exit choice, but always reap its child.
         self.cancel_operation().await;
+        self.reap_child().await;
+    }
+
+    /// Signals the managed core and waits for it to be reaped.
+    ///
+    /// `kill()` only delivers the signal. Until the child is reaped its process
+    /// object is still alive, and a restart that probes the mixed port can run
+    /// before the OS has released the listener. The timeout keeps a wedged
+    /// handle from stalling the engine's single task forever.
+    async fn reap_child(&mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.child.kill().await;
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(5), child.child.wait()).await;
         }
     }
 
@@ -527,7 +539,11 @@ impl Engine {
             // lines written from now on rather than replaying the tail.
             ClientCommand::ClearLogs => {
                 self.snapshot.core_logs.clear();
+                // `events` and `event_records` are written together and walked
+                // together; clearing only the string list would pair every
+                // surviving record with the wrong line.
                 self.snapshot.events.clear();
+                self.snapshot.event_records.clear();
                 Ok(())
             }
             ClientCommand::Refresh => {
@@ -767,9 +783,7 @@ impl Engine {
             let _ = system_proxy::disable(&self.dir);
             self.snapshot.system_proxy_enabled = false;
         }
-        if let Some(mut child) = self.child.take() {
-            let _ = child.child.kill().await;
-        }
+        self.reap_child().await;
         self.snapshot.core_runtime_version = None;
         self.snapshot.memory_used = 0;
         self.snapshot.traffic_history.clear();

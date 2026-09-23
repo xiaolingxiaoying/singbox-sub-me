@@ -506,12 +506,45 @@ pub fn can_use_tun() -> bool {
     }
     #[cfg(not(windows))]
     {
-        std::process::Command::new("id")
-            .arg("-u")
-            .output()
-            .map(|output| String::from_utf8_lossy(&output.stdout).trim() == "0")
-            .unwrap_or(false)
+        // The device itself is the question; `id -u` was only a proxy for it, so
+        // a service unit with CAP_NET_ADMIN or a user in the `tun` group was
+        // refused a TUN it could actually create. Root stays sufficient for the
+        // case where the node is missing from this sandbox entirely.
+        tun_device_openable(TUN_DEVICE) || running_as_root()
     }
+}
+
+/// The tunnel-control node on Linux.
+#[cfg(unix)]
+const TUN_DEVICE: &str = "/dev/net/tun";
+
+/// Whether `path` is the tunnel device *and* this process can read/write it.
+///
+/// The character-device test is what keeps this honest: an ordinary file opens
+/// read-write for anyone, so `open()` alone would report "TUN available" for any
+/// writable path.
+#[cfg(unix)]
+pub(crate) fn tun_device_openable(path: &str) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.file_type().is_char_device() {
+        return false;
+    }
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .is_ok()
+}
+
+#[cfg(unix)]
+fn running_as_root() -> bool {
+    std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim() == "0")
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -521,5 +554,30 @@ mod tests {
     #[test]
     fn traffic_mode_labels_are_distinct() {
         assert_ne!(TrafficMode::SystemProxy.label(), TrafficMode::Tun.label());
+    }
+
+    /// The predicate is "a character device this process can read-write", and
+    /// the *caller* pins which device. Both halves need a test: without the
+    /// character-device gate an ordinary writable file answers "TUN available",
+    /// and without the open() half a present-but-forbidden node answers it.
+    #[cfg(unix)]
+    #[test]
+    fn tun_device_gate_rejects_a_writable_regular_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let plain = dir.path().join("fake-tun");
+        std::fs::write(&plain, b"x").expect("write");
+        assert!(
+            !tun_device_openable(plain.to_str().unwrap()),
+            "a regular file opens read-write for anyone and is not a tun device"
+        );
+        assert!(
+            !tun_device_openable(dir.path().to_str().unwrap()),
+            "a directory is not a device"
+        );
+        assert!(!tun_device_openable("/definitely/not/here"));
+        assert!(
+            tun_device_openable("/dev/null"),
+            "/dev/null is a read-writable character device, which is what this answers about"
+        );
     }
 }

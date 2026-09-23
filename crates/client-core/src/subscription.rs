@@ -149,6 +149,13 @@ pub fn parse_userinfo(header: &str) -> Option<SubscriptionUserinfo> {
 }
 
 /// Downloads the subscription body with the configured mirror prefix.
+///
+/// Deliberately NOT `no_proxy()` the way [`crate::clash_api`] is: this reaches
+/// the open internet, and a user whose only route to their own VPS is the proxy
+/// in their environment must keep working. The loop the client could otherwise
+/// create with itself is not reachable here - system-proxy mode writes the
+/// registry/gsettings value and only *prints* the env-var suggestion
+/// (`system_proxy.rs:433`), it never sets a proxy in our own process.
 pub async fn fetch(url: &str, mirror: &str) -> Result<Fetched> {
     let url = apply_mirror(url, mirror);
     let response = reqwest::Client::builder()
@@ -311,14 +318,24 @@ fn wrap_bare_node_config(value: serde_json::Value, nodes: &[NodeSummary]) -> Res
 /// startup probe.
 pub fn parse_uri_list(text: &str) -> Result<SubscriptionSnapshot> {
     let mut outbounds = Vec::new();
+    let mut skipped = 0usize;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        if let Some(outbound) = parse_uri(line)? {
-            outbounds.push(outbound);
+        // A subscription is third-party input: one line this client's sing-box
+        // build has no outbound for (an unknown scheme, a malformed tail) must
+        // not delete the nodes that do parse. When nothing parses, the count is
+        // what makes the empty profile diagnosable instead of mysterious.
+        match parse_uri(line) {
+            Ok(Some(outbound)) => outbounds.push(outbound),
+            Ok(None) => {}
+            Err(_) => skipped += 1,
         }
+    }
+    if outbounds.is_empty() {
+        bail!("订阅里没有可导入的节点（跳过 {skipped} 行无法解析）");
     }
     let mut snapshot = summarize(&outbounds)?;
     snapshot.raw = wrap_bare_node_config(
@@ -330,6 +347,20 @@ pub fn parse_uri_list(text: &str) -> Result<SubscriptionSnapshot> {
 
 fn parse_uri(line: &str) -> Result<Option<serde_json::Value>> {
     let (scheme, rest) = line.split_once("://").context("URI lacks a scheme")?;
+    // v2rayN, NekoBox and Shadowrocket export VMESS as `vmess://<base64 json>`:
+    // the URI carries no `@host` at all, every field lives inside the payload.
+    // Parsing that as `userinfo@host:port` put a base64 blob in the server field
+    // and an empty uuid in the node, so no standard vmess link ever imported.
+    if scheme == "vmess" && !rest.contains('@') {
+        let (head, query, fragment) = split_uri_tail(rest);
+        let params = parse_query(query);
+        return vmess_from_payload(
+            head.trim_end_matches('/'),
+            fragment.as_deref(),
+            params.get("insecure").map(|v| v == "1" || v == "true"),
+        )
+        .map(Some);
+    }
     let (userinfo, host_part) = match rest.split_once('@') {
         Some((user, host)) => (user, host),
         None => ("", rest),
@@ -347,29 +378,26 @@ fn parse_uri(line: &str) -> Result<Option<serde_json::Value>> {
     let insecure = params.get("insecure").map(|v| v == "1" || v == "true");
     let sni = params.get("sni").cloned();
 
-    let tls = |server_name: Option<String>| {
-        let mut tls = serde_json::json!({ "enabled": true });
-        if let Some(name) = server_name {
-            tls["server_name"] = serde_json::json!(name);
-        }
-        if let Some(true) = insecure {
-            tls["insecure"] = serde_json::json!(true);
-        }
-        tls
-    };
-
+    // `enabled` is per-protocol state, not a constant: a VLESS link without
+    // `security=tls|reality` is plaintext by spec, and forcing TLS onto it
+    // produced a node that could never connect.
     let outbound = match scheme {
         "vless" => {
+            if userinfo.is_empty() {
+                // Without this the tail of a malformed line became the server
+                // field and the node imported as an empty-uuid outbound that
+                // could only ever fail at connect time.
+                bail!("vless link has no uuid");
+            }
+            // Xray's VLESS URI defaults `security` to none; only tls and reality
+            // carry a TLS handshake.
+            let security = params.get("security").map(String::as_str).unwrap_or("none");
             let mut value = serde_json::json!({
                 "type": "vless", "tag": tag, "server": host, "server_port": port,
                 "uuid": userinfo, "flow": params.get("flow").cloned().unwrap_or_default(),
-                "tls": tls(sni),
+                "tls": tls_block(sni, matches!(security, "tls" | "reality"), insecure),
             });
-            if params
-                .get("security")
-                .map(|s| s == "reality")
-                .unwrap_or(false)
-            {
+            if security == "reality" {
                 value["tls"]["reality"] = serde_json::json!({
                     "enabled": true,
                     "public_key": params.get("pbk").cloned().unwrap_or_default(),
@@ -383,27 +411,14 @@ fn parse_uri(line: &str) -> Result<Option<serde_json::Value>> {
             value
         }
         "vmess" => {
-            // v2rayN base64 JSON link.
+            // The `vmess://<base64>@host:port` shape: alterId, cipher and
+            // transport still live in the payload, the URI adds the address.
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(userinfo)
                 .context("vmess payload is not base64")?;
             let payload: serde_json::Value =
                 serde_json::from_slice(&decoded).context("vmess payload is not JSON")?;
-            let mut value = serde_json::json!({
-                "type": "vmess", "tag": tag, "server": host, "server_port": port,
-                "uuid": payload.get("id").cloned().unwrap_or_default(),
-                "security": payload.get("scy").cloned().unwrap_or_else(|| "auto".into()),
-                "alter_id": payload.get("aid").and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok())).unwrap_or(0),
-                "tls": tls(payload.get("sni").and_then(|v| v.as_str()).map(str::to_owned)),
-            });
-            if payload.get("net").and_then(|v| v.as_str()) == Some("ws") {
-                let mut transport = serde_json::json!({ "type": "ws" });
-                if let Some(path) = payload.get("path").and_then(|v| v.as_str()) {
-                    transport["path"] = serde_json::json!(path);
-                }
-                value["transport"] = transport;
-            }
-            value
+            vmess_outbound(&payload, Some(&tag), host, port, sni, insecure)?
         }
         "hysteria2" | "hy2" => serde_json::json!({
             "type": "hysteria2", "tag": tag, "server": host, "server_port": port,
@@ -434,6 +449,115 @@ fn parse_uri(line: &str) -> Result<Option<serde_json::Value>> {
         other => bail!("unsupported URI scheme: {other}"),
     };
     Ok(Some(outbound))
+}
+
+/// The `tls` block every protocol in this parser shares.
+fn tls_block(
+    server_name: Option<String>,
+    enabled: bool,
+    insecure: Option<bool>,
+) -> serde_json::Value {
+    let mut tls = serde_json::json!({ "enabled": enabled });
+    if !enabled {
+        return tls;
+    }
+    if let Some(name) = server_name {
+        tls["server_name"] = serde_json::json!(name);
+    }
+    if let Some(true) = insecure {
+        tls["insecure"] = serde_json::json!(true);
+    }
+    tls
+}
+
+fn vmess_from_payload(
+    payload_b64: &str,
+    fragment: Option<&str>,
+    insecure: Option<bool>,
+) -> Result<serde_json::Value> {
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(payload_b64)
+        .context("vmess payload is not base64")?;
+    let payload: serde_json::Value =
+        serde_json::from_slice(&decoded).context("vmess payload is not JSON")?;
+    vmess_outbound(&payload, fragment, "", 0, None, insecure)
+}
+
+/// One builder for both vmess link shapes, because every field except the
+/// address is the same JSON in both.
+fn vmess_outbound(
+    payload: &serde_json::Value,
+    uri_tag: Option<&str>,
+    uri_host: &str,
+    uri_port: u64,
+    uri_sni: Option<String>,
+    insecure: Option<bool>,
+) -> Result<serde_json::Value> {
+    let server = as_text(payload.get("add"))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| uri_host.to_owned());
+    if server.is_empty() {
+        bail!("vmess link has no address");
+    }
+    let port = as_port(payload.get("port"))
+        .or((uri_port != 0).then_some(uri_port))
+        .context("vmess link has no port")?;
+    let uuid = as_text(payload.get("id")).filter(|s| !s.is_empty());
+    let Some(uuid) = uuid else {
+        bail!("vmess payload has no uuid");
+    };
+    // `ps` is the display name the panel chose; a URI fragment beats it, and
+    // the address beats both, so a node is never anonymous.
+    let tag = uri_tag
+        .map(str::to_owned)
+        .filter(|t| !t.is_empty())
+        .or_else(|| as_text(payload.get("ps")).filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| server.clone());
+    // `aid` arrives as a string from some generators and a number from others;
+    // reading only one shape silently turned alterId into 0, which is an auth
+    // failure the user cannot see from here.
+    let alter_id = as_port(payload.get("aid")).unwrap_or(0);
+    let uses_tls = as_text(payload.get("tls")).is_some_and(|t| !t.is_empty() && t != "none");
+    let sni = as_text(payload.get("sni"))
+        .filter(|s| !s.is_empty())
+        .or(uri_sni);
+    let mut value = serde_json::json!({
+        "type": "vmess", "tag": tag, "server": server, "server_port": port,
+        "uuid": uuid,
+        "security": as_text(payload.get("scy")).filter(|s| !s.is_empty()).unwrap_or_else(|| "auto".into()),
+        "alter_id": alter_id,
+        "tls": tls_block(sni, uses_tls, insecure),
+    });
+    // Only the transports sing-box names the same way the vmess `net` field
+    // does; anything else is left out so the core uses its own default rather
+    // than the profile failing `sing-box check`.
+    let net = as_text(payload.get("net")).filter(|n| matches!(n.as_str(), "ws" | "grpc" | "http"));
+    if let Some(net) = net {
+        let mut transport = serde_json::json!({ "type": net });
+        if let Some(path) = as_text(payload.get("path")).filter(|p| !p.is_empty()) {
+            transport["path"] = serde_json::json!(path);
+        }
+        // vmess `host` is the WebSocket Host header, a different thing from the
+        // TLS SNI that borrowed it above.
+        if let Some(host_header) = as_text(payload.get("host")).filter(|h| !h.is_empty()) {
+            transport["headers"] = serde_json::json!({ "Host": host_header });
+        }
+        value["transport"] = transport;
+    }
+    Ok(value)
+}
+
+/// A payload field that any generator may write as a string or as a number.
+fn as_text(value: Option<&serde_json::Value>) -> Option<String> {
+    match value? {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+fn as_port(value: Option<&serde_json::Value>) -> Option<u64> {
+    as_text(value)?.parse().ok()
 }
 
 fn split_uri_tail(rest: &str) -> (&str, &str, Option<String>) {
@@ -620,6 +744,117 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&snapshot.raw).expect("raw is JSON");
         assert_eq!(value["outbounds"][0]["tag"], "🚀节点选择");
         assert!(value["experimental"]["clash_api"].is_object());
+    }
+
+    #[test]
+    fn vless_tls_follows_the_security_parameter() {
+        let cases = [
+            ("vless://u@h.example:443?encryption=none#no-param", false),
+            (
+                "vless://u@h.example:443?encryption=none&security=none#none",
+                false,
+            ),
+            (
+                "vless://u@h.example:443?encryption=none&security=tls&sni=h.example#tls",
+                true,
+            ),
+            (
+                "vless://u@h.example:443?encryption=none&security=reality&sni=h.example&pbk=k&sid=1#reality",
+                true,
+            ),
+        ];
+        for (uri, enabled) in cases {
+            let snapshot = parse(uri).unwrap_or_else(|e| panic!("{uri} must import: {e}"));
+            let value: serde_json::Value =
+                serde_json::from_str(&snapshot.raw).expect("raw is JSON");
+            let node = node_of(&value, "vless");
+            assert_eq!(node["tls"]["enabled"], enabled, "{uri}");
+            if enabled {
+                assert_eq!(node["tls"]["server_name"], "h.example", "{uri}");
+            } else {
+                // Carrying a name/alpn for a handshake that will not happen is
+                // how a plaintext node looks like a TLS one in the node list.
+                assert!(node["tls"].get("server_name").is_none(), "{uri}");
+            }
+        }
+    }
+
+    /// v2rayN and Shadowrocket export `vmess://<base64 json>` with no `@host`
+    /// part at all - the address lives inside the payload.
+    #[test]
+    fn imports_a_standard_vmess_link_the_way_v2rayn_exports_it() {
+        let payload = serde_json::json!({
+            "v": "2", "ps": "东京-A", "add": "1.2.3.4", "port": "443",
+            "id": "uuid-z", "aid": 0, "net": "ws", "host": "h.example",
+            "path": "/ray", "tls": "tls", "sni": "h.example"
+        });
+        let uri = format!(
+            "vmess://{}",
+            base64::engine::general_purpose::STANDARD.encode(payload.to_string())
+        );
+        let snapshot = parse(&uri).unwrap_or_else(|e| panic!("vmess link must import: {e}"));
+        assert_eq!(snapshot.nodes.len(), 1);
+        assert_eq!(snapshot.nodes[0].tag, "东京-A");
+        let value: serde_json::Value = serde_json::from_str(&snapshot.raw).expect("raw is JSON");
+        let node = node_of(&value, "vmess");
+        assert_eq!(node["server"], "1.2.3.4");
+        assert_eq!(node["server_port"], 443);
+        assert_eq!(node["uuid"], "uuid-z");
+        assert_eq!(node["tls"]["enabled"], true);
+        assert_eq!(node["transport"]["type"], "ws");
+    }
+
+    /// Two generators, two shapes for the same field; reading only the string
+    /// form made a numeric alterId silently become 0, which is an auth failure
+    /// the user cannot see.
+    #[test]
+    fn vmess_alter_id_accepts_a_number_and_a_string() {
+        for aid in [serde_json::json!(7), serde_json::json!("7")] {
+            let payload =
+                serde_json::json!({"ps":"n","add":"1.2.3.4","port":2053,"id":"u","aid":aid});
+            let uri = format!(
+                "vmess://{}",
+                base64::engine::general_purpose::STANDARD.encode(payload.to_string())
+            );
+            let snapshot = parse(&uri).expect("vmess payload parses");
+            let value: serde_json::Value =
+                serde_json::from_str(&snapshot.raw).expect("raw is JSON");
+            assert_eq!(node_of(&value, "vmess")["alter_id"], 7, "{aid}");
+        }
+    }
+
+    /// One line this build cannot represent used to abort the whole import, so
+    /// a single exotic entry cost the user every node in the subscription.
+    #[test]
+    fn one_unreadable_line_does_not_lose_the_readable_ones() {
+        let body = [
+            "hysteria2://pass@example.com:8443?insecure=1#good",
+            "wireguard://invalid_public_key@host:51820?private_key=x#unsupported-scheme",
+            "vless://not-even-a-uri",
+            "trojan://pass@example.com:443#not-managed-protocol",
+        ]
+        .join("\n");
+        let snapshot = parse_uri_list(&body).expect("the list still imports");
+        assert_eq!(snapshot.nodes.len(), 1);
+        assert_eq!(snapshot.nodes[0].tag, "good");
+    }
+
+    #[test]
+    fn a_list_of_only_junk_says_so_instead_of_looking_empty() {
+        let error = parse_uri_list("wireguard://a@b:1\nnonsense\n\n")
+            .expect_err("nothing importable must not read as a valid subscription");
+        let message = error.to_string();
+        assert!(message.contains('2'), "count missing: {message}");
+    }
+
+    fn node_of(value: &serde_json::Value, kind: &str) -> serde_json::Value {
+        value["outbounds"]
+            .as_array()
+            .expect("outbounds is a list")
+            .iter()
+            .find(|outbound| outbound["type"] == kind)
+            .unwrap_or_else(|| panic!("no {kind} outbound in {value}"))
+            .clone()
     }
 
     #[test]
