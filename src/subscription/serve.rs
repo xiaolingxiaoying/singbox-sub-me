@@ -505,7 +505,16 @@ fn subscription_http_response(
     // address sees the same answer whatever it asks for: the throttle never
     // reveals whether the credential in that URL is real, which is exactly what
     // the uniform 404 exists to hide.
-    if let Some(retry_after) = throttled(peer, budget) {
+    //
+    // Skipped in external-proxy mode on purpose. There, the peer address is
+    // always the local reverse proxy, so one shared bucket would let the whole
+    // user base collectively throttle each other - and the real per-client
+    // address is in a header this server deliberately does not trust, because a
+    // spoofed X-Forwarded-For turns the throttle into an oracle for hiding
+    // abuse or framing an address. Per-client limits belong in the front proxy.
+    if config.subscription_mode != SubscriptionMode::ExternalProxy
+        && let Some(retry_after) = throttled(peer, budget)
+    {
         return throttled_http_response(&retry_after);
     }
     if request.method() != Method::GET {
@@ -593,8 +602,16 @@ fn subscription_userinfo(traffic: &crate::traffic::TrafficReport) -> String {
     };
     format!(
         "upload={}; download={}; total={}; expire={}; profile-update-interval={}",
-        traffic.transmitted,
+        // The two counters are the VPS network interface's own rx/tx
+        // (`traffic.rs` reads `statistics/rx_bytes` and `tx_bytes`), while this
+        // header is read from the CLIENT's side: every consumer app labels
+        // `upload=` as "what I sent". Bytes arriving at the VPS are what the
+        // client sent, so `received` is the upload and `transmitted` is the
+        // download. Reporting them the other way round made a download-heavy
+        // day look like a massive upload in v2rayN, Clash Verge and
+        // Shadowrocket alike.
         traffic.received,
+        traffic.transmitted,
         quota,
         traffic.next_reset.timestamp(),
         PROFILE_UPDATE_INTERVAL_HOURS
@@ -1177,7 +1194,8 @@ mod tests {
         };
         assert_eq!(
             super::subscription_userinfo(&report),
-            "upload=71; download=36; total=999; expire=1767225600; profile-update-interval=24"
+            "upload=36; download=71; total=999; expire=1767225600; profile-update-interval=24",
+            "the interface's rx is the client's upload, its tx the client's download"
         );
         let unlimited = crate::traffic::TrafficReport {
             monthly_traffic_limit: 0,
@@ -1186,7 +1204,7 @@ mod tests {
         };
         assert_eq!(
             super::subscription_userinfo(&unlimited),
-            "upload=71; download=36; total=112; expire=1767225600; profile-update-interval=24",
+            "upload=36; download=71; total=112; expire=1767225600; profile-update-interval=24",
             "without an allowance `total` keeps reporting the bytes used"
         );
     }

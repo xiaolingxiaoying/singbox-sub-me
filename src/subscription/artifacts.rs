@@ -106,6 +106,16 @@ pub fn regenerate(
             return Err(SubscriptionError::Storage(error));
         }
     }
+    // `apply_config_transaction` prunes superseded files, and this function is
+    // the other way artifacts get written. Without the same call here, a
+    // regenerated deployment keeps serving artifacts no current profile
+    // generates any more - an old `subscription-sing-box-1.10.json` outliving an
+    // AnyTLS-only change is the stale-credential case the prune exists for.
+    // Warn-only: the new generation is already on disk and correct, so a failed
+    // delete must not roll a healthy deployment back.
+    if let Err(error) = remove_stale_artifacts(store, &artifacts) {
+        eprintln!("warning: superseded subscription artifacts could not be removed: {error}");
+    }
     Ok(())
 }
 
@@ -1254,6 +1264,42 @@ ot-a-sing-box.bin"
                 .expect("active config is readable"),
             server.as_bytes(),
             "the active sing-box configuration is re-synced"
+        );
+    }
+
+    /// `apply_config_transaction` has always pruned superseded artifacts;
+    /// `regenerate` is the other way artifacts reach disk and did not, so a
+    /// `subscription-*.json` no current profile generates stayed reachable at a
+    /// valid URL forever. The administrator's own files must still survive.
+    #[test]
+    fn regenerate_prunes_artifacts_the_current_profiles_no_longer_generate() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let store = DeploymentStore::new(fixture.path());
+        let dir = fixture.path().join("var/lib/sbctl/artifacts");
+        fs::create_dir_all(&dir).expect("artifacts directory");
+        let stale = dir.join("subscription-sing-box-0.9.json");
+        fs::write(&stale, b"{\"server\":\"a-host-no-profile-uses\"}").expect("stale artifact");
+        let kept = dir.join("subscription-sing-box.json");
+        fs::write(&kept, b"superseded bytes").expect("owned artifact");
+        // Ownership is decided by prefix, so an administrator who drops a file
+        // named `subscription-*.txt` in here is asking the generator to delete
+        // it. The safe name is one the generator never writes.
+        let admin = dir.join("readme-from-admin.txt");
+        fs::write(&admin, b"written by hand").expect("administrator file");
+
+        regenerate(&store, &vless_config(), None, false).expect("regenerate");
+
+        assert!(
+            !stale.exists(),
+            "a superseded artifact is still being served after regenerate"
+        );
+        assert!(
+            fs::read(&kept).expect("kept artifact") != b"superseded bytes" as &[u8],
+            "the generator must still overwrite the names it owns"
+        );
+        assert!(
+            admin.exists(),
+            "pruning must stay inside the names this generator owns"
         );
     }
 

@@ -1275,7 +1275,9 @@ fn subscription_userinfo_total_reflects_a_total_only_correction() {
     let response = http_get(port, &format!("/sub/{credential}/uri"));
     assert!(response.starts_with("HTTP/1.1 200 OK"));
     assert!(
-        response.contains("subscription-userinfo: upload=60; download=30; total=5000; expire=")
+        // The interface counted rx=30 / tx=60 over the period; from the client's
+        // side those are upload=30 and download=60.
+        response.contains("subscription-userinfo: upload=30; download=60; total=5000; expire=")
     );
     assert!(server.wait().expect("server exits").success());
 }

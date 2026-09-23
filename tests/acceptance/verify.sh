@@ -101,7 +101,10 @@ sleep 1
 for path in sing-box.json sing-box-full.json sing-box-1.12.json sing-box-1.13.json sing-box-1.14.json clash.yaml clash-1.18.yaml uri uri.txt shadowrocket.txt; do
   response=$(curl --silent --show-error --include "http://127.0.0.1:2080/sub/$credential/$path")
   contains "$response" 'HTTP/1.1 200 OK'
-  contains "$response" 'subscription-userinfo: upload=71; download=36; total=999; expire='
+  # rx/tx are the VPS interface's own counters; the header is read from the
+  # client's side, so the interface's rx (36) is the client's upload and its tx
+  # (71) is the client's download. See src/subscription/serve.rs.
+  contains "$response" 'subscription-userinfo: upload=36; download=71; total=999; expire='
   contains "$response" '; profile-update-interval=24'
 done
 for path in "qr/uri" index; do
