@@ -481,9 +481,14 @@ impl ClientSnapshot {
         find_selector_group(&self.proxy_groups, &self.rules)
     }
 
-    /// The most recent engine event a UI renders in its own language.
+    /// The event record whose rendered Chinese line is the current status, when
+    /// the status came from an event code. `None` when the current status was
+    /// written by a plain `note()` (a call site that has not moved yet), so the
+    /// caller falls back to the raw `status` string.
     pub fn latest_event(&self) -> Option<&crate::event_code::EventRecord> {
-        self.event_records.back()
+        self.event_records
+            .back()
+            .filter(|record| record.render_zh() == self.status)
     }
 
     /// Pushes a UI-level event line, keeping a bounded history.
@@ -725,6 +730,26 @@ mod tests {
             snapshot.push_log(format!("log {index}"));
         }
         assert_eq!(snapshot.core_logs.len(), 500);
+    }
+
+    /// `latest_event` answers only when the tail record is what produced the
+    /// current status. A plain `note()` writes `status` without a record, so the
+    /// older coded record must not be rendered in its place.
+    #[test]
+    fn latest_event_only_matches_the_status_it_produced() {
+        use crate::event_code::{EventCode, EventRecord};
+        let record = EventRecord::new(EventCode::CoreReadyToStart, Vec::new());
+        let mut snapshot = ClientSnapshot {
+            status: record.render_zh(),
+            ..ClientSnapshot::default()
+        };
+        snapshot.push_record(record.clone());
+        assert_eq!(snapshot.latest_event(), Some(&record));
+
+        // A later unmigrated call site changes only the string, leaving the
+        // record stale; the accessor has to say so.
+        snapshot.status = "尚未迁移的状态".to_owned();
+        assert_eq!(snapshot.latest_event(), None);
     }
 
     #[test]

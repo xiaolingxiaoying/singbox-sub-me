@@ -2,6 +2,7 @@
 //! chips, the content shell and the two shared field widgets.
 
 use client_core::ClientCommand;
+use client_core::ClientSnapshot;
 use client_core::command::SettingsPatch;
 use client_core::system_proxy::TrafficMode;
 use gpui::prelude::FluentBuilder;
@@ -11,7 +12,7 @@ use gpui::{
 };
 
 use crate::components::{clean_proxy_label, icon, side_rate};
-use crate::lang::outbound_mode;
+use crate::lang::{Locale, outbound_mode};
 use crate::state::{FieldSpec, Page, Sbgui, Tone, switch_language};
 use crate::theme::{
     AMBER, BLUE, BODY, BORDER, BORDER_STRONG, BRAND_ICON_PATH, CONTENT_MAX, CONTENT_PAD, CYAN,
@@ -20,6 +21,23 @@ use crate::theme::{
     WEIGHT_SEMIBOLD, tone_colors,
 };
 use crate::tr;
+
+/// The toolbar's status line: the busy label while a command runs, otherwise
+/// the newest event record rendered in the interface's language. It falls back
+/// to the raw engine string only for a call site that has not moved to an
+/// event code yet, so an English window never inherits Chinese from the record.
+pub(crate) fn toolbar_status(snapshot: &ClientSnapshot, locale: Locale) -> String {
+    if let Some(busy) = snapshot.busy.as_deref() {
+        return format!("{busy}…");
+    }
+    snapshot
+        .latest_event()
+        .map(|record| match locale {
+            Locale::En => record.render_en(),
+            Locale::Zh => record.render_zh(),
+        })
+        .unwrap_or_else(|| snapshot.status.clone())
+}
 
 impl Sbgui {
     pub(crate) fn titlebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -282,11 +300,7 @@ impl Sbgui {
     /// Title, subtitle and status line used to stack into three.
     pub(crate) fn toolbar(&self, page: Page, cx: &mut Context<Self>) -> impl IntoElement {
         let snapshot = &self.snapshot;
-        let status_text = snapshot
-            .busy
-            .as_deref()
-            .map(|busy| format!("{busy}…"))
-            .unwrap_or_else(|| snapshot.status.clone());
+        let status_text = toolbar_status(snapshot, self.locale);
         // Prefer the engine's own severity. The substring test is the legacy
         // path, kept only for status lines that predate the event-code
         // vocabulary; it is why an English interface used to lose the colour.
@@ -731,5 +745,55 @@ impl Sbgui {
                     .child(label),
             )
             .child(self.text_field(spec, window, cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use client_core::event_code::{EventCode, EventRecord};
+
+    fn snapshot_with(record: EventRecord) -> ClientSnapshot {
+        let mut snapshot = ClientSnapshot {
+            status: record.render_zh(),
+            ..ClientSnapshot::default()
+        };
+        snapshot.push_record(record);
+        snapshot
+    }
+
+    /// The point of the event codes: one record, rendered in the window's
+    /// language, so the English window shows the engine status in English.
+    #[test]
+    fn the_status_line_follows_the_record_and_the_locale() {
+        let snapshot = snapshot_with(EventRecord::new(EventCode::CoreReadyToStart, Vec::new()));
+        assert_eq!(
+            toolbar_status(&snapshot, Locale::En),
+            EventCode::CoreReadyToStart.en()
+        );
+        assert_eq!(
+            toolbar_status(&snapshot, Locale::Zh),
+            EventCode::CoreReadyToStart.zh()
+        );
+    }
+
+    /// A status written by a call site that has not moved to a code has no
+    /// record behind it, so the raw string is shown verbatim in either language.
+    #[test]
+    fn an_uncoded_status_falls_back_to_the_raw_string() {
+        let snapshot = ClientSnapshot {
+            status: "尚未迁移的状态".to_owned(),
+            ..ClientSnapshot::default()
+        };
+        assert_eq!(toolbar_status(&snapshot, Locale::En), "尚未迁移的状态");
+        assert_eq!(toolbar_status(&snapshot, Locale::Zh), "尚未迁移的状态");
+    }
+
+    /// While a command runs, its busy label wins over the engine's last event.
+    #[test]
+    fn a_busy_command_wins_over_the_record() {
+        let mut snapshot = snapshot_with(EventRecord::new(EventCode::CoreReadyToStart, Vec::new()));
+        snapshot.busy = Some("启动内核".to_owned());
+        assert_eq!(toolbar_status(&snapshot, Locale::En), "启动内核…");
     }
 }

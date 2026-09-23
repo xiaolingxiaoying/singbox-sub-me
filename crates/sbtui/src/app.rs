@@ -222,10 +222,21 @@ pub(crate) struct App {
     pub(crate) last_engine_status: String,
 }
 
+/// The footer's status line for the engine's latest state: the newest event
+/// record's Chinese rendering when the current status came from a code, and the
+/// raw engine string otherwise. sbtui has no locale, so Chinese is the only
+/// rendering — and it is byte-identical to the string the engine published.
+pub(crate) fn engine_status(snapshot: &ClientSnapshot) -> String {
+    snapshot
+        .latest_event()
+        .map(|record| record.render_zh())
+        .unwrap_or_else(|| snapshot.status.clone())
+}
+
 impl App {
     pub(crate) fn new(controller: ClientController, dir: PathBuf) -> Self {
         let snapshot = controller.snapshot();
-        let status = snapshot.status.clone();
+        let status = engine_status(&snapshot);
         Self {
             controller,
             snapshot,
@@ -263,7 +274,7 @@ impl App {
         self.snapshot = self.controller.snapshot();
         if self.snapshot.status != self.last_engine_status {
             self.last_engine_status = self.snapshot.status.clone();
-            self.status = self.snapshot.status.clone();
+            self.status = engine_status(&self.snapshot);
             self.status_level = self.snapshot.status_level;
         }
         // Keep the display order stable across the engine's periodic
@@ -358,5 +369,30 @@ mod tests {
             );
         }
         assert_eq!(tab, Tab::Dashboard, "six tabs, so the cycle closes at 6");
+    }
+
+    /// sbtui has no locale, so it always renders the record's Chinese — the
+    /// exact string the engine already published, which keeps every golden.
+    #[test]
+    fn the_footer_status_renders_the_records_chinese() {
+        use client_core::event_code::{EventCode, EventRecord};
+        let record = EventRecord::new(EventCode::CoreReadyToStart, Vec::new());
+        let mut snapshot = ClientSnapshot {
+            status: record.render_zh(),
+            ..ClientSnapshot::default()
+        };
+        snapshot.push_record(record);
+        assert_eq!(engine_status(&snapshot), EventCode::CoreReadyToStart.zh());
+    }
+
+    /// A plain `note()` status has no record behind it, so the raw string is
+    /// kept rather than an older record being shown in its place.
+    #[test]
+    fn an_uncoded_status_keeps_the_raw_string() {
+        let snapshot = ClientSnapshot {
+            status: "尚未迁移的状态".to_owned(),
+            ..ClientSnapshot::default()
+        };
+        assert_eq!(engine_status(&snapshot), "尚未迁移的状态");
     }
 }
