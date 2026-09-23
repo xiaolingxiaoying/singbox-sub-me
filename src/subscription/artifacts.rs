@@ -539,6 +539,7 @@ mod tests {
 
     use super::{SING_BOX_VERSION_PROFILES, generated_artifacts, regenerate};
     use crate::config::{DeploymentConfig, DeploymentStore, ManagedProtocol, SubscriptionMode};
+    use crate::subscription::ClientTemplate;
     use crate::subscription::test_support::{
         seed_direct_subscription, seed_single_protocol, vless_config,
     };
@@ -777,6 +778,68 @@ mod tests {
         );
         for (name, contents) in &artifacts {
             insta::assert_snapshot!(name.clone(), canonical_artifact(name, contents));
+        }
+    }
+
+    /// The template axis is a seam, not a behaviour change: an explicit
+    /// `standard` must be indistinguishable from the default configuration.
+    #[test]
+    fn an_explicit_standard_template_matches_the_default_configuration_byte_for_byte() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let default = pinned_five_protocol_config();
+        let mut explicit = pinned_five_protocol_config();
+        explicit.client_template = ClientTemplate::Standard;
+        let default_artifacts =
+            generated_artifacts(&default, fixture.path()).expect("default artifacts generate");
+        let explicit_artifacts =
+            generated_artifacts(&explicit, fixture.path()).expect("explicit artifacts generate");
+        assert_eq!(default_artifacts, explicit_artifacts);
+    }
+
+    /// `Global` and `Split` are declared on the axis but not implemented yet:
+    /// until PR(c) they must render exactly the `Standard` bytes. The four
+    /// frozen artifacts (bare sing-box, URI, base64 URI, Shadowrocket) must be
+    /// byte-identical across all three templates regardless, because they never
+    /// pass through `sing_box_full`/`clash` (ADR-0022).
+    #[test]
+    fn global_and_split_templates_are_the_standard_seam_until_pr_c() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let mut global = pinned_five_protocol_config();
+        global.client_template = ClientTemplate::Global;
+        let mut split = pinned_five_protocol_config();
+        split.client_template = ClientTemplate::Split;
+        let standard = generated_artifacts(&pinned_five_protocol_config(), fixture.path())
+            .expect("standard artifacts generate");
+        let global =
+            generated_artifacts(&global, fixture.path()).expect("global artifacts generate");
+        let split = generated_artifacts(&split, fixture.path()).expect("split artifacts generate");
+
+        assert_eq!(standard, global, "Global must equal Standard until PR(c)");
+        assert_eq!(standard, split, "Split must equal Standard until PR(c)");
+
+        let artifact = |artifacts: &[(String, String)], name: &str| -> String {
+            artifacts
+                .iter()
+                .find(|(artifact, _)| artifact == name)
+                .map(|(_, contents)| contents.clone())
+                .unwrap_or_else(|| panic!("missing artifact {name}"))
+        };
+        for name in [
+            "subscription-sing-box.json",
+            "subscription-uri.txt",
+            "subscription-base64-uri.txt",
+            "subscription-shadowrocket.txt",
+        ] {
+            assert_eq!(
+                artifact(&standard, name),
+                artifact(&global, name),
+                "{name} must stay frozen across templates"
+            );
+            assert_eq!(
+                artifact(&standard, name),
+                artifact(&split, name),
+                "{name} must stay frozen across templates"
+            );
         }
     }
 

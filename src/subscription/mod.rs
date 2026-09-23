@@ -6,6 +6,7 @@ mod artifacts;
 mod profile;
 mod render;
 mod serve;
+mod template;
 #[cfg(test)]
 mod test_support;
 
@@ -27,6 +28,10 @@ pub use render::{
     AI_DOMAIN_SUFFIXES, AUTO_TAG, SELECTOR_TAG, ensure_external_proxy_listener_available,
 };
 pub use serve::{redact_secret, serve};
+pub use template::{
+    ClientTemplate, DnsSpec, GroupRole, GroupSpec, InlineRule, OutboundRole, RuleMatcher,
+    RuleRenderers, RuleSetKind, RuleSetSpec, TemplateSpec, default_client_template,
+};
 
 /// The native share link for one managed node (`vless://…`, `vmess://…`,
 /// `hysteria2://…`, `tuic://…`, `anytls://…`).

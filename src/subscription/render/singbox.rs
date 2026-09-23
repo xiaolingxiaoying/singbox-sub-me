@@ -15,6 +15,7 @@ use crate::canonical::CanonicalNode;
 use crate::config::{CertificateMode, DeploymentConfig, ManagedProtocol, SubscriptionMode};
 use crate::subscription::artifacts::SubscriptionError;
 use crate::subscription::profile::SingBoxVersionProfile;
+use crate::subscription::{GroupRole, OutboundRole, RuleMatcher, TemplateSpec};
 
 /// The full sing-box client configuration for one version profile: log, DNS
 /// (fake-ip with a direct resolver and a proxied DoH fallback), the tun
@@ -43,59 +44,65 @@ pub(crate) fn sing_box_full(
         )));
     }
     let nodes = &compatible_nodes;
+    let spec = TemplateSpec::for_template(config, config.client_template.clone());
     let node_tags: Vec<&str> = nodes.iter().map(CanonicalNode::tag).collect();
     let mut outbounds = client_outbounds(config, nodes);
     let mut selector_members: Vec<&str> = vec![AUTO_TAG, DIRECT_TAG];
     selector_members.extend(node_tags.iter().copied());
-    outbounds.push(json!({
-        "type": "selector",
-        "tag": SELECTOR_TAG,
-        "outbounds": selector_members,
-        "interrupt_exist_connections": false
-    }));
-    outbounds.push(json!({
-        "type": "urltest",
-        "tag": AUTO_TAG,
-        "outbounds": node_tags,
-        "url": config.client_latency_probe_url,
-        "interval": "5m",
-        "tolerance": 50,
-        "idle_timeout": "30m"
-    }));
-    outbounds.push(json!({"type": "direct", "tag": DIRECT_TAG}));
+    for group in &spec.groups {
+        match group.role {
+            GroupRole::Selector => outbounds.push(json!({
+                "type": "selector",
+                "tag": SELECTOR_TAG,
+                "outbounds": selector_members,
+                "interrupt_exist_connections": false
+            })),
+            GroupRole::UrlTest => outbounds.push(json!({
+                "type": "urltest",
+                "tag": AUTO_TAG,
+                "outbounds": node_tags,
+                "url": config.client_latency_probe_url,
+                "interval": "5m",
+                "tolerance": 50,
+                "idle_timeout": "30m"
+            })),
+            GroupRole::Direct => outbounds.push(json!({"type": "direct", "tag": DIRECT_TAG})),
+        }
+    }
 
     let fake_ip = config.client_dns_mode == crate::config::ClientDnsMode::FakeIp;
+    let dns_spec = &spec.dns;
     // 1.12+ requires typed DNS server objects; 1.10/1.11 only accept the
     // legacy address-string format, with fake-ip as a special `fakeip`
     // address plus a top-level dns.fakeip object (removed in 1.14).
     let mut dns = if profile.typed_dns {
         let mut dns_servers = vec![
-            json!({"type": "udp", "tag": "dns-direct", "server": "223.5.5.5"}),
-            json!({"type": "https", "tag": "dns-proxy", "server": "1.1.1.1", "detour": SELECTOR_TAG}),
+            json!({"type": "udp", "tag": dns_spec.direct_tag, "server": dns_spec.direct_server}),
+            json!({"type": "https", "tag": dns_spec.proxy_tag, "server": dns_spec.proxy_server, "detour": SELECTOR_TAG}),
         ];
         if fake_ip {
             dns_servers.push(json!({
                 "type": "fakeip",
-                "tag": "dns-fakeip",
-                "inet4_range": "198.18.0.0/15",
-                "inet6_range": "fc00::/18"
+                "tag": dns_spec.fake_ip_tag,
+                "inet4_range": dns_spec.fake_ip_inet4_range,
+                "inet6_range": dns_spec.fake_ip_inet6_range
             }));
         }
         json!({"servers": dns_servers})
     } else {
         let mut dns_servers = vec![
-            json!({"tag": "dns-direct", "address": "223.5.5.5"}),
-            json!({"tag": "dns-proxy", "address": "https://1.1.1.1/dns-query", "detour": SELECTOR_TAG}),
+            json!({"tag": dns_spec.direct_tag, "address": dns_spec.direct_server}),
+            json!({"tag": dns_spec.proxy_tag, "address": dns_spec.proxy_url, "detour": SELECTOR_TAG}),
         ];
         if fake_ip {
-            dns_servers.push(json!({"tag": "dns-fakeip", "address": "fakeip"}));
+            dns_servers.push(json!({"tag": dns_spec.fake_ip_tag, "address": "fakeip"}));
         }
         let mut dns = json!({"servers": dns_servers});
         if fake_ip {
             dns["fakeip"] = json!({
                 "enabled": true,
-                "inet4_range": "198.18.0.0/15",
-                "inet6_range": "fc00::/18"
+                "inet4_range": dns_spec.fake_ip_inet4_range,
+                "inet6_range": dns_spec.fake_ip_inet6_range
             });
         }
         dns
@@ -106,24 +113,26 @@ pub(crate) fn sing_box_full(
         // Pre-1.12 cores have no route.default_domain_resolver; the legacy
         // `outbound: any` DNS rule (removed in 1.14) resolves proxy server
         // domains through direct DNS instead.
-        dns_rules.push(json!({"outbound": "any", "server": "dns-direct"}));
+        dns_rules.push(json!({"outbound": "any", "server": dns_spec.direct_tag}));
     }
-    dns_rules.push(json!({"clash_mode": "Direct", "server": "dns-direct"}));
-    dns_rules.push(json!({"clash_mode": "Global", "server": "dns-proxy"}));
-    if config.client_rule_profile == crate::config::ClientRuleProfile::Standard {
-        dns_rules.push(json!({"rule_set": ["geosite-cn"], "server": "dns-direct"}));
+    dns_rules.push(json!({"clash_mode": "Direct", "server": dns_spec.direct_tag}));
+    dns_rules.push(json!({"clash_mode": "Global", "server": dns_spec.proxy_tag}));
+    if config.client_rule_profile == crate::config::ClientRuleProfile::Standard
+        && let Some(rule_set) = dns_spec.direct_rule_set
+    {
+        dns_rules.push(json!({"rule_set": [rule_set], "server": dns_spec.direct_tag}));
     }
     dns_rules.push(json!({
         "domain_suffix": FAKE_IP_FILTER_SUFFIXES,
-        "server": "dns-direct"
+        "server": dns_spec.direct_tag
     }));
     if fake_ip {
-        dns_rules.push(json!({"query_type": ["A", "AAAA"], "server": "dns-fakeip"}));
+        dns_rules.push(json!({"query_type": ["A", "AAAA"], "server": dns_spec.fake_ip_tag}));
     }
     // `independent_cache` is deprecated in 1.14 and removed in 1.16, and
     // brings no benefit here, so the DNS object stays lean across versions.
     dns["rules"] = json!(dns_rules);
-    dns["final"] = json!("dns-proxy");
+    dns["final"] = json!(dns_spec.proxy_tag);
 
     let legacy_route = !profile.route_rule_actions;
     let mut tun = json!({
@@ -140,14 +149,14 @@ pub(crate) fn sing_box_full(
     if let Some(stack) = profile.tun_stack {
         tun["stack"] = json!(stack);
     }
-    if legacy_route {
+    if legacy_route && spec.sniff {
         // 1.10 has no route rule actions; protocol sniffing is configured on
         // the inbound and DNS is hijacked through a special `dns` outbound.
         tun["sniff"] = json!(true);
     }
 
     let mut route_rules = Vec::new();
-    if !legacy_route {
+    if !legacy_route && spec.sniff {
         route_rules.push(json!({"action": "sniff"}));
     }
     route_rules.push(if legacy_route {
@@ -155,34 +164,58 @@ pub(crate) fn sing_box_full(
     } else {
         json!({"protocol": "dns", "action": "hijack-dns"})
     });
-    route_rules.push(json!({"ip_is_private": true, "outbound": DIRECT_TAG}));
-    route_rules.push(json!({
-        "domain_suffix": AI_DOMAIN_SUFFIXES,
-        "outbound": SELECTOR_TAG
-    }));
+    for rule in spec
+        .inline_rules
+        .iter()
+        .filter(|rule| rule.renderers.includes_sing_box())
+    {
+        let outbound = match rule.outbound {
+            OutboundRole::Selector => SELECTOR_TAG,
+            OutboundRole::Direct => DIRECT_TAG,
+        };
+        match rule.matcher {
+            RuleMatcher::Private => {
+                route_rules.push(json!({"ip_is_private": true, "outbound": outbound}))
+            }
+            RuleMatcher::AiDomains => route_rules.push(json!({
+                "domain_suffix": AI_DOMAIN_SUFFIXES,
+                "outbound": outbound
+            })),
+        }
+    }
     let mut rule_sets: Vec<Value> = Vec::new();
     if config.client_rule_profile == crate::config::ClientRuleProfile::Standard {
-        route_rules.push(json!({"rule_set": ["geosite-cn", "geoip-cn"], "outbound": DIRECT_TAG}));
-        rule_sets.push(remote_rule_set(
-            "geosite-cn",
-            &format!("{}/geosite/cn.srs", sing_box_rule_set_base(config)),
-        ));
-        rule_sets.push(remote_rule_set(
-            "geoip-cn",
-            &format!("{}/geoip/cn.srs", sing_box_rule_set_base(config)),
-        ));
+        let mut cn_rule_set_tags: Vec<&str> = Vec::new();
+        for entry in spec
+            .rule_sets
+            .iter()
+            .filter(|entry| entry.sing_box_url.is_some())
+        {
+            let url = entry
+                .sing_box_url
+                .as_deref()
+                .expect("a sing-box rule-set carries a URL");
+            rule_sets.push(remote_rule_set(entry.tag, url));
+            cn_rule_set_tags.push(entry.tag);
+        }
+        route_rules.push(json!({"rule_set": cn_rule_set_tags, "outbound": DIRECT_TAG}));
     }
     if legacy_route {
         outbounds.push(json!({"type": "dns", "tag": "dns-out"}));
     }
+    let final_group = match spec.final_group {
+        GroupRole::Selector => SELECTOR_TAG,
+        GroupRole::UrlTest => AUTO_TAG,
+        GroupRole::Direct => DIRECT_TAG,
+    };
     let mut route = json!({
         "rules": route_rules,
         "rule_set": rule_sets,
-        "final": SELECTOR_TAG,
+        "final": final_group,
         "auto_detect_interface": true
     });
     if profile.typed_dns {
-        route["default_domain_resolver"] = json!({"server": "dns-direct"});
+        route["default_domain_resolver"] = json!({"server": dns_spec.direct_tag});
     }
 
     let mut cache_file = json!({"enabled": true, "store_fakeip": fake_ip});
@@ -205,15 +238,6 @@ pub(crate) fn sing_box_full(
         }
     }))
     .expect("JSON values serialize"))
-}
-
-/// The rule-set base for sing-box artifacts: the configured source root plus
-/// the `@sing` branch that carries the `.srs` binary rule-sets.
-fn sing_box_rule_set_base(config: &DeploymentConfig) -> String {
-    format!(
-        "{}@sing/geo",
-        config.client_rule_set_base_url.trim_end_matches('/')
-    )
 }
 
 fn remote_rule_set(tag: &str, url: &str) -> Value {

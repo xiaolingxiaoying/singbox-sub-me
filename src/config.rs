@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use x25519_dalek::{X25519_BASEPOINT_BYTES, x25519};
 
+use crate::subscription::{ClientTemplate, default_client_template};
+
 pub const CONFIG_RELATIVE_PATH: &str = "etc/sbctl/config.toml";
 pub const STATE_RELATIVE_PATH: &str = "var/lib/sbctl/state.json";
 const ARTIFACTS_RELATIVE_PATH: &str = "var/lib/sbctl/artifacts";
@@ -77,6 +79,11 @@ pub struct DeploymentConfig {
     /// minimal uses only built-in rules (ADR-0018 vendor neutrality).
     #[serde(default = "default_client_rule_profile")]
     pub client_rule_profile: ClientRuleProfile,
+    /// Client content template (ADR-0022): `standard` reproduces the historical
+    /// artifact structure; `global` and `split` are declared and will gain
+    /// richer content in PR(c).
+    #[serde(default = "default_client_template")]
+    pub client_template: ClientTemplate,
     /// Base URL for remote rule-set downloads (jsDelivr + MetaCubeX by
     /// default); change it to a mirror without touching generated templates.
     #[serde(default = "default_client_rule_set_base_url")]
@@ -407,6 +414,7 @@ impl DeploymentConfig {
             certbot_email: None,
             client_dns_mode: default_client_dns_mode(),
             client_rule_profile: default_client_rule_profile(),
+            client_template: default_client_template(),
             client_rule_set_base_url: default_client_rule_set_base_url(),
             client_latency_probe_url: default_client_latency_probe_url(),
             vless_reality,
@@ -525,6 +533,9 @@ impl DeploymentConfig {
                 .unwrap_or_default(),
             client_rule_profile: existing
                 .map(|config| config.client_rule_profile.clone())
+                .unwrap_or_default(),
+            client_template: existing
+                .map(|config| config.client_template.clone())
                 .unwrap_or_default(),
             client_rule_set_base_url: existing
                 .map(|config| config.client_rule_set_base_url.clone())
