@@ -543,6 +543,21 @@ pub fn enabled_nodes(config: &DeploymentConfig) -> String {
         .join("\n")
 }
 
+/// Each enabled node's native share link, one per line, matching the `uri`
+/// subscription artifact byte-for-byte.
+///
+/// These carry the proxy credentials, so they belong on the operator's own
+/// terminal and on the index page (which already sits behind the path
+/// credential) — never in the journal, per ADR-0013, and never in `sbctl sub`,
+/// which is routinely piped into logs and screenshots.
+pub fn node_share_links(config: &DeploymentConfig) -> String {
+    crate::canonical::nodes(config)
+        .iter()
+        .map(|node| crate::subscription::node_share_link(config, node))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 fn write_unit(root: &Path, relative_path: &str, contents: &str) -> Result<(), ConfigError> {
     let path = root.join(relative_path);
     let parent = path.parent().expect("unit path has parent");

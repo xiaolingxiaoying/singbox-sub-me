@@ -27,6 +27,20 @@ pub use render::{
 };
 pub use serve::{redact_secret, serve};
 
+/// The native share link for one managed node (`vless://…`, `vmess://…`,
+/// `hysteria2://…`, `tuic://…`, `anytls://…`).
+///
+/// This is the same string the `uri` artifact carries, exposed so the index page
+/// and `sbctl status nodes --uri` can show a node's parameters without making the
+/// operator download a credential'd file to see their own configuration. The
+/// returned line keeps its trailing newline, matching the artifact byte-for-byte.
+pub fn node_share_link(
+    config: &crate::config::DeploymentConfig,
+    node: &crate::canonical::CanonicalNode,
+) -> String {
+    render::node_uri(render::insecure_flag(config), &node.with_bracketed_host())
+}
+
 fn base64_uri(uri: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(uri.as_bytes())
 }

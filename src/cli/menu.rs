@@ -217,7 +217,7 @@ fn menu_protocols(root: &Path) {
         match read_menu_choice("请选择 [0]: ").as_deref() {
             Some("0") | None => return,
             Some("1") => {
-                print_nodes(root);
+                print_nodes(root, false);
                 pause_menu();
             }
             Some("2") => {

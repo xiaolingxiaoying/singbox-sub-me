@@ -11,7 +11,7 @@ use tempfile::TempDir;
 
 use crate::fixture::{
     free_high_tcp_port, http_get, http_request, initialize_ip_fallback_subscription,
-    sing_box_check_fixture, spawn_sbctl_serve, write_traffic_fixture,
+    read_subscription_credential, sing_box_check_fixture, spawn_sbctl_serve, write_traffic_fixture,
 };
 
 #[test]
@@ -581,6 +581,204 @@ fn five_protocols_export_the_same_canonical_nodes_across_server_and_subscription
         }
     }
     let _: serde_yaml::Value = serde_yaml::from_str(&clash).expect("Clash subscription is YAML");
+}
+
+/// G5: `sbctl node --uri` is the operator's own view of the same links the
+/// `uri` artifact ships. It is opt-in because the lines carry node credentials,
+/// and it must never carry the Subscription credential, which would let a
+/// pasted screenshot both read and administer the deployment (ADR-0002).
+#[test]
+fn node_uri_flag_prints_the_native_share_links_and_plain_node_prints_none() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let checker = sing_box_check_fixture(
+        &fixture,
+        true,
+        &["vless", "vmess", "hysteria2", "tuic", "anytls"],
+    );
+    let root = fixture.path().to_str().expect("fixture path is UTF-8");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            root,
+            "config",
+            "init",
+            "--mode",
+            "direct",
+            "--subscription-host",
+            "sub.example.test",
+            "--proxy-host",
+            "proxy.example.test",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--protocol",
+            "vmess-websocket",
+            "--protocol",
+            "hysteria2",
+            "--protocol",
+            "tuic",
+            "--protocol",
+            "anytls",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+            "--sing-box-bin",
+            checker.to_str().expect("checker path is UTF-8"),
+        ])
+        .assert()
+        .success();
+
+    let artifact = fs::read_to_string(
+        fixture
+            .path()
+            .join("var/lib/sbctl/artifacts/subscription-uri.txt"),
+    )
+    .expect("URI subscription is cached");
+    let credential = read_subscription_credential(&fixture);
+
+    let plain = Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(["--root", root, "node"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plain = String::from_utf8(plain).expect("plain node output is UTF-8");
+    assert!(
+        !plain.contains("://"),
+        "share links stay opt-in; `sbctl node` is piped into logs and screenshots: {plain}"
+    );
+
+    let with_uris = Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(["--root", root, "node", "--uri"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("原生分享链接"))
+        .get_output()
+        .stdout
+        .clone();
+    let with_uris = String::from_utf8(with_uris).expect("--uri output is UTF-8");
+    let links = with_uris
+        .split_once("：\n")
+        .or_else(|| with_uris.split_once(":\n"))
+        .map(|(_, rest)| rest)
+        .expect("the share-link header ends its own line");
+    assert_eq!(
+        links, artifact,
+        "--uri must print the uri artifact byte-for-byte"
+    );
+    assert_eq!(
+        links.lines().filter(|line| !line.is_empty()).count(),
+        5,
+        "every one of the five enabled nodes needs a line"
+    );
+    assert!(
+        !with_uris.contains(&credential),
+        "--uri must not expose the Subscription credential"
+    );
+}
+
+/// G5: the index page sits behind the 256-bit path credential exactly like the
+/// `uri` artifact does, so showing the same links there adds no boundary — it
+/// only removes the need to download a credential'd file to read one's own
+/// node parameters.
+#[test]
+fn the_index_page_shows_every_native_share_link_the_uri_route_serves() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    let port = free_high_tcp_port();
+    let checker = sing_box_check_fixture(&fixture, true, &["vless", "hysteria2", "tuic"]);
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "127.0.0.1",
+            "--http-port",
+            &port.to_string(),
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--protocol",
+            "hysteria2",
+            "--protocol",
+            "tuic",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+            "--sing-box-bin",
+            checker.to_str().expect("checker path is UTF-8"),
+        ])
+        .assert()
+        .success();
+    let credential = read_subscription_credential(&fixture);
+    let stderr_log = fixture.path().join("serve.err");
+    let mut server = spawn_sbctl_serve(&fixture, port, 2, &stderr_log);
+
+    let served = http_get(port, &format!("/sub/{credential}/uri"));
+    let (_, uris) = served
+        .split_once("\r\n\r\n")
+        .expect("the uri route has a body");
+    let index = http_get(port, &format!("/sub/{credential}/index"));
+    assert!(
+        index.starts_with("HTTP/1.1 200 OK"),
+        "index serves 200, got: {index}"
+    );
+    assert!(
+        index.contains("节点与原生分享链接"),
+        "the index page carries the native share-link section"
+    );
+
+    let lines: Vec<&str> = uris.lines().filter(|line| !line.is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        3,
+        "the three enabled nodes must each have a share link"
+    );
+    for line in &lines {
+        assert!(
+            index.contains(&html_escape(line)),
+            "the index page must carry the {line} link"
+        );
+    }
+    for tag in [
+        "sbctl-vless-reality",
+        "sbctl-hysteria2",
+        "sbctl-tuic",
+        "sbctl-anytls",
+    ] {
+        assert_eq!(
+            index.contains(tag),
+            tag != "sbctl-anytls",
+            "only nodes this deployment enables are listed; {tag} is wrong"
+        );
+    }
+
+    assert!(
+        server
+            .wait()
+            .expect("server exits after the request limit")
+            .success()
+    );
+}
+
+/// Mirrors the private escaping `index_page::esc` applies, so a link that only
+/// matches after escaping is caught.
+fn html_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 #[test]

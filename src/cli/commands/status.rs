@@ -16,10 +16,17 @@ pub(crate) fn format_local_time(instant: chrono::DateTime<chrono::Utc>, timezone
         .unwrap_or_else(|_| instant.to_rfc3339())
 }
 
-pub(crate) fn print_nodes(root: &Path) -> ExitCode {
+pub(crate) fn print_nodes(root: &Path, uri: bool) -> ExitCode {
     match sbctl::config::DeploymentStore::new(root).load() {
         Ok(config) => {
             println!("{}", sbctl::lifecycle::enabled_nodes(&config));
+            if uri {
+                let links = sbctl::lifecycle::node_share_links(&config);
+                if !links.is_empty() {
+                    println!("\n原生分享链接（含节点凭据，仅输出到本终端）:");
+                    print!("{links}");
+                }
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {
