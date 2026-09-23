@@ -60,4 +60,19 @@ zh 模板必须与现字符串**逐字相同**，否则下面那批断言与金�
 2. 按行号批量替换调用点（单独一次提交，金标准应零变化）；
 3. 再处理漏斗：能编码的编码，尾部显式承认；
 4. 最后补 issue 02 第 5 步——zh 与 en 两套全页截图。L4 腿现在可用：
-   `SBGUI_LANG=en bash scripts/sbgui-shot/shot.sh`，EN 下不得出现 CJK 字形。
+   `SBGUI_LANG=en OUT_REL=.scratch/sbgui-shots-en bash scripts/sbgui-shot/shot.sh`。
+
+## 2026-09-23：EN 腿已经跑过一次，抓到一条真泄露
+
+`SBGUI_LANG=en` 全页截图（9 张，含新增 about）里，概览页**副状态行仍是中文**：
+
+> 就绪。先下载 sing-box 内核，再导入订阅。
+
+也就是说 EN 下 CJK 泄露点不在 chrome（标签、按钮、`Routing / core / auto restart` 全是英文，
+右上角那颗 `中文` 是"切到中文"的按钮，属预期），而在**引擎默认状态字符串**：
+`controller.rs:222` 的初始 status 与 `state.rs:468` 里 `ClientSnapshot::default().status` 那句
+"就绪。先导入订阅，再启动内核。"。这两处不在上面 21 处 `.note(` 清单里（它们是**直接赋值**而非 `note`），
+所以第 2 步的替换必须一并覆盖"初始 status / 默认 status"这两条，否则 EN 截图的门禁永远红。
+
+判据（下次跑 EN 腿时用它当验收）：9 张图里除右上角语言按钮外不得出现任何 CJK 字形。
+
