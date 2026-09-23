@@ -35,7 +35,7 @@
 - **G4** 策略组薄：sing-box 固定 1 selector + 1 urltest + direct，Clash 固定 3 组；无 fallback / load-balancing / 区域分组。
 - **G5** 节点原生协议链接**已生成但从不展示**：`sbctl sub` 只打印订阅 URL（`src/cli/commands/serve.rs:52-121`），`sbctl nodes` 只打印 `protocol: TRANSPORT port`（`src/lifecycle.rs:531-544`），index 页根本不碰 `canonical::nodes`（`src/index_page.rs:37-78`）。
 - **G6** `subscription-userinfo` 缺 `profile-update-interval`（Clash/Verge/Shadowrocket 会认这个键）。
-- **G7** "最新稳定版往前 5 个版本"是**写死的 1.10–1.14 固定带，不会滑动**：`SING_BOX_VERSION_PROFILES` 是常量数组（`src/subscription/profile.rs:136-182`），`latest_version_profile()` 返回 `.last()`（`:185-189`），`sing-box-full.json` 就用它（`src/subscription/artifacts.rs:298`）。上游一发 1.15：服务端装 1.15，`sing-box-full.json` 仍指向 1.14，`sing-box-1.15.json` 直接 404。真核校验存在但被 `#[ignore]` 且环境变量缺失时**静默跳过**（`tests/version_profiles.rs:62-65`）。**→ 部分关闭**：静默跳过与 CI 带检查已在 Phase 0.5 解决，"已装内核比表更新"改为只告警并在 `status` / `status --json` 暴露已在 Phase 3(4) 解决；仍未做的是 §Phase 3(3) 的运行期选目标（要改公开 `generated_artifacts` 签名）。
+- **G7** "最新稳定版往前 5 个版本"是**写死的 1.10–1.14 固定带，不会滑动**：`SING_BOX_VERSION_PROFILES` 是常量数组（`src/subscription/profile.rs:136-182`），`latest_version_profile()` 返回 `.last()`（`:185-189`），`sing-box-full.json` 就用它（`src/subscription/artifacts.rs:298`）。上游一发 1.15：服务端装 1.15，`sing-box-full.json` 仍指向 1.14，`sing-box-1.15.json` 直接 404。真核校验存在但被 `#[ignore]` 且环境变量缺失时**静默跳过**（`tests/version_profiles.rs:62-65`）。**→ 部分关闭**：静默跳过与 CI 带检查已在 Phase 0.5 解决，"已装内核比表更新"改为只告警并在 `status` / `status --json` 暴露已在 Phase 3(4) 解决；运行期选目标也已在 §Phase 3(3) 落地（`sing-box-full.json` 问内核再选档，公开入口保留不咨询内核的等价包装）。
 - **G8** 无按源 IP 限流（只有并发上限）。**→ 2026-09-23 已关闭**，见 §Phase 7 与 §11 的 PR(G8) 小节。
 - **G9** TUI 的"覆写配置文件内容"：客户端侧完全没有查看/编辑能力，唯一的 override 是内部自动的（`crates/client-core/src/core.rs:160-184`、`:549-587`）。
 - **G10** TUI 的"显示入站"：整个客户端树没有任何一处读取 `config["inbounds"]`；规则视图还是藏在 Logs 页里的一个开关（`crates/sbtui/src/view/logs.rs:16-20`）。
@@ -768,6 +768,24 @@ L2（WSL，`-p sbctl -p client-core -p sbtui`）同样 fmt 0 / clippy 0 / **364 
 
 (b) `ClientTemplate` 轴（`Standard` 必须字节复现今天）+ G3 规则集及其 `minimal` 内联孪生
 （这两件是同一件事：孪生列表是模板的数据）。
+
+### Phase 3(3)：`sing-box-full.json` 改为**问内核**再选目标（已完成）
+
+- 新增 `select_full_profile`（纯函数，判定通过 `accepts(&Profile, &rendered)` 闭包注入，
+  所以选择逻辑本身不需要 spawn 就能测）与 `resolve_full_profile`（唯一的 I/O 包装，
+  `accepts` 就是 `check_sing_box_config(kernel, _)`）。沿注册表**从新到旧**走，
+  第一个既渲染得出来、又被内核接受的档胜出。
+- 三条不可破坏的边界都写成了测试：内核全盘接受时结果与今天**逐字节相同**（金标准未动即证据）；
+  全部被拒 / 内核读不到 / 没有内核时**回落到表内最新档**，绝不因此让生成失败或产出空工件；
+  向下走时**跳过**承载不了当前节点集的档（只有 AnyTLS 的部署不会掉进 1.10/1.11）。
+- 穿线只落在"会写盘"的路径上：`regenerate` 与 `apply_config_transaction` 把它本来就收到的
+  `sing_box_bin` 传下去，`install` 传刚下载/指定的那个内核，`config` 事务分支传已解析路径；
+  公开的 `generated_artifacts(config, root)` 保留为"不咨询内核"的等价包装，
+  所以 20 多个测试调用点与金标准一字未改。
+- **接线证明**：`store_dns` 只有 1.14 档携带（金标准可查），于是用一个"含 `store_dns` 就退出 1"
+  的 sh 桩内核就能精确表达"这台内核还没见过最新 minor"，断言 full 工件与 `sing-box-1.13.json`
+  **逐字节相等**。变异检验：把工件那行改回 `latest_version_profile()` → 该测试判红，
+  差异恰好是 `store_dns` 一行。测试 `#[cfg(unix)]`（桩要能执行），Linux 腿实测通过。
 
 ### Phase 3(4)：已装内核高于版本表顶时"只告警、不断服"（已完成）
 

@@ -451,8 +451,12 @@ pub(crate) fn commit_config_change(
         let binary = sing_box_bin.unwrap_or_else(|| root.join("usr/local/bin/sing-box"));
         match existing {
             None => {
-                let artifacts = sbctl::subscription::generated_artifacts(new, root)
-                    .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+                let artifacts = sbctl::subscription::generated_artifacts_for_kernel(
+                    new,
+                    root,
+                    Some(binary.as_path()),
+                )
+                .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
                 let server = artifacts
                     .iter()
                     .find(|(name, _)| *name == "sing-box-server.json")

@@ -13,8 +13,8 @@ use base64::Engine;
 
 pub use artifacts::{
     DeploymentSnapshot, SubscriptionError, apply_config_transaction, check_sing_box_config,
-    generated_artifacts, read_authorized, regenerate, restore_config_transaction, route_url,
-    subscription_url,
+    generated_artifacts, generated_artifacts_for_kernel, read_authorized, regenerate,
+    resolve_full_profile, restore_config_transaction, route_url, subscription_url,
 };
 
 pub use profile::{
