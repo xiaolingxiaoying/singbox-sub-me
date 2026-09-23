@@ -112,6 +112,11 @@ fi
 
 export CARGO_TARGET_DIR=/target
 cd /src
+# Windows bind mounts and the container can disagree about file mtimes, and a
+# skipped rebuild makes the harness shoot stale pixels that still look
+# plausible. Touch the workspace so the pictures always match the source.
+touch /src/Cargo.toml /src/Cargo.lock
+find /src/crates -name '*.rs' -exec touch {} +
 cargo build -p sbgui || exit 1
 BIN=$CARGO_TARGET_DIR/debug/sbgui
 HERE=$(dirname "$0")
