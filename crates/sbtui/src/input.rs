@@ -116,9 +116,8 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
             app.input_text = app.snapshot.settings.mirror.clone();
         }
         KeyCode::Char('d') if app.tab == Tab::Settings => app.send(ClientCommand::DownloadCore),
-        KeyCode::Char('r') if app.tab == Tab::Logs => {
-            app.show_rules = !app.show_rules;
-        }
+        KeyCode::Char('r') if app.tab == Tab::Logs => app.tab = Tab::Rules,
+        KeyCode::Char('r') if app.tab == Tab::Rules => app.tab = Tab::Logs,
         KeyCode::Char('o') => {
             let next = app.snapshot.outbound_mode.next();
             app.send(ClientCommand::SetOutboundMode(next));

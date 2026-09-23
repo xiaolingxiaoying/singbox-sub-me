@@ -15,6 +15,8 @@ pub(crate) enum Tab {
     Connections,
     Logs,
     Settings,
+    /// The inbounds and routing rules of the configuration the core uses.
+    Rules,
 }
 
 impl Tab {
@@ -24,17 +26,19 @@ impl Tab {
             Self::Proxies => Self::Connections,
             Self::Connections => Self::Logs,
             Self::Logs => Self::Settings,
-            Self::Settings => Self::Dashboard,
+            Self::Settings => Self::Rules,
+            Self::Rules => Self::Dashboard,
         }
     }
 
     pub(crate) fn previous(self) -> Self {
         match self {
-            Self::Dashboard => Self::Settings,
+            Self::Dashboard => Self::Rules,
             Self::Proxies => Self::Dashboard,
             Self::Connections => Self::Proxies,
             Self::Logs => Self::Connections,
             Self::Settings => Self::Logs,
+            Self::Rules => Self::Settings,
         }
     }
 
@@ -45,6 +49,7 @@ impl Tab {
             2 => Self::Connections,
             3 => Self::Logs,
             4 => Self::Settings,
+            5 => Self::Rules,
             _ => return None,
         })
     }
@@ -56,6 +61,7 @@ impl Tab {
             Self::Connections => 2,
             Self::Logs => 3,
             Self::Settings => 4,
+            Self::Rules => 5,
         }
     }
 }
@@ -183,7 +189,6 @@ pub(crate) struct App {
     // Logs tab.
     /// Toggle between the live log tail (default) and a rendering of the
     /// active configuration's routing rules.
-    pub(crate) show_rules: bool,
     /// Rows scrolled back from the newest line; 0 follows the tail.
     pub(crate) log_scroll: usize,
     /// Inner text height of the last rendered log panel, used to page.
@@ -233,7 +238,6 @@ impl App {
             selected_connection_id: None,
             conn_sort: ConnSort::Download,
             conn_filter: String::new(),
-            show_rules: false,
             log_scroll: 0,
             log_view_height: 0,
             paused_logs: None,
@@ -334,9 +338,25 @@ mod tests {
     #[test]
     fn tabs_cycle_in_both_directions() {
         assert_eq!(Tab::Dashboard.next(), Tab::Proxies);
-        assert_eq!(Tab::Settings.next(), Tab::Dashboard);
-        assert_eq!(Tab::Dashboard.previous(), Tab::Settings);
+        assert_eq!(Tab::Settings.next(), Tab::Rules);
+        assert_eq!(Tab::Rules.next(), Tab::Dashboard);
+        assert_eq!(Tab::Dashboard.previous(), Tab::Rules);
+        assert_eq!(Tab::Rules.previous(), Tab::Settings);
         assert_eq!(Tab::from_index(2), Some(Tab::Connections));
+        assert_eq!(Tab::from_index(5), Some(Tab::Rules));
         assert_eq!(Tab::from_index(9), None);
+        // Cycling has to cover every tab and come back around, which is what
+        // keeps the header's numbering and the number keys in step with the
+        // enum when a tab is added.
+        let mut tab = Tab::Dashboard;
+        for index in 1..=6 {
+            tab = tab.next();
+            assert_eq!(
+                Tab::from_index(tab.index()),
+                Some(tab),
+                "cycle step {index}"
+            );
+        }
+        assert_eq!(tab, Tab::Dashboard, "six tabs, so the cycle closes at 6");
     }
 }

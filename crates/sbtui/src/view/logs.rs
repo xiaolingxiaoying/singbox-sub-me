@@ -7,20 +7,11 @@ use ratatui::widgets::Paragraph;
 
 use crate::app::App;
 use crate::style::panel;
-use crate::view::settings::rules_lines;
 
 pub(crate) fn draw_logs(frame: &mut Frame, area: ratatui::prelude::Rect, app: &mut App) {
     // The bordered panel leaves its inner rows to the text.
     let inner_height = area.height.saturating_sub(2);
     app.log_view_height = inner_height;
-    if app.show_rules {
-        let lines: Vec<Line> = rules_lines(app).into_iter().map(Line::from).collect();
-        frame.render_widget(
-            Paragraph::new(lines).block(panel("分流规则 · r 返回日志")),
-            area,
-        );
-        return;
-    }
     let all = log_page_lines(app);
     let lines: Vec<Line> = log_window(&all, inner_height, app.log_scroll)
         .iter()
@@ -73,13 +64,9 @@ pub(crate) fn current_log_lines(app: &App) -> Vec<String> {
     }
 }
 
-/// The Logs page body: the active configuration's routing rules, or the
-/// filtered log tail (falling back to the client's own event stream when the
-/// kernel has not logged anything matching).
+/// The Logs page body: the filtered log tail, falling back to the client's own
+/// event stream when the kernel has not logged anything matching.
 fn log_page_lines(app: &App) -> Vec<String> {
-    if app.show_rules {
-        return rules_lines(app);
-    }
     let lines = current_log_lines(app);
     let filtered: Vec<String> = lines
         .into_iter()

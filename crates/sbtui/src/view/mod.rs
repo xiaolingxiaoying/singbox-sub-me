@@ -5,6 +5,7 @@ mod connections;
 mod dashboard;
 pub(crate) mod logs;
 pub(crate) mod proxies;
+mod rules;
 pub(crate) mod settings;
 
 use ratatui::Frame;
@@ -21,9 +22,10 @@ use crate::view::connections::draw_connections;
 use crate::view::dashboard::draw_dashboard;
 use crate::view::logs::{draw_logs, tail_within_width};
 use crate::view::proxies::{draw_proxies, selected_node};
+use crate::view::rules::draw_rules;
 use crate::view::settings::draw_settings;
 
-const TAB_TITLES: [&str; 5] = ["概览", "节点", "连接", "日志", "设置"];
+const TAB_TITLES: [&str; 6] = ["概览", "节点", "连接", "日志", "设置", "入站"];
 
 pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
     const INK: Color = Color::Rgb(8, 18, 28);
@@ -45,6 +47,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
         Tab::Connections => draw_connections(frame, outer[1], app),
         Tab::Logs => draw_logs(frame, outer[1], app),
         Tab::Settings => draw_settings(frame, outer[1], app),
+        Tab::Rules => draw_rules(frame, outer[1], app),
     }
     draw_footer(frame, outer[2], app);
     if app.input.is_some() {
@@ -127,6 +130,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             "↑↓/PgUp PgDn 回看  ·  End 回到最新  ·  Space 暂停  ·  l 级别  ·  / 关键字  ·  c 复制  ·  r 分流规则"
         }
         Tab::Settings => "n 新增  ·  e 编辑  ·  Delete 删除  ·  d 下载内核  ·  a/P/U 选项",
+        Tab::Rules => "入站与规则来自内核正在使用的配置  ·  r 返回日志",
     };
     let line = Line::from(vec![
         Span::styled(" ", Style::default()),
@@ -204,6 +208,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
             "↑↓/PgUp PgDn 回看 · End 回到最新 · Space 暂停 · l 切换级别 · / 关键字过滤 · c 复制 · r 查看规则"
         }
         Tab::Settings => "n 新增 · e 编辑 · Delete 删除 · d 下载内核 · a/P/U/g/y 选项",
+        Tab::Rules => "只读视图 · r 返回日志",
     };
     let body = vec![
         Line::from(Span::styled(
@@ -317,7 +322,20 @@ mod render_tests {
         let mut delays = HashMap::new();
         delays.insert("东京-A".to_owned(), 42_u64);
         ClientSnapshot {
-            inbounds: Vec::new(),
+            inbounds: vec![
+                client_core::state::InboundInfo {
+                    kind: "mixed".to_owned(),
+                    tag: "mixed-in".to_owned(),
+                    listen: "127.0.0.1".to_owned(),
+                    port: 2080,
+                },
+                client_core::state::InboundInfo {
+                    kind: "tun".to_owned(),
+                    tag: "tun-in".to_owned(),
+                    listen: String::new(),
+                    port: 0,
+                },
+            ],
             core_running: true,
             current_node: Some("东京-A".to_owned()),
             traffic_mode: TrafficMode::Tun,
@@ -379,13 +397,12 @@ mod render_tests {
         }
     }
 
-    fn frame_for(tab: Tab, snapshot: ClientSnapshot, show_rules: bool) -> String {
+    fn frame_for(tab: Tab, snapshot: ClientSnapshot) -> String {
         let dir = tempfile::tempdir().expect("temporary data directory");
         let controller = ClientController::start(dir.path().to_path_buf());
         let mut app = App::new(controller, dir.path().to_path_buf());
         app.snapshot = snapshot;
         app.tab = tab;
-        app.show_rules = show_rules;
         // The settings page prints `<dir>/core/sing-box`. Leaving the real
         // temporary path in place would make every golden depend on how long
         // this machine's temp directory name happens to be.
@@ -429,8 +446,9 @@ mod render_tests {
             Tab::Connections,
             Tab::Logs,
             Tab::Settings,
+            Tab::Rules,
         ] {
-            let rendered = frame_for(tab, dense_snapshot(), false);
+            let rendered = frame_for(tab, dense_snapshot());
             insta::assert_snapshot!(snapshot_name(tab), rendered);
         }
     }
@@ -452,7 +470,8 @@ mod render_tests {
                 outbound: "direct".to_owned(),
             },
         ];
-        insta::assert_snapshot!("logs-tail", frame_for(Tab::Logs, snapshot.clone(), false));
-        insta::assert_snapshot!("logs-rules-view", frame_for(Tab::Logs, snapshot, true));
+        insta::assert_snapshot!("logs-tail", frame_for(Tab::Logs, snapshot.clone()));
+        // What used to be the panel behind `r` on the Logs page; it is a tab now.
+        insta::assert_snapshot!("rules-tab", frame_for(Tab::Rules, snapshot));
     }
 }

@@ -9,7 +9,7 @@ use ratatui::widgets::{List, ListItem, Paragraph};
 
 use crate::app::App;
 use crate::format::{age_label, human_bytes, usage_label};
-use crate::style::{CYAN, panel, short_label};
+use crate::style::{CYAN, panel};
 use crate::{settings, system_proxy};
 
 pub(crate) fn draw_settings(frame: &mut Frame, area: ratatui::prelude::Rect, app: &mut App) {
@@ -116,79 +116,4 @@ pub(crate) fn copy_to_clipboard_osc52(text: &str) {
     let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
     print!("\x1b]52;c;{encoded}\x07");
     let _ = std::io::stdout().flush();
-}
-
-/// Renders the engine-published routing rules and rule-set sources. The rules
-/// arrive with the snapshot, so this view works before the core starts too.
-pub(crate) fn rules_lines(app: &App) -> Vec<String> {
-    if app.snapshot.rules.is_empty() && app.snapshot.rule_sets.is_empty() {
-        return vec!["（尚无激活配置；先启动一次内核）".to_owned()];
-    }
-    let mut lines = Vec::new();
-    if !app.snapshot.rule_sets.is_empty() {
-        lines.push("── 规则集 ──".to_owned());
-        for set in &app.snapshot.rule_sets {
-            let source = if set.url.is_empty() {
-                "（本地）".to_owned()
-            } else {
-                short_label(&set.url, 64)
-            };
-            lines.push(format!("• {}（{}） ← {}", set.tag, set.kind, source));
-        }
-        lines.push(String::new());
-    }
-    lines.push("── 分流规则（自上而下匹配）──".to_owned());
-    for (index, rule) in app.snapshot.rules.iter().enumerate() {
-        lines.push(format!(
-            "{:>2}. {} → {}",
-            index + 1,
-            rule.matcher_zh(),
-            if rule.outbound.is_empty() {
-                "（动作）"
-            } else {
-                &rule.outbound
-            }
-        ));
-    }
-    lines
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ClientController;
-
-    #[tokio::test]
-    async fn rules_lines_render_the_engine_snapshot() {
-        let tempdir = tempfile::tempdir().expect("temporary data directory");
-        let mut app = App::new(
-            ClientController::start(tempdir.path().to_path_buf()),
-            tempdir.path().to_path_buf(),
-        );
-        app.snapshot.rule_sets = vec![client_core::state::RuleSetSummary {
-            tag: "geoip-cn".to_owned(),
-            url: "https://example/srs".to_owned(),
-            kind: "remote".to_owned(),
-        }];
-        app.snapshot.rules = vec![
-            client_core::state::RouteRuleSnapshot {
-                kind: client_core::state::RuleKind::RuleSet,
-                value: Some("geoip-cn".to_owned()),
-                outbound: "🚀节点选择".to_owned(),
-            },
-            client_core::state::RouteRuleSnapshot {
-                kind: client_core::state::RuleKind::Final,
-                value: None,
-                outbound: "🚀节点选择".to_owned(),
-            },
-        ];
-        let lines = rules_lines(&app);
-        assert!(lines.iter().any(|line| line.contains("geoip-cn")));
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("1. 规则集 · geoip-cn"))
-        );
-        assert!(lines.iter().any(|line| line.contains("其他未命中流量")));
-    }
 }

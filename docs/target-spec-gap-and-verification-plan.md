@@ -729,6 +729,23 @@ L2（WSL，`-p sbctl -p client-core -p sbtui`）同样 fmt 0 / clippy 0 / **364 
 是同一个 127.0.0.1 地址，洪水会把它们一起限成 429——必须放在该 server 实例的最后，
 或为限流单独起一个实例。
 
+### Phase 5（G10）：客户端「入站与分流规则」页（已完成）
+
+- 数据层：`InboundInfo` + `parse_inbounds`，快照在两处填充（见 ticket 29 的记录）。
+- 视图层：新增 `Tab::Rules`（排在设置之后，index=5，所以 `tab-0..4` 的既有金标准只多一个标签栏字符），
+  `r` 从"在日志页里偷偷换成规则面板"变成"跳到规则页"，`App::show_rules` 整个字段删掉——
+  计划里"移除藏在 Logs 页内的开关"这条做到了，不是留着开关再加一个页。
+- 金标准：`logs-rules-view.snap` 删掉，新增 `rules-tab.snap` 与 `tab-5.snap`；
+  新帧里能看到 `mixed:2080（127.0.0.1） · mixed-in` 与 `tun（全部地址） · tun-in`，
+  并且**没有**临时目录路径泄漏（对全部快照做过 grep）。
+- `tabs_cycle_in_both_directions` 扩成"走 6 步必须回到起点、每步 `from_index(index)` 都能取回自己"，
+  这样以后再加页签时，标签栏编号与枚举不会悄悄分叉。
+- 平台差异：`tab-4-linux.snap` 只能在 Linux 侧生成（设置页那帧的宽度依赖平台），
+  本次由 WSL 腿重新生成后拷回仓库，再在两侧各跑一次不带更新的原地验证。
+- 门：Windows 377 / Linux 全绿，两平台 fmt 0、clippy `-D warnings` 0。
+- 顺带记两条环境事实：这台机器的 WSL 会闲置自动关闭并清空 `/tmp`（前几次"日志文件消失"是这个原因，
+  不是构建诡异），以及经 here-doc 传含中文的脚本会被改码成语法错误——含中文的批量改动要先落成文件。
+
 ### Phase 8（G17）：两条无测试的已修路径（已完成）
 
 - **finding #2（固定口启动检测）**：新增 `a_busy_mixed_port_is_refused_before_the_runtime_config_is_rewritten`，

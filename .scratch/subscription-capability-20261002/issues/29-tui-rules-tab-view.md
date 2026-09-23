@@ -1,6 +1,6 @@
 # TUI 的「入站与分流规则」页（G10 的视图半边）
 
-Status: needs-implementation
+Status: resolved
 Type: task
 Found: 2026-09-23，Phase 5 的 G10。数据层已落地并被测试覆盖，缺的是视图。
 
