@@ -1,6 +1,6 @@
 # S4：验收脚本补故障回滚回归与旧断言修正
 
-Status: ready-for-agent
+Status: resolved
 Type: task
 Blocked by: 02
 
@@ -24,3 +24,21 @@ Blocked by: 02
 
 - Docker 三发行版验收全部通过，且新增断言在故意注入坏候选时会失败。
 - 本地候选验收与 Release workflow 的 acceptance job 使用同一脚本。
+
+## Comments
+
+2026-09-23 完成并在 Debian 12、Ubuntu 22.04、Ubuntu 24.04 的 systemd 容器中通过：
+
+- `verify.sh`：失败更新的回滚点断言从旧路径 `var/lib/sbctl/rollback` 修正为
+  `var/backups/sbctl/rollback`。
+- `verify-real.sh` 新增坏候选故障注入：桩 `check=0 / run=1` →
+  `sbctl sing-box update --artifact` 必须失败、旧二进制摘要恢复、服务 active、
+  4 秒后 `NRestarts` 不再增长、订阅路由仍 200。
+- `verify-real.sh` Direct 分支新增 `systemd-analyze verify` 断言：五个 unit 不得出现
+  `Unknown key name`。
+- IP fallback 分支去掉四个 `--disable-protocol`，改用 `--protocol-sni www.bing.com`，
+  断言启用五协议且 URI 同时含 `vless:// vmess:// hysteria2:// tuic:// anytls://`。
+- 新增 `scripts/dev/build-acceptance-artifacts.sh`：在 WSL 内构建并回传
+  release 与 test-signing 两套 Linux 工件，供 `tests/acceptance/run.sh` 使用。
+- 证据：本机 Git Bash + Docker Desktop 运行 `run.sh`，三个发行版均打印
+  `real sbctl acceptance passed on <distro>`。

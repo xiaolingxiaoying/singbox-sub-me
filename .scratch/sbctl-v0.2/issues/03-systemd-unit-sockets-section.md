@@ -35,4 +35,5 @@ socket 仍因 `.socket` 单元的 `Service=sbctl.service` 与已有 `Requires=`/
   `Requires=`/`After=`。
 - 新增 `src/lifecycle.rs::tests::the_direct_service_unit_uses_valid_dependency_keys_only`，
   断言 direct 版含 `Requires=`/`After=` 且任何版本都不含 `Sockets=`。
-- `systemd-analyze verify` 的 Docker 断言按工单 05 补进验收脚本。
+- `tests/acceptance/verify-real.sh` 的 Direct 分支新增 `systemd-analyze verify` 断言，
+  已在 Debian 12 / Ubuntu 22.04 / Ubuntu 24.04 容器中通过。
