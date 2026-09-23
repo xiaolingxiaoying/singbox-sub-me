@@ -50,6 +50,15 @@ pub fn age_label(epoch_seconds: u64) -> String {
     }
 }
 
+/// The epoch second a clash_api connection started at. The wire format is
+/// RFC3339; an unparsable value reads as "just now" rather than an error,
+/// because the row is a label and the timestamp is not the user's concern.
+pub fn connection_start_epoch(start: &str) -> u64 {
+    chrono::DateTime::parse_from_rfc3339(start)
+        .map(|parsed| parsed.timestamp().max(0) as u64)
+        .unwrap_or_else(|_| now_epoch())
+}
+
 /// A one-line rendering of the subscription's traffic metadata, including the
 /// reset window when the provider advertises an expiry.
 pub fn usage_label(usage: Option<&SubscriptionUserinfo>) -> String {
@@ -114,6 +123,24 @@ mod tests {
         assert_eq!(age_label(0), "从未更新");
         let now = now_epoch();
         assert_eq!(age_label(now - 90), "1 分钟前");
+    }
+
+    #[test]
+    fn connection_start_epoch_reads_clash_api_timestamps() {
+        // UTC, with the nanosecond fraction sing-box emits.
+        assert_eq!(
+            connection_start_epoch("2026-09-23T06:31:12.123456789Z"),
+            1_790_145_072
+        );
+        // An explicit offset is applied, and a real timestamp never reads as
+        // the "never" sentinel of `age_label`.
+        assert_eq!(
+            connection_start_epoch("2026-09-23T14:31:12+08:00"),
+            1_790_145_072
+        );
+        // Garbage degrades to "now", not to 1970.
+        let fallback = connection_start_epoch("not a timestamp");
+        assert!(fallback >= now_epoch() - 5);
     }
 
     #[test]

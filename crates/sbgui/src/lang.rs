@@ -89,6 +89,27 @@ pub(crate) fn age_label(epoch_seconds: u64, locale: Locale) -> String {
     }
 }
 
+/// The connection's start time as a relative age. The wire value is RFC3339,
+/// which both overflowed the narrow column and said nothing at a glance;
+/// client-core owns parsing and the Chinese half, this file owns the English
+/// wording.
+pub(crate) fn connection_age_label(start: &str, locale: Locale) -> String {
+    let epoch = client_core::format::connection_start_epoch(start);
+    if locale != Locale::En {
+        return core_age_label(epoch);
+    }
+    let age = now_epoch().saturating_sub(epoch);
+    if age < 60 {
+        "Just now".to_owned()
+    } else if age < 3_600 {
+        format!("{} min ago", age / 60)
+    } else if age < 86_400 {
+        format!("{} h ago", age / 3_600)
+    } else {
+        format!("{} d ago", age / 86_400)
+    }
+}
+
 /// The subscription quota line, same arrangement as [`age_label`].
 pub(crate) fn usage_label(
     usage: Option<&client_core::subscription::SubscriptionUserinfo>,

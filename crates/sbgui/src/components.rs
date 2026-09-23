@@ -606,7 +606,7 @@ pub(crate) fn log_row(index: usize, source: &str, line: &str, wrap: bool) -> gpu
 
 pub(crate) fn connection_header(locale: Locale) -> impl IntoElement {
     div()
-        .min_w(px(920.0))
+        .min_w(px(960.0))
         .px(px(ROW_X))
         .py(px(10.0))
         .flex()
@@ -622,9 +622,9 @@ pub(crate) fn connection_header(locale: Locale) -> impl IntoElement {
         )
         .child(div().flex_1().child(tr!(locale, "远程目标", "Destination")))
         .child(div().w(px(64.0)).child(tr!(locale, "协议", "Protocol")))
-        .child(div().w(px(150.0)).child(tr!(locale, "命中规则", "Rule")))
+        .child(div().w(px(190.0)).child(tr!(locale, "命中规则", "Rule")))
         .child(div().w(px(130.0)).child(tr!(locale, "累计流量", "Traffic")))
-        .child(div().w(px(100.0)).child(tr!(locale, "建立时间", "Started")))
+        .child(div().w(px(110.0)).child(tr!(locale, "建立时间", "Started")))
         .child(div().w(px(48.0)).child(""))
 }
 
@@ -645,7 +645,7 @@ pub(crate) fn connection_row(
     };
     div()
         .id(index)
-        .min_w(px(920.0))
+        .min_w(px(960.0))
         .px(px(ROW_X))
         .py(px(ROW_Y))
         .flex()
@@ -690,7 +690,7 @@ pub(crate) fn connection_row(
         )
         .child(
             div()
-                .w(px(150.0))
+                .w(px(190.0))
                 .flex_shrink_0()
                 .truncate()
                 .text_color(rgb(MUTED))
@@ -713,14 +713,14 @@ pub(crate) fn connection_row(
         )
         .child(
             div()
-                .w(px(100.0))
+                .w(px(110.0))
                 .flex_shrink_0()
                 .truncate()
                 .text_color(rgb(MUTED))
                 .child(if connection.start.is_empty() {
                     tr!(locale, "刚刚", "Just now").to_owned()
                 } else {
-                    connection.start.clone()
+                    crate::lang::connection_age_label(&connection.start, locale)
                 }),
         )
         .child(

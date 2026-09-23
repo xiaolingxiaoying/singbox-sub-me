@@ -185,7 +185,7 @@ impl Sbgui {
                                 .overflow_x_scroll()
                                 .child(
                                     div()
-                                        .min_w(px(920.0))
+                                        .min_w(px(960.0))
                                         .child(connection_header(locale))
                                         .children(rows)
                                         .children(
