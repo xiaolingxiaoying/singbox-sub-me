@@ -57,6 +57,15 @@ pub fn render(store: &DeploymentStore, config: &DeploymentConfig) -> Result<Stri
             note = esc(&row.note),
         ));
     }
+    let mut node_rows = String::new();
+    for node in crate::canonical::nodes(config) {
+        node_rows.push_str("<tr><th>");
+        node_rows.push_str(&esc(node.tag()));
+        node_rows.push_str(&format!(
+            "</th><td><code>{}</code></td></tr>",
+            esc(crate::subscription::node_share_link(config, &node).trim())
+        ));
+    }
     let mut rows = String::new();
     for info in subscription_matrix() {
         let url = route_url(config, SubscriptionRoute::Format(info.format))
@@ -110,6 +119,9 @@ code {{ background: #8882; border-radius: .3rem; padding: 0 .3rem; }}\n\
 <p class=\"note\">每个链接都可以直接下载，或用手机扫描旁边的二维码一键导入。订阅凭据泄露时请在服务器上执行 <code>sbctl credential rotate</code> 更换。</p>\n\
 <h2>按客户端选择</h2>\n\
 <table>\n{client_rows}</table>\n\
+<h2>节点与原生分享链接</h2>\n\
+<p class=\"note\">下面每条链接与 <code>uri</code> 订阅工件内容一致，含节点凭据；本页本身已受订阅凭据保护，请勿将其截图或转发。</p>\n\
+<table>\n{node_rows}</table>\n\
 <h2>全部订阅链接</h2>\n\
 {rows}\n\
 <h2>客户端导入</h2>\n\
@@ -124,6 +136,7 @@ code {{ background: #8882; border-radius: .3rem; padding: 0 .3rem; }}\n\
         mode = esc(&config.subscription_mode.to_string()),
         traffic_badges = traffic_badges(config, traffic.as_ref())?,
         client_rows = client_rows,
+        node_rows = node_rows,
         rows = rows,
     ))
 }

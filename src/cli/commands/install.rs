@@ -117,8 +117,12 @@ pub(crate) fn install(root: &Path, options: InstallOptions) -> ExitCode {
                 }
             },
         };
-        let artifacts = sbctl::subscription::generated_artifacts(&config, root)
-            .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+        let artifacts = sbctl::subscription::generated_artifacts_for_kernel(
+            &config,
+            root,
+            Some(sing_box_bin.as_path()),
+        )
+        .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
         let server = artifacts
             .iter()
             .find(|(name, _)| *name == "sing-box-server.json")

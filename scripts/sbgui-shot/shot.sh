@@ -15,7 +15,7 @@ IMAGE=sbgui-shot
 DOCKER=${DOCKER:-docker}
 REPO_WIN=${REPO_WIN:-$(pwd -W 2>/dev/null || pwd)}
 OUT_REL=${OUT_REL:-.scratch/sbgui-shots}
-PAGES=${PAGES:-dashboard subscriptions proxies rules connections logs settings}
+PAGES=${PAGES:-dashboard subscriptions proxies rules connections logs settings about}
 SIZES=${SIZES:-1440x900}
 
 mkdir -p "$OUT_REL"

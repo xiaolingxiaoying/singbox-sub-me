@@ -20,6 +20,7 @@ use crate::components::{
     metric_cell, pill, switch, traffic_chart, work_surface,
 };
 use crate::lang::{Locale, outbound_mode, usage_label};
+use crate::pages::logs::localised_event_line;
 use crate::state::{Page, Sbgui};
 use crate::theme::{
     AMBER, BLUE, BLUE_2, BODY, BORDER, BORDER_STRONG, CYAN, DANGER, DISPLAY, FAINT, GAP_SECTION,
@@ -795,7 +796,16 @@ impl Sbgui {
             .iter()
             .map(|item| item.members.len())
             .sum::<usize>();
-        let events: Vec<String> = snapshot.events.iter().rev().take(5).cloned().collect();
+        let events: Vec<(client_core::state::EventLine<'_>, String)> = snapshot
+            .event_lines()
+            .into_iter()
+            .rev()
+            .take(5)
+            .map(|line| {
+                let display = localised_event_line(&line, locale);
+                (line, display)
+            })
+            .collect();
         work_surface().child(
             div()
                 .flex()
@@ -990,8 +1000,8 @@ impl Sbgui {
                             events
                                 .into_iter()
                                 .enumerate()
-                                .map(|(index, line)| {
-                                    let level = client_core::state::log_level_of(&line);
+                                .map(|(index, (line, display))| {
+                                    let level = client_core::state::log_level_of(line.text);
                                     div()
                                         .id(format!("dashboard-event-{index}"))
                                         .w_full()
@@ -1012,7 +1022,9 @@ impl Sbgui {
                                                     _ => MINT,
                                                 })),
                                         )
-                                        .child(div().flex_1().min_w(px(0.0)).truncate().child(line))
+                                        .child(
+                                            div().flex_1().min_w(px(0.0)).truncate().child(display),
+                                        )
                                         .into_any_element()
                                 })
                                 .collect()

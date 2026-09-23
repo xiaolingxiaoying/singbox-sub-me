@@ -1,13 +1,20 @@
-use super::{AI_DOMAIN_SUFFIXES, FAKE_IP_FILTER_SUFFIXES, client_skip_cert_verify};
+use super::{AI_DOMAIN_SUFFIXES, AUTO_TAG, FAKE_IP_FILTER_SUFFIXES, client_skip_cert_verify};
 use crate::canonical::CanonicalNode;
 use crate::config::DeploymentConfig;
 use crate::subscription::artifacts::SubscriptionError;
+use crate::subscription::{GroupRole, OutboundRole, RuleMatcher, RuleSetKind, TemplateSpec};
+
+/// The clash artifact's group tag vocabulary, kept apart from the sing-box
+/// tags in `render/mod.rs` so neither format's names drift.
+const CLASH_SELECTOR_TAG: &str = "🌍选择代理节点";
+const CLASH_DIRECT_TAG: &str = "🎯全球直连";
 
 /// The `proxies:` block plus the two historical groups shared by the current
 /// and the legacy clash artifacts, so protocol fields cannot drift apart.
 fn clash_proxies(
     config: &DeploymentConfig,
     nodes: &[CanonicalNode],
+    spec: &TemplateSpec,
 ) -> Result<String, SubscriptionError> {
     let skip = client_skip_cert_verify(config);
     let mut proxies = String::from("proxies:\n");
@@ -66,37 +73,42 @@ fn clash_proxies(
         };
         proxies.push_str(&entry);
     }
-    proxies.push_str(concat!(
-        "mode: rule\n",
-        "proxy-groups:\n",
-        "  - name: 🌍选择代理节点\n",
-        "    type: select\n",
-        // The selector holds DIRECT, so latency tests must use a URL that is
-        // reachable without a proxy; gstatic would time out from China.
-        // aliyun.com answers with a redirect, which mihomo counts as success.
-        "    url: http://aliyun.com/generate_204\n",
-        "    interval: 300\n",
-        "    proxies:\n",
-        "      - ♻️自动选择\n",
-        "      - DIRECT\n",
-    ));
-    for node in nodes {
-        proxies.push_str(&format!("      - {}\n", node.tag()));
-    }
-    proxies.push_str(concat!(
-        "  - name: ♻️自动选择\n",
-        "    type: url-test\n",
-        "    url: http://www.gstatic.com/generate_204\n",
-        "    interval: 300\n",
-        "    tolerance: 50\n",
-        "    proxies:\n",
-    ));
-    for node in nodes {
-        proxies.push_str(&format!("      - {}\n", node.tag()));
-    }
-    proxies.push_str("  - name: 🎯全球直连\n    type: select\n    proxies:\n      - DIRECT\n");
-    for node in nodes {
-        proxies.push_str(&format!("      - {}\n", node.tag()));
+    proxies.push_str("mode: rule\nproxy-groups:\n");
+    for group in &spec.groups {
+        match group.role {
+            GroupRole::Selector => {
+                // The selector holds DIRECT, so latency tests must use a URL
+                // that is reachable without a proxy; gstatic would time out
+                // from China. aliyun.com answers with a redirect, which mihomo
+                // counts as success.
+                proxies.push_str(&format!(
+                    "  - name: {tag}\n    type: select\n    url: http://aliyun.com/generate_204\n    interval: 300\n    proxies:\n      - {auto}\n      - DIRECT\n",
+                    tag = CLASH_SELECTOR_TAG,
+                    auto = AUTO_TAG
+                ));
+                for node in nodes {
+                    proxies.push_str(&format!("      - {}\n", node.tag()));
+                }
+            }
+            GroupRole::UrlTest => {
+                proxies.push_str(&format!(
+                    "  - name: {tag}\n    type: url-test\n    url: http://www.gstatic.com/generate_204\n    interval: 300\n    tolerance: 50\n    proxies:\n",
+                    tag = AUTO_TAG
+                ));
+                for node in nodes {
+                    proxies.push_str(&format!("      - {}\n", node.tag()));
+                }
+            }
+            GroupRole::Direct => {
+                proxies.push_str(&format!(
+                    "  - name: {tag}\n    type: select\n    proxies:\n      - DIRECT\n",
+                    tag = CLASH_DIRECT_TAG
+                ));
+                for node in nodes {
+                    proxies.push_str(&format!("      - {}\n", node.tag()));
+                }
+            }
+        }
     }
     Ok(proxies)
 }
@@ -124,70 +136,114 @@ fn clash_dns(config: &DeploymentConfig) -> String {
     dns
 }
 
+/// The `sniffer:` block shared by both clash artifacts.
+///
+/// mihomo ships sniffing **off** (`Enable: false` in `DefaultRawConfig`, with no
+/// sniffer names selected), so a subscriber who never touches the client's own
+/// settings gets connections routed on the raw SNI/host only.
+///
+/// The list is `http`/`tls`/`quic` because that is exactly what the pinned core
+/// accepts: `.scratch/mihomo-sniff-probe.sh` runs candidate names through
+/// mihomo v1.19.30's own config parser, which rejects anything else with
+/// `not find the sniffer[domain]` — the `domain` and `dns` names some guides
+/// advertise do not exist in this build.
+///
+/// No `dns-hijack` is written on purpose. It lives under `tun:`, its default is
+/// already `0.0.0.0:53`, and emitting a `tun:` block from a subscription would
+/// overwrite whatever the client operator configured there.
+///
+/// `override-destination` stays unset: it makes a sniffed domain replace the
+/// original destination for the whole connection, which changes what the remote
+/// server sees, and that is not this project's call to make silently.
+fn clash_sniffer() -> &'static str {
+    concat!(
+        "sniffer:\n",
+        "  enable: true\n",
+        "  sniffing:\n",
+        "    - http\n",
+        "    - tls\n",
+        "    - quic\n"
+    )
+}
+
 pub(crate) fn clash(
     config: &DeploymentConfig,
     nodes: &[CanonicalNode],
 ) -> Result<String, SubscriptionError> {
-    let mut output = clash_proxies(config, nodes)?;
+    let spec = TemplateSpec::for_template(config, config.client_template.clone());
+    let mut output = clash_proxies(config, nodes, &spec)?;
     // The AI suffix rules must precede the CN rule-set so OpenAI/X domains
     // never fall into geosite-cn's direct verdict.
     output.push_str("rules:\n");
-    for suffix in AI_DOMAIN_SUFFIXES {
-        output.push_str(&format!("  - DOMAIN-SUFFIX,{suffix},🌍选择代理节点\n"));
+    for rule in spec
+        .inline_rules
+        .iter()
+        .filter(|rule| rule.renderers.includes_clash())
+    {
+        if let RuleMatcher::AiDomains = rule.matcher {
+            let outbound = match rule.outbound {
+                OutboundRole::Selector => CLASH_SELECTOR_TAG,
+                OutboundRole::Direct => CLASH_DIRECT_TAG,
+            };
+            for suffix in AI_DOMAIN_SUFFIXES {
+                output.push_str(&format!("  - DOMAIN-SUFFIX,{suffix},{outbound}\n"));
+            }
+        }
     }
     if config.client_rule_profile == crate::config::ClientRuleProfile::Standard {
-        let base = format!(
-            "{}@meta/geo",
-            config.client_rule_set_base_url.trim_end_matches('/')
-        );
-        output.push_str(&format!(
-            concat!(
-                "  - RULE-SET,geosite-private,🎯全球直连\n",
-                "  - RULE-SET,geoip-private,🎯全球直连\n",
-                "  - RULE-SET,geosite-cn,🎯全球直连\n",
-                "  - RULE-SET,geoip-cn,🎯全球直连\n",
-                "  - MATCH,🌍选择代理节点\n",
-                "rule-providers:\n",
-                "  geosite-private:\n",
-                "    type: http\n",
-                "    behavior: domain\n",
-                "    format: mrs\n",
-                "    url: {base}/geosite/private.mrs\n",
-                "    path: ./ruleset/geosite-private.mrs\n",
-                "    interval: 86400\n",
-                "  geoip-private:\n",
-                "    type: http\n",
-                "    behavior: ipcidr\n",
-                "    format: mrs\n",
-                "    url: {base}/geoip/private.mrs\n",
-                "    path: ./ruleset/geoip-private.mrs\n",
-                "    interval: 86400\n",
-                "  geosite-cn:\n",
-                "    type: http\n",
-                "    behavior: domain\n",
-                "    format: mrs\n",
-                "    url: {base}/geosite/cn.mrs\n",
-                "    path: ./ruleset/geosite-cn.mrs\n",
-                "    interval: 86400\n",
-                "  geoip-cn:\n",
-                "    type: http\n",
-                "    behavior: ipcidr\n",
-                "    format: mrs\n",
-                "    url: {base}/geoip/cn.mrs\n",
-                "    path: ./ruleset/geoip-cn.mrs\n",
-                "    interval: 86400\n",
-            ),
-            base = base
-        ));
+        for entry in spec
+            .rule_sets
+            .iter()
+            .filter(|entry| entry.clash_url.is_some())
+        {
+            output.push_str(&format!(
+                "  - RULE-SET,{tag},{direct}\n",
+                tag = entry.tag,
+                direct = CLASH_DIRECT_TAG
+            ));
+        }
     } else {
-        output.push_str(concat!(
-            "  - GEOIP,LAN,DIRECT\n",
-            "  - GEOIP,CN,DIRECT\n",
-            "  - MATCH,🌍选择代理节点\n",
-        ));
+        output.push_str(concat!("  - GEOIP,LAN,DIRECT\n", "  - GEOIP,CN,DIRECT\n"));
+    }
+    output.push_str(&format!(
+        "  - MATCH,{final_group}\n",
+        final_group = clash_tag(spec.final_group)
+    ));
+    if config.client_rule_profile == crate::config::ClientRuleProfile::Standard {
+        output.push_str("rule-providers:\n");
+        for entry in spec
+            .rule_sets
+            .iter()
+            .filter(|entry| entry.clash_url.is_some())
+        {
+            let behavior = match entry.kind {
+                RuleSetKind::Domain => "domain",
+                RuleSetKind::IpCidr => "ipcidr",
+            };
+            let url = entry
+                .clash_url
+                .as_deref()
+                .expect("a clash rule-set carries a URL");
+            output.push_str(&format!(
+                "  {tag}:\n    type: http\n    behavior: {behavior}\n    format: mrs\n    url: {url}\n    path: ./ruleset/{tag}.mrs\n    interval: 86400\n",
+                tag = entry.tag
+            ));
+        }
     }
     output.push_str(&clash_dns(config));
+    if spec.sniff {
+        output.push_str(clash_sniffer());
+    }
     Ok(output)
+}
+
+/// Maps a template group role to the clash artifact's established tag.
+fn clash_tag(role: GroupRole) -> &'static str {
+    match role {
+        GroupRole::Selector => CLASH_SELECTOR_TAG,
+        GroupRole::UrlTest => AUTO_TAG,
+        GroupRole::Direct => CLASH_DIRECT_TAG,
+    }
 }
 
 /// The mihomo 1.18.x compatibility artifact: same node and group layout as the
@@ -197,16 +253,30 @@ pub(crate) fn clash_legacy(
     config: &DeploymentConfig,
     nodes: &[CanonicalNode],
 ) -> Result<String, SubscriptionError> {
-    let mut output = clash_proxies(config, nodes)?;
+    let spec = TemplateSpec::for_template(config, config.client_template.clone());
+    let mut output = clash_proxies(config, nodes, &spec)?;
     output.push_str("rules:\n");
-    for suffix in AI_DOMAIN_SUFFIXES {
-        output.push_str(&format!("  - DOMAIN-SUFFIX,{suffix},🌍选择代理节点\n"));
+    for rule in spec
+        .inline_rules
+        .iter()
+        .filter(|rule| rule.renderers.includes_clash())
+    {
+        if let RuleMatcher::AiDomains = rule.matcher {
+            for suffix in AI_DOMAIN_SUFFIXES {
+                output.push_str(&format!(
+                    "  - DOMAIN-SUFFIX,{suffix},{CLASH_SELECTOR_TAG}\n"
+                ));
+            }
+        }
     }
-    output.push_str(concat!(
-        "  - GEOIP,LAN,DIRECT\n",
-        "  - GEOIP,CN,DIRECT\n",
-        "  - MATCH,🌍选择代理节点\n",
+    output.push_str(concat!("  - GEOIP,LAN,DIRECT\n", "  - GEOIP,CN,DIRECT\n"));
+    output.push_str(&format!(
+        "  - MATCH,{final_group}\n",
+        final_group = clash_tag(spec.final_group)
     ));
     output.push_str(&clash_dns(config));
+    if spec.sniff {
+        output.push_str(clash_sniffer());
+    }
     Ok(output)
 }

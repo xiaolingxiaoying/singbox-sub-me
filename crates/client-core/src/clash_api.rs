@@ -10,12 +10,12 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_CONTROLLER: &str = "http://127.0.0.1:9090";
 
-/// The selector group tag the sbctl server-side client profile generates.
+/// The selector-group tag this project's own sing-box profile emits. Kept only
+/// as a fallback for a config whose `route.final` is unavailable; group lookup
+/// goes through [`crate::state::find_selector_group`] rather than matching a
+/// name, because the Mihomo artifact calls the same group `🌍选择代理节点` and a
+/// third-party subscription calls it anything at all.
 pub const SELECTOR_TAG: &str = "🚀节点选择";
-/// The automatic latency group tag the server generates.
-pub const AUTO_TAG: &str = "♻️自动选择";
-/// The direct outbound tag the server generates.
-pub const DIRECT_TAG: &str = "🎯直连";
 
 /// The default latency probe: a tiny 204 endpoint reachable from mainland
 /// China without a proxy, matching the server-side selector default.

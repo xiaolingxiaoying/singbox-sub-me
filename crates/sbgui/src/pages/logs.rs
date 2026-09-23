@@ -1,16 +1,29 @@
 //! The log page: the level-filtered log tail.
 
 use client_core::ClientCommand;
-use client_core::state::LogLevel;
+use client_core::state::{EventLine, LogLevel};
 use gpui::{
     ClickEvent, ClipboardItem, Context, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 
 use crate::components::{inline_empty, log_row, log_table_header, page_head, work_surface};
+use crate::lang::Locale;
 use crate::state::{FieldSpec, InputField, LogLevelFilter, Sbgui, Tone};
 use crate::theme::{BLUE_2, BORDER, CYAN, LABEL, MUTED, RADIUS, RADIUS_CONTROL, SURFACE};
 use crate::tr;
+
+/// The one-line form of an event entry in `locale`. A coded record renders from
+/// its [`client_core::event_code::EventCode`], so an English interface shows
+/// English; a bare string from a call site issue 02 has not converted yet is
+/// shown verbatim.
+pub(crate) fn localised_event_line(line: &EventLine<'_>, locale: Locale) -> String {
+    match (line.record, locale) {
+        (Some(record), Locale::En) => record.render_en(),
+        (Some(record), Locale::Zh) => record.render_zh(),
+        (None, _) => line.text.to_owned(),
+    }
+}
 
 impl Sbgui {
     // ----------------------------------------------------------------- logs
@@ -54,10 +67,10 @@ impl Sbgui {
             .collect();
         let events: Vec<String> = self
             .snapshot
-            .events
-            .iter()
-            .filter(|line| keep(line))
-            .cloned()
+            .event_lines()
+            .into_iter()
+            .filter(|line| keep(line.text))
+            .map(|line| localised_event_line(&line, locale))
             .collect();
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         for (index, line) in kernel.iter().rev().take(180).rev().enumerate() {
@@ -190,14 +203,19 @@ impl Sbgui {
                             None,
                             cx,
                             move |view, cx| {
+                                let events: Vec<String> = view
+                                    .snapshot
+                                    .event_lines()
+                                    .into_iter()
+                                    .map(|line| localised_event_line(&line, view.locale))
+                                    .collect();
                                 let text = view
                                     .snapshot
                                     .core_logs
                                     .iter()
                                     .map(|line| format!("[sing-box] {line}"))
                                     .chain(
-                                        view.snapshot
-                                            .events
+                                        events
                                             .iter()
                                             .map(|line| format!("[{client_source}] {line}")),
                                     )
@@ -325,5 +343,38 @@ mod tests {
             Some(LogLevel::Error),
             "导入订阅失败: timeout"
         ));
+    }
+
+    #[test]
+    fn coded_events_render_in_the_interface_language_and_bare_lines_verbatim() {
+        use client_core::event_code::{EventCode, EventRecord};
+        let record = EventRecord::new(EventCode::CoreNotInstalledHint, Vec::new());
+        let text = record.render_zh();
+        let coded = EventLine {
+            text: &text,
+            record: Some(&record),
+        };
+        assert_eq!(
+            localised_event_line(&coded, Locale::En),
+            "Ready. Download the sing-box core first, then import a subscription."
+        );
+        assert_eq!(
+            localised_event_line(&coded, Locale::Zh),
+            "就绪。先下载 sing-box 内核，再导入订阅。"
+        );
+
+        let bare = EventLine {
+            text: "尚未迁移的普通事件",
+            record: None,
+        };
+        assert_eq!(
+            localised_event_line(&bare, Locale::En),
+            "尚未迁移的普通事件",
+            "an unpaired line has no translation and is shown verbatim"
+        );
+        assert_eq!(
+            localised_event_line(&bare, Locale::Zh),
+            "尚未迁移的普通事件"
+        );
     }
 }

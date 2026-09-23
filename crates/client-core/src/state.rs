@@ -62,6 +62,39 @@ impl From<ProxyGroup> for ProxyGroupSnapshot {
     }
 }
 
+/// The group that holds the user's manual node choice.
+///
+/// Both clients used to compare against the literal `🚀节点选择`, which is only
+/// the tag *this project's own sing-box profile* emits: the Mihomo artifact
+/// names the same idea `🌍选择代理节点`, and a third-party subscription names it
+/// something else again, so "current node" quietly went stale there. The core
+/// already answers the question through `route.final`, so ask it first, then
+/// fall back to a group's *shape* rather than to another hard-coded name.
+pub fn find_selector_group<'a>(
+    groups: &'a [ProxyGroupSnapshot],
+    rules: &[RouteRuleSnapshot],
+) -> Option<&'a ProxyGroupSnapshot> {
+    let final_outbound = rules
+        .iter()
+        .find(|rule| rule.kind == RuleKind::Final)
+        .map(|rule| rule.outbound.as_str());
+    groups
+        .iter()
+        .find(|group| Some(group.name.as_str()) == final_outbound)
+        .or_else(|| {
+            groups
+                .iter()
+                .find(|group| group.name == crate::clash_api::SELECTOR_TAG)
+        })
+        .or_else(|| {
+            groups
+                .iter()
+                .find(|group| group.kind.eq_ignore_ascii_case("selector"))
+        })
+        .or_else(|| groups.iter().find(|group| !group.is_auto()))
+        .or_else(|| groups.first())
+}
+
 /// One `{up, down}` traffic sample for the dashboard history graph.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrafficPoint {
@@ -157,6 +190,56 @@ pub struct RuleSetSummary {
 /// render. Matching conditions collapse into one human line; both clients
 /// previously parsed this themselves from `cache/active-config.json`, so the
 /// engine now publishes it once and the UIs stay identical.
+/// One inbound of the configuration the core was actually started from.
+///
+/// The client used to describe only what it creates itself (the mixed or tun
+/// inbound it injects), never what the imported subscription declares, so an
+/// operator could not see that a profile listens on something unexpected
+/// without opening the JSON by hand.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct InboundInfo {
+    /// `mixed`, `tun`, `shadowsocks`, ...
+    pub kind: String,
+    pub tag: String,
+    /// The literal `listen` value; empty when the inbound binds every address.
+    pub listen: String,
+    /// 0 when the inbound declares no port (a tun inbound, for instance).
+    pub port: u16,
+}
+
+/// Reads the top-level `inbounds` array. Bad or absent JSON yields no inbounds
+/// rather than an error: this feeds a status view, not a decision.
+pub fn parse_inbounds(config_text: &str) -> Vec<InboundInfo> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(config_text) else {
+        return Vec::new();
+    };
+    let Some(inbounds) = value.get("inbounds").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    inbounds
+        .iter()
+        .map(|inbound| {
+            let text = |key: &str| {
+                inbound
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            InboundInfo {
+                kind: text("type"),
+                tag: text("tag"),
+                listen: text("listen"),
+                port: inbound
+                    .get("listen_port")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|port| u16::try_from(port).ok())
+                    .unwrap_or(0),
+            }
+        })
+        .collect()
+}
+
 pub fn parse_route_rules(config_text: &str) -> (Vec<RouteRuleSnapshot>, Vec<RuleSetSummary>) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(config_text) else {
         return (Vec::new(), Vec::new());
@@ -315,8 +398,15 @@ pub struct ClientSnapshot {
     pub active_connections: usize,
     pub proxy_groups: Vec<ProxyGroupSnapshot>,
     pub connections: ConnectionsSnapshot,
+    /// The inbounds of the configuration the running core started from; empty
+    /// while nothing has been started and no cached configuration exists.
+    pub inbounds: Vec<InboundInfo>,
     pub core_logs: VecDeque<String>,
     pub events: VecDeque<String>,
+    /// The structured twin of [`Self::events`]: the authoritative record list a
+    /// UI renders in its own language. Same order, same cap, written only by
+    /// [`ClientSnapshot::push_record`].
+    pub event_records: VecDeque<crate::event_code::EventRecord>,
     pub core_version: Option<String>,
     pub core_installed: bool,
     /// The version the running core reports through clash_api; `None` while
@@ -333,6 +423,11 @@ pub struct ClientSnapshot {
     pub subscription_usage: Option<SubscriptionUserinfo>,
     pub settings: SettingsSnapshot,
     pub status: String,
+    /// How severe the current `status` is, when the engine knows. `None` means
+    /// the line came from a call site that has not moved to
+    /// [`crate::event_code::EventCode`] yet, and the UIs fall back to their
+    /// legacy Chinese-substring guess for it.
+    pub status_level: Option<crate::event_code::EventLevel>,
     pub outbound_mode: OutboundMode,
     /// The command currently being applied, if any.
     pub busy: Option<String>,
@@ -360,15 +455,18 @@ impl Default for ClientSnapshot {
             connections: ConnectionsSnapshot::default(),
             core_logs: VecDeque::new(),
             events: VecDeque::new(),
+            event_records: VecDeque::new(),
             core_version: None,
             core_installed: false,
             core_runtime_version: None,
             memory_used: 0,
             rules: Vec::new(),
             rule_sets: Vec::new(),
+            inbounds: Vec::new(),
             subscription_usage: None,
             settings: SettingsSnapshot::default(),
             status: "就绪。先导入订阅，再启动内核。".to_owned(),
+            status_level: None,
             outbound_mode: OutboundMode::Rule,
             busy: None,
             restart_attempts: 0,
@@ -376,13 +474,72 @@ impl Default for ClientSnapshot {
     }
 }
 
+/// One entry of the client event history, paired with the record that produced
+/// it. `record` is `None` for a line a call site wrote as a bare string (one of
+/// the sites issue 02 has not converted), so a UI can render the coded ones in
+/// its own language and fall back to `text` for the rest.
+pub struct EventLine<'a> {
+    pub text: &'a str,
+    pub record: Option<&'a crate::event_code::EventRecord>,
+}
+
 impl ClientSnapshot {
+    /// The group the user's node choice actually lives in. See
+    /// [`find_selector_group`].
+    pub fn selector_group(&self) -> Option<&ProxyGroupSnapshot> {
+        find_selector_group(&self.proxy_groups, &self.rules)
+    }
+
+    /// The event record whose rendered Chinese line is the current status, when
+    /// the status came from an event code. `None` when the current status was
+    /// written by a plain `note()` (a call site that has not moved yet), so the
+    /// caller falls back to the raw `status` string.
+    pub fn latest_event(&self) -> Option<&crate::event_code::EventRecord> {
+        self.event_records
+            .back()
+            .filter(|record| record.render_zh() == self.status)
+    }
+
+    /// Walks `events` and `event_records` together. The records are an in-order
+    /// subsequence, so a record is consumed only when its rendered Chinese line
+    /// matches the current string; a line with no record yet stays unpaired.
+    pub fn event_lines(&self) -> Vec<EventLine<'_>> {
+        let mut records = self.event_records.iter();
+        let mut pending = records.next();
+        let mut lines = Vec::with_capacity(self.events.len());
+        for text in &self.events {
+            let mut record = None;
+            if let Some(candidate) = pending
+                && candidate.render_zh() == *text
+            {
+                record = Some(candidate);
+                pending = records.next();
+            }
+            lines.push(EventLine { text, record });
+        }
+        lines
+    }
+
     /// Pushes a UI-level event line, keeping a bounded history.
     pub fn push_event(&mut self, message: impl Into<String>) {
         self.events.push_back(message.into());
         while self.events.len() > 200 {
             self.events.pop_front();
         }
+    }
+
+    /// Records one engine event in both shapes: the structured record is the
+    /// authoritative one a UI renders in its own language, and the Chinese line
+    /// keeps today's string-only consumers working until every call site has
+    /// moved. Both lists are written here and nowhere else, so they cannot
+    /// drift apart. See [`crate::event_code`] and issue 02.
+    pub fn push_record(&mut self, record: crate::event_code::EventRecord) {
+        let line = record.render_zh();
+        while self.event_records.len() >= 200 {
+            self.event_records.pop_front();
+        }
+        self.event_records.push_back(record);
+        self.push_event(line);
     }
 
     /// Pushes a kernel log line, keeping a bounded history.
@@ -486,6 +643,99 @@ pub fn log_level_shown(minimum: Option<LogLevel>, line: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn group(name: &str, kind: &str) -> ProxyGroupSnapshot {
+        ProxyGroupSnapshot {
+            name: name.to_owned(),
+            kind: kind.to_owned(),
+            current: "东京-A".to_owned(),
+            members: vec!["东京-A".to_owned()],
+            delays: HashMap::new(),
+            failed: Vec::new(),
+        }
+    }
+
+    fn final_rule(outbound: &str) -> RouteRuleSnapshot {
+        RouteRuleSnapshot {
+            kind: RuleKind::Final,
+            value: None,
+            outbound: outbound.to_owned(),
+        }
+    }
+
+    /// A Mihomo subscription has no `🚀节点选择` anywhere, so the literal
+    /// comparison both clients used made "current node" go stale there. The
+    /// core's `route.final` names the group, so it has to win.
+    #[test]
+    fn the_selector_group_follows_route_final_not_a_hardcoded_name() {
+        let groups = vec![
+            group("♻️自动选择", "urltest"),
+            group("🌍选择代理节点", "select"),
+        ];
+        assert_eq!(
+            find_selector_group(&groups, &[final_rule("🌍选择代理节点")]).map(|g| g.name.as_str()),
+            Some("🌍选择代理节点")
+        );
+        // With no final rule to follow, the manual group still wins over the
+        // automatic one — the ordering here is what keeps the old behaviour for
+        // this project's own profile.
+        assert_eq!(
+            find_selector_group(&groups, &[]).map(|g| g.name.as_str()),
+            Some("🌍选择代理节点")
+        );
+    }
+
+    /// Two manual groups, and only `route.final` says which one the user's
+    /// choice lives in. Without that arm the fallbacks pick the first non-auto
+    /// group, which is the wrong one — so this is the case that makes the
+    /// ordering above actually constrained: deleting the `route.final` arm
+    /// turns it red, which the test before it does not.
+    #[test]
+    fn route_final_decides_when_more_than_one_manual_group_exists() {
+        let groups = vec![
+            group("🌍选择代理节点", "select"),
+            group("地区选择", "select"),
+        ];
+        assert_eq!(
+            find_selector_group(&groups, &[final_rule("地区选择")]).map(|g| g.name.as_str()),
+            Some("地区选择"),
+            "`route.final` must outrank group order"
+        );
+        assert_eq!(
+            find_selector_group(&groups, &[]).map(|g| g.name.as_str()),
+            Some("🌍选择代理节点"),
+            "with nothing to go on, the first manual group is the guess"
+        );
+    }
+
+    #[test]
+    fn the_selector_group_still_finds_this_projects_own_profile() {
+        let groups = vec![
+            group("🚀节点选择", "selector"),
+            group("♻️自动选择", "urltest"),
+            group("direct", "direct"),
+        ];
+        assert_eq!(
+            find_selector_group(&groups, &[final_rule("🚀节点选择")]).map(|g| g.name.as_str()),
+            Some("🚀节点选择")
+        );
+        assert_eq!(
+            find_selector_group(&groups, &[]).map(|g| g.name.as_str()),
+            Some("🚀节点选择")
+        );
+    }
+
+    /// Only automatic groups, or none at all: it must answer with *something*
+    /// rather than dropping the current-node display.
+    #[test]
+    fn the_selector_group_degrades_to_the_first_group_it_has() {
+        let auto_only = vec![group("♻️自动选择", "urltest")];
+        assert_eq!(
+            find_selector_group(&auto_only, &[]).map(|g| g.name.as_str()),
+            Some("♻️自动选择")
+        );
+        assert_eq!(find_selector_group(&[], &[]), None);
+    }
+
     #[test]
     fn traffic_history_is_bounded_and_peaks_over_both_directions() {
         let mut snapshot = ClientSnapshot::default();
@@ -511,6 +761,50 @@ mod tests {
         assert_eq!(snapshot.core_logs.len(), 500);
     }
 
+    /// `latest_event` answers only when the tail record is what produced the
+    /// current status. A plain `note()` writes `status` without a record, so the
+    /// older coded record must not be rendered in its place.
+    #[test]
+    fn latest_event_only_matches_the_status_it_produced() {
+        use crate::event_code::{EventCode, EventRecord};
+        let record = EventRecord::new(EventCode::CoreReadyToStart, Vec::new());
+        let mut snapshot = ClientSnapshot {
+            status: record.render_zh(),
+            ..ClientSnapshot::default()
+        };
+        snapshot.push_record(record.clone());
+        assert_eq!(snapshot.latest_event(), Some(&record));
+
+        // A later unmigrated call site changes only the string, leaving the
+        // record stale; the accessor has to say so.
+        snapshot.status = "尚未迁移的状态".to_owned();
+        assert_eq!(snapshot.latest_event(), None);
+    }
+
+    /// `event_lines` pairs each string with the record that produced it. The
+    /// records are an in-order subsequence, so a bare string between two coded
+    /// events must stay unpaired without consuming the later record.
+    #[test]
+    fn event_lines_pair_records_with_the_lines_they_produced() {
+        use crate::event_code::{EventCode, EventRecord};
+        let ready = EventRecord::new(EventCode::CoreReadyToStart, Vec::new());
+        let hint = EventRecord::new(EventCode::CoreNotInstalledHint, Vec::new());
+        let mut snapshot = ClientSnapshot::default();
+        snapshot.push_record(ready.clone());
+        snapshot.push_event("尚未迁移的普通事件");
+        snapshot.push_record(hint.clone());
+
+        let lines = snapshot.event_lines();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].record, Some(&ready));
+        assert_eq!(
+            lines[1].record, None,
+            "a bare string between records must not steal the later record"
+        );
+        assert_eq!(lines[1].text, "尚未迁移的普通事件");
+        assert_eq!(lines[2].record, Some(&hint));
+    }
+
     #[test]
     fn auto_groups_are_recognized() {
         let group = ProxyGroupSnapshot {
@@ -523,6 +817,54 @@ mod tests {
             ..Default::default()
         };
         assert!(!selector.is_auto());
+    }
+
+    #[test]
+    fn parse_inbounds_reports_what_the_started_configuration_listens_on() {
+        let config = r#"{"inbounds":[
+            {"type":"mixed","tag":"mixed-in","listen":"127.0.0.1","listen_port":2080},
+            {"type":"tun","tag":"tun-in","address":["172.19.0.1/30"],"stack":"mixed"},
+            {"type":"shadowsocks","tag":"ss","listen":"::","listen_port":8443}
+        ]}"#;
+        let parsed = parse_inbounds(config);
+        assert_eq!(parsed.len(), 3, "every declared inbound is listed");
+        assert_eq!(parsed[0].kind, "mixed");
+        assert_eq!(parsed[0].port, 2080);
+        assert_eq!(parsed[0].listen, "127.0.0.1");
+        assert_eq!(
+            parsed[1].port, 0,
+            "a tun inbound declares no port, and 0 is how that is shown"
+        );
+        assert_eq!(parsed[1].listen, "", "no listen means every address");
+        assert_eq!(parsed[2].listen, "::", "an IPv6 literal survives verbatim");
+    }
+
+    #[test]
+    fn parse_inbounds_tolerates_a_missing_or_unparsable_configuration() {
+        for junk in [
+            "not json",
+            "",
+            "{}",
+            r#"{"inbounds":null}"#,
+            r#"{"inbounds":{}}"#,
+        ] {
+            assert!(
+                parse_inbounds(junk).is_empty(),
+                "{junk:?} has no inbounds to report"
+            );
+        }
+        let odd = r#"{"inbounds":[{"type":"mixed","listen_port":"2080"},{"listen_port":99999}],"route":{}}"#;
+        let parsed = parse_inbounds(odd);
+        assert_eq!(parsed.len(), 2, "an unmapped entry still occupies its row");
+        assert_eq!(
+            parsed[0].port, 0,
+            "a string port is not a number, and guessing would misreport what is listening"
+        );
+        assert_eq!(
+            parsed[1].port, 0,
+            "a port above u16 range is not shown as a port"
+        );
+        assert_eq!(parsed[1].kind, "", "an entry with no type is still counted");
     }
 
     #[test]

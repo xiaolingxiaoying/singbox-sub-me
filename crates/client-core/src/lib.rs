@@ -11,6 +11,7 @@ pub mod command;
 pub mod controller;
 pub mod core;
 pub mod event;
+pub mod event_code;
 pub mod format;
 pub mod settings;
 pub mod state;

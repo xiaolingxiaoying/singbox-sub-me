@@ -3,7 +3,57 @@
 Status: ready-for-agent
 Type: task
 
+## 进度（2026-09-23：第 1 步 + 第一批已完成）
+
+**第 1 步（只加不改）已落地。** 新增 `crates/client-core/src/event_code.rs`：
+`EventCode` 枚举 + `zh()`/`en()` + `level()`，`EventRecord { code, args }` 用 `{0}`/`{1}`
+位置参数展开——照 `RuleKind` 的形状。`ClientSnapshot` 增加 `event_records`，与 `events`
+同序同上限，**只由 `push_record` 一处写入**，避免两份列表漂移。`Engine::note_event(code, args)`
+与既有 `note()` 并存。
+
+**第一批转换完成：poll 路径的 6 处**（`ProxyGroupRefreshFailed`、`SubscriptionAutoUpdateFailed`、
+`CoreAutoRestartFailed`、`ConnectionRefreshFailed`、`CoreExitedUnexpectedly`、
+`CoreStatusCheckFailed`）。中文模板逐字复制被替换的 `format!` 串，所以
+**`crates/sbtui/src/view/snapshots/` 的 17 个渲染金标准一字未改仍然通过**——这就是"行为保持"的证据。
+新增 `a_recorded_event_also_lands_in_the_string_history` 钉住双列表配对与中英两版渲染。
+
+**剩余（按今天重新点数的实测值，不是在旧数字上加的）**：`controller.rs` 里 `.note(` 仍有 30 处、
+含中文串字面量的行 64；其他文件 `clash_api.rs` 9、`core.rs` 6、`subscription.rs` 6、
+`system_proxy.rs` 4、`state.rs` 34（含测试与注释）。第 2 步继续按文件分批，第 3 步的 23 条
+错误链单独一轮。
+
+**尚未动**：消费侧（`chrome.rs:290`、`style.rs:58-68`、`log_level_of`）仍靠中文子串判断颜色与级别；
+`ClientEvent`/`recv()` 这条死缝也还没决定删还是复活。第 4、5 步之前，英文界面照旧。
+
+**第 4 步已开始：状态颜色不再靠猜中文。** `ClientSnapshot` 新增 `status_level:
+Option<EventLevel>`，`note_event` 写入、`note` 置 `None`。消费侧优先读它，仅在 `None`
+（还没迁完的调用点）时退回原来的子串猜测：`sbtui/src/style.rs` 的 `status_color_at`
+（被 `view/mod.rs` 页脚使用，`App` 也带上 `status_level` 并在本地"进行中"文案处置 `None`）、
+`sbgui/src/chrome.rs` 的工具栏。新测试 `an_engine_severity_beats_the_word_guess` 断言
+**级别必须压过措辞**（`Some(Error)` 配"一切正常"仍判红、`Some(Info)` 配"导入订阅失败"判绿），
+这正是英文界面丢色的根因。
+
+**第二批转换 8 处**（语言无关的那批）：`CoreAutoStartFailed`、`OperationAlreadyRunning`、
+`ProfileActivated`、`SettingsSaved`、`CoreStopped`、`LocalProfileNeedsNoUpdate`、
+`ProfileUrlUpdated`、`ProfileDeleted`。累计 14 处。
+
+**刻意没转的三处**：`流量模式: {}`、`流量模式: {}（内核已重启）`、`出站模式: {}`。
+它们的 `{0}` 是 `TrafficMode::label()` / `OutboundMode::label()` 的**中文枚举标签**，
+转成事件码只是把中文从模板挪进参数，英文界面照旧混中文——属于本文第 24 行记录的
+"其内插的枚举 label"问题，必须和 label 一起解决，否则是假进展。
+
+**穷举测试当场抓到一个假失败**：`every_code_declares_both_languages_and_fills_every_placeholder`
+原先要求每个码渲染后都含 `ARG`，对无占位符的码必然不成立。改成按模板是否含 `{0}` 分支断言，
+并新增"两种语言对是否需要参数必须一致"的检查。码表现在由 `EventCode::ALL` 驱动，新增变体不会漏测。
+
+**剩余**：`controller.rs` 还有约 22 处 `.note(`（含 3 处刻意保留的模式提示）；第 3 步的 23 条
+错误链未动；`events` 字符串列表与 `log_level_of` 的中文猜级别未动；`ClientEvent`/`recv()`
+死缝未决；GUI 设置页 TUN 开关仍走 `UpdateSettings`。第 5 步（中英全页截图验收）未做。
+
+---
+
 维护者 2026-09-22 选定方向：**共享层返回机器可读的事件码 + 结构化参数，各界面自行渲染**（三条可选路里最干净、改动面最大的一条）。本文是动手前的完整清点，数字是今天重新点的，不是在旧数字上加的。
+
 
 ## 现状机制
 

@@ -16,10 +16,17 @@ pub(crate) fn format_local_time(instant: chrono::DateTime<chrono::Utc>, timezone
         .unwrap_or_else(|_| instant.to_rfc3339())
 }
 
-pub(crate) fn print_nodes(root: &Path) -> ExitCode {
+pub(crate) fn print_nodes(root: &Path, uri: bool) -> ExitCode {
     match sbctl::config::DeploymentStore::new(root).load() {
         Ok(config) => {
             println!("{}", sbctl::lifecycle::enabled_nodes(&config));
+            if uri {
+                let links = sbctl::lifecycle::node_share_links(&config);
+                if !links.is_empty() {
+                    println!("\n原生分享链接（含节点凭据，仅输出到本终端）:");
+                    print!("{links}");
+                }
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -67,6 +74,14 @@ pub(crate) fn print_status(root: &Path) -> ExitCode {
                 ),
                 Err(error) => println!("\nVPS traffic: unavailable ({error})"),
             }
+            // Advisory only: an installed kernel newer than the version table is
+            // a gap in this tool's registry, not a fault in the deployment, so
+            // it is printed here and never changes the exit status.
+            if let Some(warning) = sbctl::subscription::kernel_band_warning(
+                super::config::resolve_sing_box_bin(root, None).as_deref(),
+            ) {
+                println!("\n{warning}");
+            }
             ExitCode::SUCCESS
         }
         Err(sbctl::config::ConfigError::Missing) => {
@@ -112,6 +127,9 @@ pub(crate) fn print_status_json(root: &Path) -> ExitCode {
                 .collect::<std::collections::BTreeMap<_, _>>();
             let certificate = (config.subscription_mode == sbctl::config::SubscriptionMode::Direct)
                 .then(|| sbctl::certificate::status(&store, &config));
+            let kernel_warning = sbctl::subscription::kernel_band_warning(
+                super::config::resolve_sing_box_bin(root, None).as_deref(),
+            );
             let status = serde_json::json!({
                 "configured": true,
                 "mode": config.subscription_mode.to_string(),
@@ -130,6 +148,7 @@ pub(crate) fn print_status_json(root: &Path) -> ExitCode {
                 "services": services,
                 "traffic": traffic,
                 "certificate": certificate,
+                "kernel_version_warning": kernel_warning,
             });
             println!(
                 "{}",

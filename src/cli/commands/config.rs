@@ -182,7 +182,7 @@ fn run_config_override(root: &Path, command: OverrideCommand) -> ExitCode {
 
 /// Resolves the sing-box binary for an override validation: an explicit path,
 /// the managed installation path, or a `sing-box` available on `PATH`.
-fn resolve_sing_box_bin(root: &Path, explicit: Option<PathBuf>) -> Option<PathBuf> {
+pub(crate) fn resolve_sing_box_bin(root: &Path, explicit: Option<PathBuf>) -> Option<PathBuf> {
     if let Some(binary) = explicit {
         return Some(binary);
     }
@@ -451,8 +451,12 @@ pub(crate) fn commit_config_change(
         let binary = sing_box_bin.unwrap_or_else(|| root.join("usr/local/bin/sing-box"));
         match existing {
             None => {
-                let artifacts = sbctl::subscription::generated_artifacts(new, root)
-                    .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+                let artifacts = sbctl::subscription::generated_artifacts_for_kernel(
+                    new,
+                    root,
+                    Some(binary.as_path()),
+                )
+                .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
                 let server = artifacts
                     .iter()
                     .find(|(name, _)| *name == "sing-box-server.json")

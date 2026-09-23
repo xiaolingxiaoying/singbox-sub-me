@@ -6,6 +6,7 @@ mod artifacts;
 mod profile;
 mod render;
 mod serve;
+mod template;
 #[cfg(test)]
 mod test_support;
 
@@ -13,19 +14,38 @@ use base64::Engine;
 
 pub use artifacts::{
     DeploymentSnapshot, SubscriptionError, apply_config_transaction, check_sing_box_config,
-    generated_artifacts, read_authorized, regenerate, restore_config_transaction, route_url,
-    subscription_url,
+    generated_artifacts, generated_artifacts_for_kernel, read_authorized, regenerate,
+    resolve_full_profile, restore_config_transaction, route_url, subscription_url,
 };
 
 pub use profile::{
     CLASH_LEGACY_VERSION, ClientSubscriptionFormat, ClientSubscriptionRow, ClientVersion,
     SING_BOX_VERSION_PROFILES, SingBoxVersionProfile, SubscriptionFormat, SubscriptionLinkInfo,
-    SubscriptionRoute, client_subscription_matrix, latest_version_profile, subscription_matrix,
+    SubscriptionRoute, band_warning_for, client_subscription_matrix, installed_kernel_version,
+    kernel_band_warning, latest_version_profile, parse_kernel_version, subscription_matrix,
 };
 pub use render::{
     AI_DOMAIN_SUFFIXES, AUTO_TAG, SELECTOR_TAG, ensure_external_proxy_listener_available,
 };
 pub use serve::{redact_secret, serve};
+pub use template::{
+    ClientTemplate, DnsSpec, GroupRole, GroupSpec, InlineRule, OutboundRole, RuleMatcher,
+    RuleRenderers, RuleSetKind, RuleSetSpec, TemplateSpec, default_client_template,
+};
+
+/// The native share link for one managed node (`vless://…`, `vmess://…`,
+/// `hysteria2://…`, `tuic://…`, `anytls://…`).
+///
+/// This is the same string the `uri` artifact carries, exposed so the index page
+/// and `sbctl status nodes --uri` can show a node's parameters without making the
+/// operator download a credential'd file to see their own configuration. The
+/// returned line keeps its trailing newline, matching the artifact byte-for-byte.
+pub fn node_share_link(
+    config: &crate::config::DeploymentConfig,
+    node: &crate::canonical::CanonicalNode,
+) -> String {
+    render::node_uri(render::insecure_flag(config), &node.with_bracketed_host())
+}
 
 fn base64_uri(uri: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(uri.as_bytes())

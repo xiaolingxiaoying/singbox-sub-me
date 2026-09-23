@@ -39,7 +39,13 @@ pub(crate) enum Command {
         command: Option<TrafficCommand>,
     },
     /// List the generated Managed protocol listeners without exposing credentials.
-    Node,
+    Node {
+        /// Also print each node's native share link (`vless://…` and friends).
+        /// Those carry the proxy credentials, so they reach this terminal only
+        /// and are never written to the journal.
+        #[arg(long)]
+        uri: bool,
+    },
     /// Validate the active sing-box configuration and restart both managed services.
     Restart {
         #[arg(long, value_name = "PATH")]

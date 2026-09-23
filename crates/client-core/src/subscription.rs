@@ -644,6 +644,21 @@ mod tests {
         assert_eq!(percent_decode("bad%2"), "bad%2");
     }
 
+    /// Our own server appends `profile-update-interval` to this header; a parser
+    /// that treated an unknown key as fatal would break its own downloads.
+    #[test]
+    fn an_unknown_trailing_userinfo_key_is_ignored() {
+        let info = parse_userinfo(
+            "upload=71; download=36; total=10737418240; expire=1790000000; profile-update-interval=24",
+        )
+        .expect("the known fields still parse");
+        assert_eq!(
+            (info.upload, info.download, info.total),
+            (71, 36, 10_737_418_240)
+        );
+        assert_eq!(info.expire, Some(1_790_000_000));
+    }
+
     #[test]
     fn parses_subscription_userinfo_headers() {
         let info = parse_userinfo("upload=71; download=36; total=10737418240; expire=1790000000")

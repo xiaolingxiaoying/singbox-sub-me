@@ -82,7 +82,14 @@ pub enum ClientCommand {
     /// Tests every member of one group concurrently.
     TestGroup(String),
     ToggleSystemProxy,
-    SetTrafficMode(TrafficMode),
+    /// Selects the traffic mode. `restart` says the caller accepts a core
+    /// restart to apply it now: the mode decides the generated inbounds, so a
+    /// running core cannot pick it up otherwise. Without `restart` the command
+    /// is refused while the core runs rather than silently deferred.
+    SetTrafficMode {
+        mode: TrafficMode,
+        restart: bool,
+    },
     SetOutboundMode(OutboundMode),
     CloseConnection(String),
     CloseAllConnections,
@@ -119,7 +126,13 @@ impl ClientCommand {
             Self::TestNode(node) => format!("测试 {node} 延迟"),
             Self::TestGroup(group) => format!("测试 {group} 组延迟"),
             Self::ToggleSystemProxy => "切换系统代理".to_owned(),
-            Self::SetTrafficMode(mode) => format!("切换流量模式至{}", mode.label()),
+            Self::SetTrafficMode { mode, restart } => {
+                if *restart {
+                    format!("切换并重启至{}", mode.label())
+                } else {
+                    format!("切换流量模式至{}", mode.label())
+                }
+            }
             Self::SetOutboundMode(mode) => format!("切换出站模式至{}", mode.label()),
             Self::CloseConnection(_) => "关闭连接".to_owned(),
             Self::CloseAllConnections => "关闭全部连接".to_owned(),

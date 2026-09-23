@@ -334,6 +334,37 @@
 
 ---
 
+## 7. 嗅探字段的真核实测（2026-09-23，探针而非文档转述）
+
+上面各节的字段结论来自官方文档与 release notes。嗅探这一项不同：**文档描述的形态在
+1.10–1.14 的真实内核上全部无法解码**，所以这里记的是实测结果。
+
+方法：容器内对每个 minor 生成一份最小配置并跑 `sing-box check -c`，逐字段变体打印
+ACCEPT/REJECT。入站探针必须按版本换地址写法——1.11+ 用 `inet4_address` 会先撞上
+`legacy tun address fields` 错误，把 sniff 的结论掩盖掉。
+
+| 位置 | 字段形态 | 1.10 | 1.11 | 1.12 | 1.13 | 1.14 |
+|---|---|---|---|---|---|---|
+| `route.rules[]` | `{"action":"sniff"}` | ✗ 无 action | ✓ | ✓ | ✓ | ✓ |
+| `route.rules[]` | `action:sniff` + `sniff:["http","tls","quic"]` | ✗ | ✗ unknown field | ✗ | ✗ | ✗ |
+| `route.rules[]` | `action:sniff` + `override_destination` | ✗ | ✗ unknown field | ✗ | ✗ | ✗ |
+| `inbounds[tun]` | `"sniff": true` | ✓ | ✓ | ✓ | ✗ | ✗ |
+| `inbounds[tun]` | `"sniff_override_destination": true` | ✓ | ✓ | ✓ | ✗ | ✗ |
+| `inbounds[tun]` | `"sniff": [ … ]` | ✗ | ✗ |  | ✗ |  |
+
+要点：
+
+1. **协议列表与"覆写目标"在 1.10–1.14 的任何位置都不是可写字段。** 想给订阅加"嗅探模板"
+   （指定嗅探哪些协议、是否覆写目标地址）在 sing-box 侧没有表达空间。
+2. 1.13 起入站的 `sniff` / `sniff_override_destination` 被移除，嗅探在 1.13+ 只能由裸
+   `{"action":"sniff"}` 触发，细节交给内核默认值。
+3. 因此 `src/subscription/render/singbox.rs:146`（1.11+ 用裸 action）与 `:138-142`
+   （1.10 用 `tun.sniff`）现有写法已经是正确的，不需要改动。
+4. "嗅探模板"这一需求真正能落地的是 **mihomo**：顶层 `sniffers` + `sniff-vars` +
+   `dns-hijack`，见 §5。
+
+---
+
 ## 主要来源汇总
 
 - sing-box：https://sing-box.sagernet.org/changelog/ 、https://sing-box.sagernet.org/deprecated/ 、https://sing-box.sagernet.org/migration/ 、https://sing-box.sagernet.org/configuration/dns/server/ 、https://sing-box.sagernet.org/configuration/dns/server/fakeip/ 、https://sing-box.sagernet.org/configuration/dns/rule/ 、https://sing-box.sagernet.org/configuration/dns/rule_action/ 、https://sing-box.sagernet.org/configuration/route/ 、https://sing-box.sagernet.org/configuration/outbound/urltest/ 、https://sing-box.sagernet.org/configuration/experimental/clash-api/ 、https://sing-box.sagernet.org/configuration/experimental/cache-file/ 、https://sing-box.sagernet.org/configuration/inbound/tun/

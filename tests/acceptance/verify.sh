@@ -102,6 +102,7 @@ for path in sing-box.json sing-box-full.json sing-box-1.12.json sing-box-1.13.js
   response=$(curl --silent --show-error --include "http://127.0.0.1:2080/sub/$credential/$path")
   contains "$response" 'HTTP/1.1 200 OK'
   contains "$response" 'subscription-userinfo: upload=71; download=36; total=999; expire='
+  contains "$response" '; profile-update-interval=24'
 done
 for path in "qr/uri" index; do
   response=$(curl --silent --show-error --include "http://127.0.0.1:2080/sub/$credential/$path")
@@ -127,6 +128,46 @@ test "$trailing_status" = 404 || fail 'trailing path segment was not a uniform 4
 kill "$serve_pid" 2>/dev/null || true
 wait "$serve_pid" 2>/dev/null || true
 test "$(stat -c '%Y %s' "$root/var/lib/sbctl/state.json")" = "$state_before" || fail 'subscription reads changed accounting state'
+
+# Rate limiting is a real listener property, not just a unit-test one: once an
+# address exhausts its per-source budget, a correct credential and a wrong one
+# are answered byte-for-byte alike, so waiting cannot be traded for a
+# credential oracle. The flood would also throttle every later assertion that
+# shares 127.0.0.1, so it runs in its own server instance, started after the one
+# above is stopped, with a request cap large enough to outlive the loop.
+"$sbctl" --root "$root" serve --max-requests 2000 >"$work/flood.out" 2>"$work/flood.err" &
+flood_pid=$!
+sleep 1
+throttled_valid=false
+indistinguishable=false
+attempt=0
+while [ "$attempt" -lt 240 ]; do
+  valid=$(curl --silent --show-error --include "http://127.0.0.1:2080/sub/$credential/uri")
+  wrong=$(curl --silent --show-error --include "http://127.0.0.1:2080/sub/wrong-credential/uri")
+  case "$valid" in
+    "HTTP/1.1 429"*)
+      throttled_valid=true
+      if [ "$valid" = "$wrong" ]; then
+        indistinguishable=true
+        break
+      fi
+      ;;
+  esac
+  attempt=$((attempt + 1))
+done
+test "$throttled_valid" = true || fail 'the per-address budget never reached the response path'
+test "$indistinguishable" = true || fail 'a throttled probe could tell a real credential from a wrong one'
+case "$valid" in
+  "HTTP/1.1 5"*) fail "throttled valid response was a server error: $valid" ;;
+esac
+case "$wrong" in
+  "HTTP/1.1 5"*) fail "throttled wrong response was a server error: $wrong" ;;
+esac
+if printf '%s' "$valid" | grep -F -- "$credential" >/dev/null; then
+  fail 'throttled response repeated the credential it is guarding'
+fi
+kill "$flood_pid" 2>/dev/null || true
+wait "$flood_pid" 2>/dev/null || true
 
 # A broken accounting state degrades the response instead of taking the
 # subscription offline: the real artifact is served (200) with no fabricated
@@ -178,6 +219,7 @@ sleep 1
 pending_response=$(curl --silent --show-error --include "http://127.0.0.1:2089/sub/$pending_credential/uri")
 contains "$pending_response" 'HTTP/1.1 200 OK'
 contains "$pending_response" 'subscription-userinfo: upload=0; download=0; total=0; expire='
+contains "$pending_response" '; profile-update-interval=24'
 curl --silent --output /dev/null "http://127.0.0.1:2089/sub/wrong-credential/uri"
 
 # status --json reports the current period without exposing the credential.
@@ -338,12 +380,19 @@ test "$before" = "$after" || fail 'update --check changed the host'
 mkdir -p "$root/usr/bin"
 printf '#!/bin/sh\nexit 1\n' > "$root/usr/bin/systemctl"
 chmod 0755 "$root/usr/bin/systemctl"
-if "$sbctl" --root "$root" update --manifest "$work/manifest.json" --sbctl-artifact "$fake_sing_box" --sing-box-artifact "$fake_sing_box" >/dev/null 2>&1; then
+# The failure output is the diagnosis: without it a rollback that was never
+# created and an update that aborted before it got that far look identical.
+update_stderr=$("$sbctl" --root "$root" update --manifest "$work/manifest.json" --sbctl-artifact "$fake_sing_box" --sing-box-artifact "$fake_sing_box" 2>&1 >/dev/null) && {
   fail 'update with a failed service health check was accepted'
-fi
+}
+echo "failed-update stderr: $update_stderr"
 test "$(cat "$root/usr/local/bin/sbctl")" = 'known-good sbctl' || fail 'failed update changed sbctl'
 test "$(cat "$root/usr/local/bin/sing-box")" = 'known-good sing-box' || fail 'failed update changed sing-box'
+# The rollback point lives where backups live (`ROLLBACK_ROOT` in src/update.rs),
+# and it has to hold something: an empty directory would prove only that the
+# code reached the mkdir, not that a known-good state was saved.
 test -d "$root/var/backups/sbctl/rollback" || fail 'failed update did not keep a rollback point'
+test -n "$(find "$root/var/backups/sbctl/rollback" -type f)" || fail 'the rollback point holds no files'
 
 # Uninstall preserves unrelated proxy/firewall files by default; --purge only removes sbctl data.
 fixture_seed_uninstall

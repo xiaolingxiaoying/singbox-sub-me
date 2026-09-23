@@ -58,8 +58,9 @@ sbctl 在同一份节点模型上生成多种订阅格式。所有链接都在 `
 
 ## mihomo 差异（1.18 → 1.19）
 
-- `clash.yaml` 使用 rule-providers（远程 `.mrs`，`@meta` 分支：geosite/geoip 的 cn 与 private 四个规则集）+ 三组代理组（🚀节点选择 / ♻️自动选择 / 🎯全球直连）+ AI 域名分流；需要 mihomo ≥1.14（rule-set）。
+- `clash.yaml` 使用 rule-providers（远程 `.mrs`，`@meta` 分支：geosite/geoip 的 cn 与 private 四个规则集）+ 三组代理组（🌍选择代理节点 / ♻️自动选择 / 🎯全球直连）+ AI 域名分流；需要 mihomo ≥1.14（rule-set）。
 - `clash-1.18.yaml` 保留内置 GEOIP,CN 直连写法，不引用任何远程规则集，适合旧内核或不想加载远程规则的场景。
+- 两份 Clash 工件都带 `sniffer: {enable: true, sniffing: [http, tls, quic]}`：mihomo 默认**关闭**嗅探（`Enable: false` 且不选任何协议），不写就没有"从 TLS SNI / HTTP Host 还原真实域名再分流"的能力。键名与取值是用 CI 同一 pin 的内核（v1.19.30）实测出来的：`domain`、`dns` 会被直接拒绝（`not find the sniffer[domain]`），`override-destination` 故意不写（它会改变远端服务器看到的目的地），`dns-hijack` 也不写（它属于 `tun:`，默认已是 `0.0.0.0:53`，从订阅里输出 `tun:` 会覆盖客户端自己的 TUN 设置）。
 - 1.19.6 起配置内所有本地路径被限制在 workdir 内：rule-providers 的 `path` 均为相对路径 `./ruleset/*.mrs`，符合该限制。
 
 ## Shadowrocket 适配说明
@@ -100,5 +101,6 @@ sbctl config override clear     # 删除并重新生成
 ## 安全边界
 
 - 凭据只走 URL path；query 参数、错误凭据、未知路径一律 404。
+- 按源 IP 限流：同一地址可在瞬间花掉 60 次请求的突发额度，之后每秒只恢复一次；超出时返回 `429` + `Retry-After`。计费和判定都发生在读 URL 之前，所以**被限流时真凭据与错凭据的响应完全相同**（都带同样的头、空正文、不回显凭据），探测者无法用"是否 429"来反查某个订阅是否存在。ACME 挑战路径不受此限：它由 Let's Encrypt 的服务器发起，掐断它等于让证书续期失败。
 - 所有响应带 `Cache-Control: no-store`；订阅凭据泄露时执行 `sbctl credential rotate` 全部作废。
 - IP fallback 模式为明文 HTTP，仅建议无域名时临时使用。

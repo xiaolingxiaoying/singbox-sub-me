@@ -236,14 +236,15 @@ pub async fn start(core: &Path, config: &Path, log_path: &Path) -> Result<CoreHa
         .open(log_path)
         .await
         .context("opening the core log file")?;
-    let child = Command::new(core)
+    let mut command = Command::new(core);
+    command
         .args(["run", "-c"])
         .arg(config)
         .stdout(Stdio::null())
         .stderr(Stdio::from(log_file.into_std().await))
-        .kill_on_drop(true)
-        .spawn()
-        .context("spawning the sing-box core")?;
+        .kill_on_drop(true);
+    prearm_orphan_guard(&mut command);
+    let child = command.spawn().context("spawning the sing-box core")?;
     let orphan_guard = attach_orphan_guard(child.id());
     Ok(CoreHandle {
         child,
@@ -313,12 +314,51 @@ fn attach_orphan_guard(pid: Option<u32>) -> bool {
     assigned.is_ok()
 }
 
-#[cfg(not(windows))]
+/// Asks the kernel to signal the core when this process goes away.
+///
+/// `PR_SET_PDEATHSIG` is set in the child between fork and exec, so it is armed
+/// before the core exists and cannot be missed. Failing inside the hook fails
+/// the spawn rather than leaving an unguarded core running, which is why
+/// [`attach_orphan_guard`] can report success unconditionally on Linux.
+#[cfg(target_os = "linux")]
+fn prearm_orphan_guard(command: &mut Command) {
+    let parent = std::process::id();
+    // SAFETY: the closure runs between fork and exec and calls only `prctl`
+    // and `getppid`, both async-signal-safe.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // The flag is only honoured while the parent is alive at the moment
+            // of death: if the parent already exited, the child was reparented
+            // and no signal will ever arrive. Closing that window here turns a
+            // silent orphan into a spawn failure the caller reports.
+            if libc::getppid() != parent as i32 {
+                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn prearm_orphan_guard(_command: &mut Command) {}
+
+/// Linux arms its guard before the spawn and cannot fail there without the
+/// spawn failing too, so reaching this point means the guarantee holds.
+#[cfg(target_os = "linux")]
 fn attach_orphan_guard(_pid: Option<u32>) -> bool {
-    // Unix delivers SIGTERM to the core through the cooperative shutdown path,
-    // and a killed client leaves its core behind; tracked as a follow-up
-    // (PR_SET_PDEATHSIG) rather than a per-start warning.
     true
+}
+
+/// macOS has no `PR_SET_PDEATHSIG` and no job object, so there is genuinely no
+/// guarantee to report: returning `false` here lets the caller say so instead of
+/// claiming protection it does not have. Closing the gap needs a launchd
+/// KeepAlive job or a supervisor process, which is a separate piece of work.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn attach_orphan_guard(_pid: Option<u32>) -> bool {
+    false
 }
 
 /// Exponential backoff for automatic core restarts after a crash: 2s, 4s,
@@ -546,6 +586,14 @@ fn core_platform() -> (&'static str, &'static str) {
 /// Rewrites the `inbounds` section of a subscription config for the TUI's
 /// local runtime: mixed proxy inbound (system proxy) or tun inbound (global).
 /// Everything else the subscription carries stays untouched.
+///
+/// In TUN mode the profile's *own* tun inbound is reused rather than replaced.
+/// Its `stack`, addresses and route options are what that profile was built
+/// and tested for, and a client that substitutes its own defaults can hand the
+/// kernel a stack the profile has moved away from — the reason sing-box
+/// profiles pinned `stack` per minor in the first place. Keys the profile left
+/// out fall back to this client's defaults, and the tag is forced so the
+/// runtime always has the one it looks up.
 pub fn adapt_inbounds(
     config_text: &str,
     mode: crate::system_proxy::TrafficMode,
@@ -553,7 +601,7 @@ pub fn adapt_inbounds(
 ) -> Result<String> {
     let mut value: serde_json::Value =
         serde_json::from_str(config_text).context("the active configuration is not JSON")?;
-    let mut inbounds = match mode {
+    let inbounds = match mode {
         crate::system_proxy::TrafficMode::SystemProxy => serde_json::json!([
             {
                 "type": "mixed",
@@ -562,8 +610,8 @@ pub fn adapt_inbounds(
                 "listen_port": mixed_port
             }
         ]),
-        crate::system_proxy::TrafficMode::Tun => serde_json::json!([
-            {
+        crate::system_proxy::TrafficMode::Tun => {
+            let mut tun = serde_json::json!({
                 "type": "tun",
                 "tag": "tun-in",
                 "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
@@ -571,8 +619,30 @@ pub fn adapt_inbounds(
                 "auto_route": true,
                 "strict_route": true,
                 "stack": "mixed"
+            });
+            if let Some(profile_tun) = value
+                .get("inbounds")
+                .and_then(|inbounds| inbounds.as_array())
+                .and_then(|inbounds| {
+                    inbounds
+                        .iter()
+                        .find(|inbound| inbound.get("type").and_then(|t| t.as_str()) == Some("tun"))
+                })
+            {
+                if let (Some(tun_object), Some(profile_object)) =
+                    (tun.as_object_mut(), profile_tun.as_object())
+                {
+                    for (key, profile_value) in profile_object {
+                        tun_object.insert(key.clone(), profile_value.clone());
+                    }
+                }
+                // The runtime addresses the local inbound by tag, so a profile
+                // that named it differently must not win that one field.
+                tun["tag"] = serde_json::Value::String("tun-in".to_owned());
+                tun["type"] = serde_json::Value::String("tun".to_owned());
             }
-        ]),
+            serde_json::Value::Array(vec![tun])
+        }
     };
     if let Some(route) = value.get_mut("route").and_then(|r| r.as_object_mut()) {
         // A local runtime always needs the outbound interface autodetected;
@@ -582,13 +652,118 @@ pub fn adapt_inbounds(
             serde_json::Value::Bool(true),
         );
     }
-    value["inbounds"] = std::mem::take(&mut inbounds);
+    value["inbounds"] = inbounds;
     Ok(serde_json::to_string_pretty(&value)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Finding #2 of the refactor report said the fixed-port probe was real code
+    /// with no test. The claim worth pinning is not "startup fails" but "startup
+    /// fails *before* the cached runtime configuration is rewritten": a refused
+    /// start that still clobbered the cache would lose the last known-good
+    /// profile the retry path depends on.
+    #[tokio::test]
+    async fn a_busy_mixed_port_is_refused_before_the_runtime_config_is_rewritten() {
+        let dir = tempfile::tempdir().expect("a data directory");
+        std::fs::create_dir_all(dir.path().join("cache")).expect("the cache directory");
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").expect("an ephemeral port");
+        let port = taken.local_addr().expect("the bound address").port();
+
+        let error = match super::start_managed(
+            dir.path(),
+            VALID_RAW,
+            crate::system_proxy::TrafficMode::SystemProxy,
+            port,
+        )
+        .await
+        {
+            Ok(_) => panic!("the mixed port is occupied, so startup must be refused"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("已被占用"),
+            "the refusal must name the reason rather than just fail: {message}"
+        );
+        assert!(
+            message.contains(&port.to_string()),
+            "the refusal must name the port the operator has to free: {message}"
+        );
+        assert!(
+            !dir.path().join("cache/active-config.json").exists(),
+            "a refused start must leave the cached runtime configuration alone"
+        );
+    }
+
+    /// The control that makes the assertion above mean something: with the port
+    /// free, startup walks past the probe and writes the cache before failing on
+    /// the absent core binary. If this test went red at the `exists()` line, the
+    /// refusal test would be passing for the wrong reason.
+    #[tokio::test]
+    async fn a_free_mixed_port_lets_startup_reach_the_config_write() {
+        let dir = tempfile::tempdir().expect("a data directory");
+        std::fs::create_dir_all(dir.path().join("cache")).expect("the cache directory");
+        let free = std::net::TcpListener::bind("127.0.0.1:0").expect("an ephemeral port");
+        let port = free.local_addr().expect("the bound address").port();
+        drop(free);
+
+        let outcome = super::start_managed(
+            dir.path(),
+            VALID_RAW,
+            crate::system_proxy::TrafficMode::SystemProxy,
+            port,
+        )
+        .await;
+        // Whether startup then fails depends on whether a core binary sits in the
+        // data directory, which this test does not provide; the point is that it
+        // got past the port probe.
+        assert!(
+            outcome.is_err(),
+            "no sing-box binary is installed in the data directory"
+        );
+        assert!(
+            dir.path().join("cache/active-config.json").exists(),
+            "startup has to pass the port probe and reach the config write"
+        );
+    }
+
+    const VALID_RAW: &str = r#"{"log":{"level":"info"},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}],"experimental":{"clash_api":{"external_controller":"127.0.0.1:9090"}}}"#;
+
+    /// Starting a core must arm the orphan guard without breaking the spawn, and
+    /// the reported guarantee has to be honest: Linux arms `PR_SET_PDEATHSIG`
+    /// before the child exists, macOS has no equivalent and must say so.
+    ///
+    /// This covers the wiring only. The end-to-end claim — that killing the
+    /// client really takes the core with it — needs a second process to die, so
+    /// it belongs to the L3 (Docker) acceptance step, not to a unit test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn starting_a_core_arms_the_orphan_guard_and_reports_it_truthfully() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("stub-core");
+        std::fs::write(&stub, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, "{}").unwrap();
+
+        let mut handle = start(&stub, &config, &dir.path().join("cache/core.log"))
+            .await
+            .expect("the stub core starts with the guard installed");
+        assert_eq!(
+            handle.orphan_guard,
+            cfg!(target_os = "linux"),
+            "the guard may only be claimed where the kernel actually provides one"
+        );
+        assert!(
+            handle.child.try_wait().unwrap().is_none(),
+            "the pre-exec hook must not break the spawn"
+        );
+        let _ = handle.child.kill().await;
+    }
 
     #[tokio::test]
     async fn a_dead_child_cannot_be_made_healthy_by_another_api() {
@@ -727,5 +902,46 @@ mod tests {
         assert_eq!(restart_backoff(3), Duration::from_secs(16));
         assert_eq!(restart_backoff(4), Duration::from_secs(30));
         assert_eq!(restart_backoff(10), Duration::from_secs(30));
+    }
+
+    /// The client used to substitute its own TUN literal for whatever the
+    /// profile declared, so a profile that had moved on to a different stack,
+    /// address range or mtu silently got this client defaults back. The profile
+    /// declaration now wins; the client only fills gaps and keeps the one tag it
+    /// looks the inbound up by.
+    #[test]
+    fn a_profile_that_declares_its_own_tun_inbound_keeps_those_settings() {
+        let profile = r#"{"inbounds":[{"type":"tun","tag":"profile-tun","stack":"system","address":["10.0.0.1/32"],"mtu":1280,"strict_route":false}],"route":{"final":"direct"}}"#;
+        let adapted = adapt_inbounds(profile, crate::system_proxy::TrafficMode::Tun, 2080)
+            .expect("a profile with a tun inbound adapts");
+        let value: serde_json::Value = serde_json::from_str(&adapted).expect("adapted JSON");
+        let tun = &value["inbounds"][0];
+        assert_eq!(tun["stack"], "system", "the profile stack must survive");
+        assert_eq!(tun["address"][0], "10.0.0.1/32", "so must its addresses");
+        assert_eq!(tun["mtu"], serde_json::json!(1280));
+        assert_eq!(tun["strict_route"], serde_json::json!(false));
+        assert_eq!(tun["tag"], "tun-in", "the runtime addresses it by tag");
+        assert_eq!(tun["type"], "tun");
+        assert_eq!(
+            value["route"]["auto_detect_interface"],
+            serde_json::json!(true),
+            "the local runtime still needs the interface autodetected"
+        );
+    }
+
+    /// The other half: a subscription that declares no tun inbound keeps getting
+    /// exactly the defaults this client always synthesised, so the change above
+    /// cannot be an excuse for a behaviour shift on the common path.
+    #[test]
+    fn a_profile_without_a_tun_inbound_still_gets_the_client_defaults() {
+        let profile = r#"{"inbounds":[{"type":"mixed","tag":"x","listen":"127.0.0.1","listen_port":7890}],"route":{}}"#;
+        let adapted = adapt_inbounds(profile, crate::system_proxy::TrafficMode::Tun, 2080)
+            .expect("a subscription without a tun inbound adapts");
+        let value: serde_json::Value = serde_json::from_str(&adapted).expect("adapted JSON");
+        let inbounds = value["inbounds"].as_array().expect("an inbound list");
+        assert_eq!(inbounds.len(), 1, "the local runtime owns the inbound list");
+        assert_eq!(inbounds[0]["stack"], "mixed");
+        assert_eq!(inbounds[0]["tag"], "tun-in");
+        assert_eq!(inbounds[0]["mtu"], serde_json::json!(9000));
     }
 }

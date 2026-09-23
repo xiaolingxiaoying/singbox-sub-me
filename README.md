@@ -388,6 +388,11 @@ docker compose -f docker-compose.acceptance.yml down
 该配置需要 Docker Desktop/Engine 开启 Linux 容器、特权容器和 cgroup 挂载权限；Windows
 路径建议使用 WSL 路径执行。生产部署仍应使用 Debian/Ubuntu VPS 上的 systemd。
 
+把上述各条腿排成分层验证阶梯（L1 宿主 → L2 WSL → L3 Docker 验收 → L4 Xvfb 截图 → L5
+Windows 真机 → L6 VPS），并逐条写明每腿不能证明什么，见
+[`docs/target-spec-gap-and-verification-plan.md`](docs/target-spec-gap-and-verification-plan.md)
+第 6 节；同一文档第 5 节给出每个改动应在哪条腿上被证伪。
+
 ## 发布与更新
 
 首次发布前必须完成[生产密钥配置与旧版本迁移](docs/release-signing.md)。公开开发密钥已从普通构建的信任根移除；缺少生产密钥时不会发布。

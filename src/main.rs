@@ -64,7 +64,7 @@ fn main() -> ExitCode {
                 traffic_set_used(root, bytes, rx, tx)
             }
         },
-        Command::Node => print_nodes(root),
+        Command::Node { uri } => print_nodes(root, uri),
         Command::Restart { sing_box_bin } => restart(root, sing_box_bin),
         Command::Uninstall { purge } => uninstall(root, purge),
         Command::Update {

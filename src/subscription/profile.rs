@@ -113,6 +113,14 @@ pub struct SingBoxVersionProfile {
     pub version: ClientVersion,
     pub supported: &'static str,
     pub notes: &'static str,
+    /// The TUN `stack` this minor accepts, or `None` to omit the key.
+    ///
+    /// `mixed` was deprecated for 1.15, and a value that survives being
+    /// written unconditionally into every profile is exactly how the third
+    /// copy of a stale default outlives the version it belonged to. Keyed per
+    /// minor so a registry entry is the only place a stack change has to be
+    /// made.
+    pub tun_stack: Option<&'static str>,
     /// Pre-1.12 cores only accept the legacy DNS server format (address
     /// strings plus a top-level `dns.fakeip` object); 1.12+ requires the
     /// typed server objects this tool generates for them.
@@ -142,6 +150,7 @@ pub const SING_BOX_VERSION_PROFILES: &[SingBoxVersionProfile] = &[
         route_rule_actions: false,
         supports_anytls: false,
         supports_store_dns: false,
+        tun_stack: Some("mixed"),
     },
     SingBoxVersionProfile {
         version: ClientVersion::new(1, 11),
@@ -151,6 +160,7 @@ pub const SING_BOX_VERSION_PROFILES: &[SingBoxVersionProfile] = &[
         route_rule_actions: true,
         supports_anytls: false,
         supports_store_dns: false,
+        tun_stack: Some("mixed"),
     },
     SingBoxVersionProfile {
         version: ClientVersion::new(1, 12),
@@ -160,6 +170,7 @@ pub const SING_BOX_VERSION_PROFILES: &[SingBoxVersionProfile] = &[
         route_rule_actions: true,
         supports_anytls: true,
         supports_store_dns: false,
+        tun_stack: Some("mixed"),
     },
     SingBoxVersionProfile {
         version: ClientVersion::new(1, 13),
@@ -169,6 +180,7 @@ pub const SING_BOX_VERSION_PROFILES: &[SingBoxVersionProfile] = &[
         route_rule_actions: true,
         supports_anytls: true,
         supports_store_dns: false,
+        tun_stack: Some("mixed"),
     },
     SingBoxVersionProfile {
         version: ClientVersion::new(1, 14),
@@ -178,10 +190,76 @@ pub const SING_BOX_VERSION_PROFILES: &[SingBoxVersionProfile] = &[
         route_rule_actions: true,
         supports_anytls: true,
         supports_store_dns: true,
+        tun_stack: Some("mixed"),
     },
 ];
 
 /// The newest sing-box version profile; `sing-box-full.json` targets it.
+/// The newest kernel this table can describe.
+fn registry_top() -> ClientVersion {
+    let top = latest_version_profile().version;
+    ClientVersion {
+        major: top.major,
+        minor: top.minor,
+    }
+}
+
+/// The warning for a kernel newer than anything this table describes; `None`
+/// when the version is described (including the healthy case of an exact match)
+/// and when it is older.
+///
+/// Only one direction is reported on purpose. An older kernel is already served
+/// by its own per-minor profile, so there is nothing to warn about; a newer one
+/// is a hole in *this table*. The artifacts keep targeting the newest described
+/// profile either way — the tool never ships a configuration it has not
+/// validated, and never takes a subscription offline over its own stale table.
+pub fn band_warning_for(reported: ClientVersion) -> Option<String> {
+    let top = registry_top();
+    let newer =
+        reported.major > top.major || (reported.major == top.major && reported.minor > top.minor);
+    newer.then(|| {
+        format!(
+            "内核版本提醒: 已安装的 sing-box {reported} 高于本工具版本表能描述的最高档 {top}；\
+             订阅工件仍按 {top} 生成（不发未经校验的配置，也不中断服务）。\
+             请为 {reported} 补一条注册表条目与 notes，见 docs/research/sing-box-client-version-differences.md。"
+        )
+    })
+}
+
+/// Reduces the `sing-box version 1.14.1` line to the `(major, minor)` the
+/// registry is keyed on. The patch number is dropped deliberately: the table
+/// describes minors, and a patch release must not look like a new version
+/// window that the registry has failed to follow.
+pub fn parse_kernel_version(reported: &str) -> Option<ClientVersion> {
+    let version = reported.trim().strip_prefix("sing-box version ")?.trim();
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse::<u8>().ok()?;
+    let minor = parts.next()?.parse::<u8>().ok()?;
+    Some(ClientVersion { major, minor })
+}
+
+/// Asks the installed kernel which version it is, returning `None` for any
+/// failure at all. This feeds one advisory line in `sbctl status`; a kernel that
+/// cannot be asked must not turn `status` into an error.
+pub fn installed_kernel_version(binary: &std::path::Path) -> Option<ClientVersion> {
+    let output = std::process::Command::new(binary)
+        .arg("version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_kernel_version(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The band warning for an already resolved kernel path, or `None` when there is
+/// no kernel to ask or what it reports is already described.
+pub fn kernel_band_warning(binary: Option<&std::path::Path>) -> Option<String> {
+    binary
+        .and_then(installed_kernel_version)
+        .and_then(band_warning_for)
+}
+
 pub fn latest_version_profile() -> &'static SingBoxVersionProfile {
     SING_BOX_VERSION_PROFILES
         .last()

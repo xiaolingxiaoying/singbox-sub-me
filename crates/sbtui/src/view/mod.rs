@@ -5,6 +5,7 @@ mod connections;
 mod dashboard;
 pub(crate) mod logs;
 pub(crate) mod proxies;
+mod rules;
 pub(crate) mod settings;
 
 use ratatui::Frame;
@@ -15,15 +16,16 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
 
 use crate::app::{App, InputGoal, Tab};
 use crate::format::human_bytes;
-use crate::style::{AMBER, CYAN, EDGE, MINT, MUTED, TEXT, panel, short_label, status_color};
+use crate::style::{AMBER, CYAN, EDGE, MINT, MUTED, TEXT, panel, short_label, status_color_at};
 use crate::system_proxy::TrafficMode;
 use crate::view::connections::draw_connections;
 use crate::view::dashboard::draw_dashboard;
 use crate::view::logs::{draw_logs, tail_within_width};
 use crate::view::proxies::{draw_proxies, selected_node};
+use crate::view::rules::draw_rules;
 use crate::view::settings::draw_settings;
 
-const TAB_TITLES: [&str; 5] = ["概览", "节点", "连接", "日志", "设置"];
+const TAB_TITLES: [&str; 6] = ["概览", "节点", "连接", "日志", "设置", "入站"];
 
 pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
     const INK: Color = Color::Rgb(8, 18, 28);
@@ -45,6 +47,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
         Tab::Connections => draw_connections(frame, outer[1], app),
         Tab::Logs => draw_logs(frame, outer[1], app),
         Tab::Settings => draw_settings(frame, outer[1], app),
+        Tab::Rules => draw_rules(frame, outer[1], app),
     }
     draw_footer(frame, outer[2], app);
     if app.input.is_some() {
@@ -127,10 +130,14 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             "↑↓/PgUp PgDn 回看  ·  End 回到最新  ·  Space 暂停  ·  l 级别  ·  / 关键字  ·  c 复制  ·  r 分流规则"
         }
         Tab::Settings => "n 新增  ·  e 编辑  ·  Delete 删除  ·  d 下载内核  ·  a/P/U 选项",
+        Tab::Rules => "入站与规则来自内核正在使用的配置  ·  r 返回日志",
     };
     let line = Line::from(vec![
         Span::styled(" ", Style::default()),
-        Span::styled(&app.status, Style::default().fg(status_color(&app.status))),
+        Span::styled(
+            &app.status,
+            Style::default().fg(status_color_at(app.status_level, &app.status)),
+        ),
         Span::styled("  │  ", Style::default().fg(EDGE)),
         Span::styled(hint, Style::default().fg(MUTED)),
         Span::styled(
@@ -201,6 +208,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
             "↑↓/PgUp PgDn 回看 · End 回到最新 · Space 暂停 · l 切换级别 · / 关键字过滤 · c 复制 · r 查看规则"
         }
         Tab::Settings => "n 新增 · e 编辑 · Delete 删除 · d 下载内核 · a/P/U/g/y 选项",
+        Tab::Rules => "只读视图 · r 返回日志",
     };
     let body = vec![
         Line::from(Span::styled(
@@ -291,5 +299,179 @@ fn input_label(goal: &InputGoal) -> &'static str {
         InputGoal::TestUrl => "延迟测试地址",
         InputGoal::ConnFilter => "连接过滤关键字（留空 = 全部）",
         InputGoal::LogQuery => "日志关键字（留空 = 不过滤）",
+    }
+}
+
+/// Every tab is drawn from a `ClientSnapshot`, so a golden frame per tab pins
+/// what the user actually sees. Until now the client crates had only pure
+/// function tests: nothing asserted that a published snapshot reaches the
+/// screen, which is exactly the class of bug the connections poll starvation
+/// was (`.scratch/sbgui-progressive-workspace/issues/01-connections-poll-flake.md`).
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use crate::clash_api::{Connection, ConnectionMetadata, ConnectionsSnapshot};
+    use crate::state::ProxyGroupSnapshot;
+    use crate::{ClientController, ClientSnapshot};
+    use std::collections::HashMap;
+
+    /// A snapshot dense enough that every tab has real content to draw: a
+    /// running core, two proxy groups, live connections, traffic in both
+    /// directions, and log lines.
+    fn dense_snapshot() -> ClientSnapshot {
+        let mut delays = HashMap::new();
+        delays.insert("东京-A".to_owned(), 42_u64);
+        ClientSnapshot {
+            inbounds: vec![
+                client_core::state::InboundInfo {
+                    kind: "mixed".to_owned(),
+                    tag: "mixed-in".to_owned(),
+                    listen: "127.0.0.1".to_owned(),
+                    port: 2080,
+                },
+                client_core::state::InboundInfo {
+                    kind: "tun".to_owned(),
+                    tag: "tun-in".to_owned(),
+                    listen: String::new(),
+                    port: 0,
+                },
+            ],
+            core_running: true,
+            current_node: Some("东京-A".to_owned()),
+            traffic_mode: TrafficMode::Tun,
+            upload_speed: 237,
+            download_speed: 196_918,
+            total_upload: 1_300_234,
+            total_download: 19_789_432,
+            active_connections: 2,
+            connections: ConnectionsSnapshot {
+                upload_total: 1_300_234,
+                download_total: 19_789_432,
+                connections: vec![
+                    Connection {
+                        id: "1".to_owned(),
+                        upload: 4_096,
+                        download: 196_608,
+                        start: "2026-09-23T01:00:00Z".to_owned(),
+                        rule: "ip_is_private=true".to_owned(),
+                        chains: vec!["DIRECT".to_owned()],
+                        metadata: ConnectionMetadata::default(),
+                    },
+                    Connection {
+                        id: "2".to_owned(),
+                        upload: 1_024,
+                        download: 81_920,
+                        start: "2026-09-23T01:00:05Z".to_owned(),
+                        rule: "MATCH".to_owned(),
+                        chains: vec!["🚀节点选择".to_owned(), "东京-A".to_owned()],
+                        metadata: ConnectionMetadata::default(),
+                    },
+                ],
+            },
+            proxy_groups: vec![
+                ProxyGroupSnapshot {
+                    name: "🚀节点选择".to_owned(),
+                    kind: "selector".to_owned(),
+                    current: "东京-A".to_owned(),
+                    members: vec!["东京-A".to_owned(), "洛杉矶-B".to_owned()],
+                    delays,
+                    failed: vec!["洛杉矶-B".to_owned()],
+                },
+                ProxyGroupSnapshot {
+                    name: "♻️自动选择".to_owned(),
+                    kind: "urltest".to_owned(),
+                    current: "东京-A".to_owned(),
+                    members: vec!["东京-A".to_owned()],
+                    delays: HashMap::new(),
+                    failed: Vec::new(),
+                },
+            ],
+            core_version: Some("sing-box 1.14.1".to_owned()),
+            core_runtime_version: Some("1.14.1".to_owned()),
+            core_installed: true,
+            memory_used: 33_554_432,
+            core_logs: ["info: inbound connection to 127.0.0.1:8099".to_owned()].into(),
+            events: ["已启动内核".to_owned()].into(),
+            status: "内核已启动".to_owned(),
+            ..ClientSnapshot::default()
+        }
+    }
+
+    fn frame_for(tab: Tab, snapshot: ClientSnapshot) -> String {
+        let dir = tempfile::tempdir().expect("temporary data directory");
+        let controller = ClientController::start(dir.path().to_path_buf());
+        let mut app = App::new(controller, dir.path().to_path_buf());
+        app.snapshot = snapshot;
+        app.tab = tab;
+        // The settings page prints `<dir>/core/sing-box`. Leaving the real
+        // temporary path in place would make every golden depend on how long
+        // this machine's temp directory name happens to be.
+        app.dir = std::path::PathBuf::from("<DATA_DIR>");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 32)).expect("terminal");
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("frame draws");
+        let rendered = terminal.backend().to_string();
+        app.controller.shutdown();
+        // Three things in the Settings frame are properties of the machine, not
+        // of the snapshot, and CI runs on Linux while development happens on
+        // Windows: the data directory's own name, the separator in the core
+        // path (which also changes how far the line truncates), and the
+        // OS-proxy backend label. See `snapshot_name` for how the last of those
+        // three is handled.
+        rendered
+    }
+
+    /// The Settings page prints the core path and the compiled-in OS-proxy
+    /// backend. Both vary in *length* per platform, which changes where the
+    /// frame truncates — so no post-hoc replacement can make one golden fit
+    /// every runner. The data directory is replaced with a fixed-length
+    /// stand-in at the source (see `frame_for`), and the one remaining
+    /// platform-dependent frame is scoped per OS instead of pretending to be
+    /// portable. Every other tab renders only snapshot state and shares one
+    /// golden across platforms.
+    fn snapshot_name(tab: Tab) -> String {
+        match tab {
+            Tab::Settings => format!("tab-{}-{}", tab.index(), std::env::consts::OS),
+            other => format!("tab-{}", other.index()),
+        }
+    }
+
+    #[tokio::test]
+    async fn every_tab_renders_the_published_snapshot() {
+        for tab in [
+            Tab::Dashboard,
+            Tab::Proxies,
+            Tab::Connections,
+            Tab::Logs,
+            Tab::Settings,
+            Tab::Rules,
+        ] {
+            let rendered = frame_for(tab, dense_snapshot());
+            insta::assert_snapshot!(snapshot_name(tab), rendered);
+        }
+    }
+
+    /// The rules view is a toggle inside the Logs tab rather than its own page,
+    /// which makes it the easiest thing in the client to lose by accident.
+    #[tokio::test]
+    async fn the_logs_tab_switches_to_the_rules_view() {
+        let mut snapshot = dense_snapshot();
+        snapshot.rules = vec![
+            crate::state::RouteRuleSnapshot {
+                kind: crate::state::RuleKind::DomainSuffix,
+                value: Some("example.com".to_owned()),
+                outbound: "🚀节点选择".to_owned(),
+            },
+            crate::state::RouteRuleSnapshot {
+                kind: crate::state::RuleKind::Private,
+                value: None,
+                outbound: "direct".to_owned(),
+            },
+        ];
+        insta::assert_snapshot!("logs-tail", frame_for(Tab::Logs, snapshot.clone()));
+        // What used to be the panel behind `r` on the Logs page; it is a tab now.
+        insta::assert_snapshot!("rules-tab", frame_for(Tab::Rules, snapshot));
     }
 }

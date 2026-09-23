@@ -1,0 +1,118 @@
+# 把剩余 21 处引擎文案换成 EventCode（issue 02 的第 2–3 步）
+
+Status: needs-implementation
+Type: task
+Found: 2026-09-23，由一次只读清点得出（行号以当时 HEAD 为准，改动前先复核）。
+
+## 前置事实（已落地，不要重做）
+
+- `crates/client-core/src/event_code.rs`：`EventCode`（现有 14 个变体）、`EventRecord`、`EventLevel`，
+  配 `render_zh()` / `render_en()` / `level()`；双语模板与占位符由测试锁死。
+- `ClientSnapshot.event_records` + `status_level`；`Engine::note_event(code, args)` 同时写结构化记录
+  与字符串历史（`a_recorded_event_also_lands_in_the_string_history`）。
+
+## 待换的 21 处（`crates/client-core/src/controller.rs`）
+
+明确**不动**的：`552 / 563 / 583 / 589` 是模式标签提示（`流量模式: {label}`、`出站模式: {label}`），
+标签由代码给、值由数据给，不属于引擎文案；`619` 是 `{group} → {node}` 数据行；`359` 是失败漏斗（见下节）。
+
+| 行 | 现字符串 | 新变体 |
+| --- | --- | --- |
+| 493 | 已关闭连接 | `ConnectionClosed` |
+| 637 | 已关闭 N 条连接 | `ConnectionsClosedN`（{0}） |
+| 656 | 内核已安装 | `CoreInstalled` |
+| 709 | 警告：无法为内核建立系统级回收保护…sing-box 可能残留 | `OrphanGuardWarning` |
+| 724 | 内核已启动 | `CoreStarted` |
+| 729 | 内核已启动；系统代理 → 127.0.0.1:{port} | `CoreStartedSystemProxy`（{0}） |
+| 731 | 内核已启动；系统代理设置失败: {error} | `CoreStartedSystemProxyFailed`（{0}） |
+| 770 | 系统代理已关闭 | `SystemProxyDisabled` |
+| 780 | 系统代理已开启 → 127.0.0.1:{port} | `SystemProxyEnabled`（{0}） |
+| 817 | 延迟测试完成 | `DelayTestComplete` |
+| 850 | 订阅更新失败（{error}）；继续使用上次缓存 | `SubscriptionUpdateUsingCache`（{0}） |
+| 869 | 订阅已更新（N 个节点） | `SubscriptionUpdated`（{0}） |
+| 900 | 订阅已存在，已切换到 {existing} | `SubscriptionAlreadyExists`（{0}） |
+| 938 | 已导入 {name}，正在拉取订阅 | `SubscriptionImported`（{0}） |
+| 976 | 已从文件导入并激活：{name}（N 个节点） | `ProfileFileImported`（{0}/{1}） |
+| 1237 | 内核连续异常退出 N 次，已停止自动重启…端口占用后手动启动 | `AutoRestartStopped`（{0}/{1}） |
+| 1248 | 内核崩溃；N 秒后自动重启（第 n 次） | `CoreCrashRestartScheduled`（{0}/{1}） |
+
+zh 模板必须与现字符串**逐字相同**，否则下面那批断言与金标准会动。
+
+## 会碰到的测试与金标准（本 ticket 的真正风险面）
+
+- `crates/client-core/src/state.rs:833`、`crates/sbtui/src/style.rs:123`、
+  `crates/sbtui/src/view/logs.rs:113`、`crates/sbgui/src/pages/logs.rs:313` 四组测试直接断言中文串
+  （`内核已启动`、`导入订阅失败: timeout`、`需要先安装内核`、`就绪`）。
+- `crates/sbtui/src/view/mod.rs:395` 的夹具把 `status: "内核已启动"` 烘进 **17 份渲染金标准**。
+  只要 zh 渲染逐字不变，金标准不该动；**动了就必须逐帧看 diff**，不允许 `INSTA_UPDATE` 一把过。
+
+## 失败漏斗只能编码一半（设计结论，别重复尝试）
+
+`Engine::operation_error`（`controller.rs:357`，`note` 在 `:359`）把 `anyhow::Error` 的 `Display`
+内插进 `{label} 失败: {message}`。自家 `bail!`/`context` 那批（`:351/485/525/556/571/646/667/773/776/879/987`
+以及 `core.rs`、`system_proxy.rs`）可以逐个换成变体；但漏斗尾部是 tokio fs、reqwest、`try_wait`
+之类任意字符串，**不可能穷举成代码**。收口标准因此应当是：已知来源全部编码 + 尾部保留原文并显式
+归入一个"未知细节"变体，而不是假装全部可枚举。
+
+## 建议顺序
+
+1. 先加 17 个变体与 `level()`，让 `event_code.rs` 的双语/占位符测试先绿；
+2. 按行号批量替换调用点（单独一次提交，金标准应零变化）；
+3. 再处理漏斗：能编码的编码，尾部显式承认；
+4. 最后补 issue 02 第 5 步——zh 与 en 两套全页截图。L4 腿现在可用：
+   `SBGUI_LANG=en OUT_REL=.scratch/sbgui-shots-en bash scripts/sbgui-shot/shot.sh`。
+
+## 2026-09-23：EN 腿已经跑过一次，抓到一条真泄露
+
+`SBGUI_LANG=en` 全页截图（9 张，含新增 about）里，概览页**副状态行仍是中文**：
+
+> 就绪。先下载 sing-box 内核，再导入订阅。
+
+也就是说 EN 下 CJK 泄露点不在 chrome（标签、按钮、`Routing / core / auto restart` 全是英文，
+右上角那颗 `中文` 是"切到中文"的按钮，属预期），而在**引擎默认状态字符串**：
+`controller.rs:222` 的初始 status 与 `state.rs:468` 里 `ClientSnapshot::default().status` 那句
+"就绪。先导入订阅，再启动内核。"。这两处不在上面 21 处 `.note(` 清单里（它们是**直接赋值**而非 `note`），
+所以第 2 步的替换必须一并覆盖"初始 status / 默认 status"这两条，否则 EN 截图的门禁永远红。
+
+判据（下次跑 EN 腿时用它当验收）：9 张图里除右上角语言按钮外不得出现任何 CJK 字形。
+
+## 那两处 status 不能靠换字符串解决（先想清楚再动手）
+
+`ClientSnapshot` 里**没有 locale**：语言是各 UI 在渲染时决定的（`sbgui/src/lang.rs`、sbtui 同理）。
+所以把 `controller.rs:222` / `state.rs:468` 的字面量改成另一句中文，英文下照样是中文。
+可行的形状只有一种：这两处也走 `note_event(EventCode::…, args)`，让 UI 端用
+`render_zh()` / `render_en()` 按自己的 locale 出字——也就是**默认状态与"未安装内核"状态要先各加一个
+EventCode 变体**，再让两个客户端在渲染 status 时优先看 `event_records` 的尾部而不是 `status` 字符串
+（`status_level` 已经是这么接的，同一套路子）。
+
+因此执行顺序应当调整为：
+
+1. 先加 `CoreNotInstalledHint` 与 `ReadyToImportFirstProfile`（或你偏好的命名）两个变体 + `level()`；
+2. 把两处直接赋值改为 `note_event`（保留 `snapshot.status` 的中文回退，字符串历史不能断）；
+3. UI 端渲染 status 时改用最近一条记录 + locale；
+4. 再动那 21 处 `.note(`；
+5. 最后重跑 `SBGUI_LANG=en` 腿验收（这条腿现在可靠：九张图、零字节守卫、about 页已在列）。
+
+第 2、3 步会牵动 `state.rs:833`、`sbtui/src/style.rs:123`、`sbtui/src/view/logs.rs:113`、
+`sbgui/src/pages/logs.rs:313` 四组断言与 17 份渲染金标准——金标准若动必须逐帧看 diff。
+
+## Comments
+
+### 2026-09-23：init/default status 与消费侧事件列表已落地，EN 腿转绿
+
+- `event_code.rs` 新增 `StoreUnreadable`（带 `{0}`）、`CoreReadyToStart`、`CoreNotInstalledHint`、
+  `ReadyToImportFirstProfile`；zh 模板与 `controller.rs:220/221/222`、`state.rs:468` **逐字相同**。
+- `Engine::new` 的初始状态改走 `note_event`；`ClientController::start` 给发布前的共享快照 seed 一条
+  `ReadyToImportFirstProfile`。`ClientSnapshot::default()` **刻意不 seed 记录**——否则每个
+  `..ClientSnapshot::default()` 夹具都会多一条，17 份 sbtui 金标准与 `events.len()` 断言会一起动。
+- `ClientSnapshot::latest_event()`（仅当尾部记录确实产出当前 status 时才返回，未迁移的 `note()` 不
+  被旧记录覆盖）、`event_lines()`（把 `events` 与 `event_records` 按序配对，裸串不吞后续记录）。
+- `sbgui` 状态行与**事件列表**按 locale 渲染；`sbtui` 渲染记录的 zh（字节不变）。
+- **EN 腿复跑证据**：`SBGUI_LANG=en` 九张图，除右上角 `中文` 按钮外**零 CJK**。第一轮抓到 Logs 页
+  事件列表仍是中文（状态行已修但列表直接渲染 `events` 串），由 `event_lines()` 修掉后重跑确认。
+
+**仍未做**（本 ticket 剩余）：21 处 `.note(` 换 `note_event`；`operation_error` 错误链漏斗；
+`log_level_of` 改读码、事件列表的**过滤/级别**仍按中文串判断（英文下按可见英文搜不到）；
+`ClientCommand::label()` 与 `流量模式/出站模式` 标签。行号已漂移，动手前重新定位。
+
+

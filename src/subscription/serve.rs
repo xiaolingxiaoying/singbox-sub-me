@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::fs;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -45,7 +46,7 @@ pub async fn serve(
         return Err(SubscriptionError::ExternalProxyBind);
     }
     let listener = TcpListener::bind(bind).await.map_err(listener_io)?;
-    serve_http_listener(listener, &store, &config, max_requests).await
+    serve_http_listener(listener, &store, &config, &fresh_budget(), max_requests).await
 }
 
 /// Direct subscription mode never binds 80/443 itself. systemd owns those
@@ -70,9 +71,18 @@ async fn serve_direct_socket_activated(
     }
     let acme = tokio_listener(acme.ok_or(SubscriptionError::MissingDirectListener(80))?)?;
     let tls = tokio_listener(tls.ok_or(SubscriptionError::MissingDirectListener(443))?)?;
+    // Only the subscription listener gets a budget: the ACME path answers
+    // Let's Encrypt validators, and throttling it would fail a challenge and
+    // take the certificate — and with it HTTPS — offline.
     tokio::try_join!(
         serve_acme_listener(acme, Arc::clone(store), max_requests),
-        serve_tls_listener(tls, Arc::clone(store), Arc::clone(config), max_requests)
+        serve_tls_listener(
+            tls,
+            Arc::clone(store),
+            Arc::clone(config),
+            fresh_budget(),
+            max_requests
+        )
     )?;
     Ok(())
 }
@@ -105,6 +115,128 @@ const MAX_CONNECTION_TIME: Duration = Duration::from_secs(30);
 const MAX_CONCURRENT_CONNECTIONS: usize = 32;
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Requests a single source address may spend before it starts waiting, and how
+/// fast the allowance returns afterwards.
+///
+/// A client that imports the URL refreshes a handful of times a day, so sixty
+/// instant requests is already two orders of magnitude above honest use, while a
+/// prober enumerating credentials is capped at one guess per second per address.
+const REQUEST_BURST: u32 = 60;
+const REQUEST_REFILL: Duration = Duration::from_secs(1);
+/// Distinct addresses whose debt is remembered. Overflow clears the table: a
+/// peer able to complete that many real TCP handshakes and HTTP requests is
+/// beyond what a per-address budget defends against anyway, and the connection
+/// semaphore and header caps are the answer to that.
+const MAX_TRACKED_PEERS: usize = 4096;
+
+/// Per-source-address token bucket, shared by the subscription listeners.
+///
+/// The clock arrives as a parameter so a test can hand it any instant it likes;
+/// the production path passes `Instant::now`.
+pub(crate) struct IpBudget {
+    buckets: HashMap<IpAddr, Bucket>,
+}
+
+struct Bucket {
+    tokens: u32,
+    /// The instant this balance was last topped up.
+    at: std::time::Instant,
+}
+
+impl IpBudget {
+    fn new() -> Self {
+        Self {
+            buckets: HashMap::new(),
+        }
+    }
+
+    /// Spends one token on behalf of `peer`, or reports how long to wait for the
+    /// next one. A peer whose address cannot be read is not throttled at all:
+    /// failing closed would take the subscription offline for everyone the first
+    /// time the platform hid a peer address.
+    fn try_acquire(&mut self, peer: IpAddr, now: std::time::Instant) -> Result<(), Duration> {
+        let Some(bucket) = self.buckets.get_mut(&peer) else {
+            self.admit(now);
+            self.buckets.insert(
+                peer,
+                Bucket {
+                    tokens: REQUEST_BURST - 1,
+                    at: now,
+                },
+            );
+            return Ok(());
+        };
+
+        let elapsed = now.saturating_duration_since(bucket.at);
+        let refilled = (elapsed.as_nanos() / REQUEST_REFILL.as_nanos()) as u32;
+        if refilled > 0 {
+            bucket.tokens = bucket.tokens.saturating_add(refilled).min(REQUEST_BURST);
+            bucket.at = bucket
+                .at
+                .checked_add(REQUEST_REFILL.saturating_mul(refilled))
+                .unwrap_or(now);
+        }
+        if bucket.tokens == 0 {
+            let waited = now.saturating_duration_since(bucket.at);
+            // Always at least one second: a client told `Retry-After: 0` learns
+            // nothing and simply hammers again.
+            let remaining = REQUEST_REFILL
+                .saturating_sub(waited)
+                .max(Duration::from_secs(1));
+            return Err(remaining);
+        }
+        bucket.tokens -= 1;
+        Ok(())
+    }
+
+    fn admit(&mut self, now: std::time::Instant) {
+        self.buckets.retain(|_, bucket| {
+            let elapsed = now.saturating_duration_since(bucket.at);
+            let refilled = (elapsed.as_nanos() / REQUEST_REFILL.as_nanos()) as u32;
+            bucket.tokens.saturating_add(refilled) < REQUEST_BURST
+        });
+        if self.buckets.len() > MAX_TRACKED_PEERS {
+            self.buckets.clear();
+        }
+    }
+
+    #[cfg(test)]
+    fn tracked(&self) -> usize {
+        self.buckets.len()
+    }
+}
+
+type SharedBudget = Arc<Mutex<IpBudget>>;
+
+fn fresh_budget() -> SharedBudget {
+    Arc::new(Mutex::new(IpBudget::new()))
+}
+
+/// Spends a token for this request, returning how long the caller must wait when
+/// the address is out of budget.
+fn throttled(peer: Option<IpAddr>, budget: &SharedBudget) -> Option<Duration> {
+    let peer = peer?;
+    let mut budget = budget
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    budget.try_acquire(peer, std::time::Instant::now()).err()
+}
+
+fn throttled_http_response(retry_after: &Duration) -> Response<Full<Bytes>> {
+    // Second granularity, rounded up: a Retry-After the client cannot parse is
+    // worse than one that is slightly too generous.
+    let seconds = retry_after.as_secs().saturating_add(1).to_string();
+    Response::builder()
+        .status(StatusCode::TOO_MANY_REQUESTS)
+        .header("Retry-After", seconds)
+        .header("Content-Type", "text/plain; charset=utf-8")
+        .header("Cache-Control", "no-store")
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Connection", "close")
+        .body(Full::new(Bytes::from_static(b"")))
+        .expect("valid throttled response")
+}
+
 /// Accepts the next connection, or returns `None` after a short poll when a
 /// test-configured `max_requests` limit may have been reached by a task that
 /// is already serving. Production operation (`max_requests == None`) blocks on
@@ -135,6 +267,7 @@ async fn serve_http_listener(
     listener: TcpListener,
     store: &Arc<DeploymentStore>,
     config: &Arc<DeploymentConfig>,
+    budget: &SharedBudget,
     max_requests: Option<usize>,
 ) -> Result<(), SubscriptionError> {
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
@@ -150,14 +283,16 @@ async fn serve_http_listener(
             drop(stream);
             continue;
         };
+        let peer = stream.peer_addr().ok().map(|address| address.ip());
         let store = Arc::clone(store);
         let config = Arc::clone(config);
+        let budget = Arc::clone(budget);
         let counter = Arc::clone(&counter);
         tokio::spawn(async move {
             let _permit = permit;
             let _ = tokio::time::timeout(
                 MAX_CONNECTION_TIME,
-                serve_http_connection(TokioIo::new(stream), store, config),
+                serve_http_connection(TokioIo::new(stream), store, config, peer, budget),
             )
             .await;
             counter.fetch_add(1, Ordering::Release);
@@ -209,6 +344,7 @@ async fn serve_tls_listener(
     listener: TcpListener,
     store: Arc<DeploymentStore>,
     config: Arc<DeploymentConfig>,
+    budget: SharedBudget,
     max_requests: Option<usize>,
 ) -> Result<(), SubscriptionError> {
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
@@ -268,17 +404,21 @@ async fn serve_tls_listener(
         };
         let store = Arc::clone(&store);
         let config = Arc::clone(&config);
+        let budget = Arc::clone(&budget);
         let counter = Arc::clone(&counter);
         tokio::spawn(async move {
             let _permit = permit;
             let acceptor = TlsAcceptor::from(tls);
+            // The peer has to be read before the handshake, because the
+            // accepted TLS stream no longer exposes the TCP socket it came from.
+            let peer = stream.peer_addr().ok().map(|address| address.ip());
             let Ok(stream) = acceptor.accept(stream).await else {
                 counter.fetch_add(1, Ordering::Release);
                 return;
             };
             let _ = tokio::time::timeout(
                 MAX_CONNECTION_TIME,
-                serve_http_connection(TokioIo::new(Box::pin(stream)), store, config),
+                serve_http_connection(TokioIo::new(Box::pin(stream)), store, config, peer, budget),
             )
             .await;
             counter.fetch_add(1, Ordering::Release);
@@ -291,12 +431,14 @@ async fn serve_http_connection<S>(
     io: TokioIo<S>,
     store: Arc<DeploymentStore>,
     config: Arc<DeploymentConfig>,
+    peer: Option<IpAddr>,
+    budget: SharedBudget,
 ) -> Result<(), SubscriptionError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let service = service_fn(move |request: Request<Incoming>| {
-        let response = subscription_http_response(request, &store, &config);
+        let response = subscription_http_response(request, &store, &config, peer, &budget);
         async { Ok::<_, std::convert::Infallible>(response) }
     });
     http1_builder()
@@ -356,7 +498,16 @@ fn subscription_http_response(
     request: Request<Incoming>,
     store: &DeploymentStore,
     config: &DeploymentConfig,
+    peer: Option<IpAddr>,
+    budget: &SharedBudget,
 ) -> Response<Full<Bytes>> {
+    // Charged before the method and path are even considered, so a throttled
+    // address sees the same answer whatever it asks for: the throttle never
+    // reveals whether the credential in that URL is real, which is exactly what
+    // the uniform 404 exists to hide.
+    if let Some(retry_after) = throttled(peer, budget) {
+        return throttled_http_response(&retry_after);
+    }
     if request.method() != Method::GET {
         // A probe with HEAD or POST is a client asking about the route, not an
         // attacker: answering 404 tells it the subscription disappeared, while
@@ -388,25 +539,7 @@ fn subscription_http_response(
             // not take the subscription itself offline. The failure is logged
             // redacted and the artifact is served without traffic metadata.
             let userinfo = match crate::traffic::report(store, config) {
-                Ok(traffic) => {
-                    // subscription-userinfo follows the common client convention:
-                    // upload and download are the bytes used in the current period,
-                    // while `total` is the configured monthly allowance. Keep the
-                    // historical used-total value when no allowance is configured so
-                    // unlimited deployments remain informative.
-                    let quota = if traffic.monthly_traffic_limit > 0 {
-                        traffic.monthly_traffic_limit
-                    } else {
-                        traffic.total()
-                    };
-                    Some(format!(
-                        "upload={}; download={}; total={}; expire={}",
-                        traffic.transmitted,
-                        traffic.received,
-                        quota,
-                        traffic.next_reset.timestamp()
-                    ))
-                }
+                Ok(traffic) => Some(subscription_userinfo(&traffic)),
                 Err(error) => {
                     eprintln!(
                         "subscription traffic metadata unavailable: {}",
@@ -429,6 +562,43 @@ fn subscription_http_response(
                 .expect("valid subscription response")
         }
     }
+}
+
+/// How often a client app should re-download the subscription, in hours, as
+/// advertised by `profile-update-interval`.
+///
+/// This is a policy statement toward client apps, not a description of the
+/// server: the deployment regenerates artifacts when its configuration or
+/// nodes change, and a client that ignores the hint costs nothing. Twenty-four
+/// hours matches the cadence the generated profiles already use for their own
+/// remote resources, and going lower would make every client app poll the
+/// credential'd URL on a schedule the operator never asked for.
+const PROFILE_UPDATE_INTERVAL_HOURS: u32 = 24;
+
+/// The `subscription-userinfo` header value.
+///
+/// subscription-userinfo follows the common client convention: upload and
+/// download are the bytes used in the current period, while `total` is the
+/// configured monthly allowance. Keep the historical used-total value when no
+/// allowance is configured so unlimited deployments remain informative.
+///
+/// The key order is the wire contract: client apps parse the four traffic keys
+/// by position-insensitive name but display them in this order, so a new key
+/// goes last and never between the existing ones.
+fn subscription_userinfo(traffic: &crate::traffic::TrafficReport) -> String {
+    let quota = if traffic.monthly_traffic_limit > 0 {
+        traffic.monthly_traffic_limit
+    } else {
+        traffic.total()
+    };
+    format!(
+        "upload={}; download={}; total={}; expire={}; profile-update-interval={}",
+        traffic.transmitted,
+        traffic.received,
+        quota,
+        traffic.next_reset.timestamp(),
+        PROFILE_UPDATE_INTERVAL_HOURS
+    )
 }
 
 /// A scannable SVG QR code of the given format's subscription URL. The QR
@@ -606,6 +776,111 @@ mod tests {
 
     use crate::config::{DeploymentConfig, DeploymentStore};
     use crate::subscription::test_support::seed_direct_subscription;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Duration;
+
+    fn peer(last: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(203, 0, 113, last))
+    }
+
+    /// The whole point of the bucket is that honest use is never punished and a
+    /// flood is. Both halves need a clock the test controls.
+    #[test]
+    fn a_budget_spends_its_burst_and_then_asks_the_same_address_to_wait() {
+        let mut budget = super::IpBudget::new();
+        let now = std::time::Instant::now();
+        for index in 0..super::REQUEST_BURST {
+            assert!(
+                budget.try_acquire(peer(1), now).is_ok(),
+                "request {index} is inside the burst and must not be throttled"
+            );
+        }
+        let wait = budget.try_acquire(peer(1), now).unwrap_err();
+        assert!(!wait.is_zero(), "a wait of zero teaches the client nothing");
+    }
+
+    #[test]
+    fn patience_returns_one_token_per_second_and_never_the_whole_burst_at_once() {
+        let mut budget = super::IpBudget::new();
+        let start = std::time::Instant::now();
+        for _ in 0..super::REQUEST_BURST {
+            assert!(budget.try_acquire(peer(2), start).is_ok());
+        }
+        let two_seconds_later = start + Duration::from_secs(2);
+        assert!(
+            budget.try_acquire(peer(2), two_seconds_later).is_ok(),
+            "two idle seconds buy two requests"
+        );
+        assert!(
+            budget.try_acquire(peer(2), two_seconds_later).is_ok(),
+            "the second of those two is still owed"
+        );
+        assert!(
+            budget.try_acquire(peer(2), two_seconds_later).is_err(),
+            "a long idle stretch must not hand back the entire burst at once"
+        );
+    }
+
+    #[test]
+    fn a_throttled_address_recovers_completely_after_waiting_the_burst_out() {
+        let mut budget = super::IpBudget::new();
+        let start = std::time::Instant::now();
+        for _ in 0..super::REQUEST_BURST {
+            assert!(budget.try_acquire(peer(3), start).is_ok());
+        }
+        let hour_later = start + Duration::from_secs(3600);
+        for index in 0..super::REQUEST_BURST {
+            assert!(
+                budget.try_acquire(peer(3), hour_later).is_ok(),
+                "after an hour the whole burst is available again, failed at {index}"
+            );
+        }
+        assert!(budget.try_acquire(peer(3), hour_later).is_err());
+    }
+
+    #[test]
+    fn one_address_burning_its_budget_does_not_silence_the_neighbour() {
+        let mut budget = super::IpBudget::new();
+        let now = std::time::Instant::now();
+        for _ in 0..super::REQUEST_BURST * 2 {
+            let _ = budget.try_acquire(peer(4), now);
+        }
+        assert!(
+            budget.try_acquire(peer(4), now).err().is_some_and(|_| true),
+            "the flooded address is throttled"
+        );
+        for index in 0..super::REQUEST_BURST {
+            assert!(
+                budget.try_acquire(peer(5), now).is_ok(),
+                "a different address keeps its own burst, failed at {index}"
+            );
+        }
+    }
+
+    /// The table must not grow with every address that ever connected: an
+    /// address with a full balance is indistinguishable from one never seen, so
+    /// remembering it is pure memory cost.
+    #[test]
+    fn addresses_that_owe_nothing_are_not_kept_in_the_table() {
+        let mut budget = super::IpBudget::new();
+        let start = std::time::Instant::now();
+        for last in 0..64 {
+            // One request each: every address is now below the burst, so every
+            // address is a debtor worth remembering.
+            assert!(budget.try_acquire(peer(last), start).is_ok());
+        }
+        assert_eq!(budget.tracked(), 64, "debtors stay remembered");
+
+        let later = start + Duration::from_secs(3600);
+        // A brand new address is what triggers the sweep; an established debtor
+        // is cheap to keep and is not scanned for on every request.
+        assert!(budget.try_acquire(peer(200), later).is_ok());
+        assert_eq!(
+            budget.tracked(),
+            1,
+            "after a full refill only the address just charged remains"
+        );
+    }
 
     async fn http_get(port: u16, path: &str) -> String {
         let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -774,6 +1049,7 @@ mod tests {
             listener,
             Arc::new(store),
             Arc::new(config),
+            super::fresh_budget(),
             Some(1),
         ));
 
@@ -785,6 +1061,65 @@ mod tests {
         assert!(response.contains("vless://"));
         assert!(response.contains("subscription-userinfo:"));
         handler.await.expect("handler completes").expect("no error");
+    }
+
+    /// A token bucket that only exists in unit tests protects nothing, so this
+    /// drives the real listener. The property that matters is the second one:
+    /// once an address is out of budget, a correct credential and a wrong one
+    /// get the *same* answer, so waiting cannot be traded for information about
+    /// whether a subscription exists.
+    #[tokio::test]
+    async fn an_over_budget_address_waits_without_learning_if_the_credential_is_real() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let (store, config, credential) = seed_direct_subscription(&fixture);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral listener is available");
+        let port = listener.local_addr().expect("listener address").port();
+        let budget = super::fresh_budget();
+        let store = Arc::new(store);
+        let config = Arc::new(config);
+        let handler = tokio::spawn(async move {
+            let _ = super::serve_http_listener(listener, &store, &config, &budget, None).await;
+        });
+
+        let first = http_get(port, &format!("/sub/{credential}/uri")).await;
+        assert!(
+            first.starts_with("HTTP/1.1 200 OK"),
+            "an honest first fetch is served: {first}"
+        );
+
+        let mut throttled_valid = false;
+        let mut indistinguishable = false;
+        for _ in 0..super::REQUEST_BURST * 4 {
+            let valid = http_get(port, &format!("/sub/{credential}/uri")).await;
+            let invalid = http_get(port, "/sub/not-the-credential/uri").await;
+            if valid.starts_with("HTTP/1.1 429") {
+                throttled_valid = true;
+                if valid == invalid {
+                    indistinguishable = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            throttled_valid,
+            "the budget never reached the response path"
+        );
+        assert!(
+            indistinguishable,
+            "a throttled probe could tell a real credential from a wrong one"
+        );
+        let last = http_get(port, &format!("/sub/{credential}/uri")).await;
+        assert!(
+            last.starts_with("HTTP/1.1 429"),
+            "the address is still out of budget: {last}"
+        );
+        assert!(
+            !last.contains(&credential),
+            "a throttled response must not repeat the credential it is guarding"
+        );
+        handler.abort();
     }
 
     #[tokio::test]
@@ -802,7 +1137,8 @@ mod tests {
         let store = Arc::new(store.clone());
         let config = Arc::new(config);
         let handler = tokio::spawn(async move {
-            super::serve_http_listener(listener, &store, &config, Some(1)).await
+            super::serve_http_listener(listener, &store, &config, &super::fresh_budget(), Some(1))
+                .await
         });
 
         let response = http_get(port, &format!("/sub/{credential}/uri")).await;
@@ -821,6 +1157,40 @@ mod tests {
         handler.await.expect("handler completes").expect("no error");
     }
 
+    /// The header is a wire contract parsed by third-party client apps, so its
+    /// names and order are the product: the four traffic keys stay as they were
+    /// and `profile-update-interval` is appended last rather than inserted.
+    #[test]
+    fn the_userinfo_header_locks_its_key_order_and_names() {
+        use chrono::TimeZone;
+        let report = crate::traffic::TrafficReport {
+            interface: "eth0".into(),
+            received: 36,
+            transmitted: 71,
+            total_adjustment: 0,
+            monthly_traffic_limit: 999,
+            accounting_period: "2026-09".into(),
+            next_reset: chrono::Utc
+                .timestamp_opt(1_767_225_600, 0)
+                .single()
+                .expect("the timestamp is unambiguous"),
+        };
+        assert_eq!(
+            super::subscription_userinfo(&report),
+            "upload=71; download=36; total=999; expire=1767225600; profile-update-interval=24"
+        );
+        let unlimited = crate::traffic::TrafficReport {
+            monthly_traffic_limit: 0,
+            total_adjustment: 5,
+            ..report
+        };
+        assert_eq!(
+            super::subscription_userinfo(&unlimited),
+            "upload=71; download=36; total=112; expire=1767225600; profile-update-interval=24",
+            "without an allowance `total` keeps reporting the bytes used"
+        );
+    }
+
     #[tokio::test]
     async fn direct_tls_listener_serves_base64_uri_with_the_standard_traffic_headers() {
         let fixture = TempDir::new().expect("temporary root is created");
@@ -835,6 +1205,7 @@ mod tests {
             listener,
             Arc::new(store.clone()),
             Arc::new(config),
+            super::fresh_budget(),
             Some(1),
         ));
 
@@ -873,6 +1244,7 @@ mod tests {
             listener,
             Arc::new(store),
             Arc::new(config),
+            super::fresh_budget(),
             Some(1),
         ));
 
@@ -898,6 +1270,7 @@ mod tests {
             listener,
             Arc::new(store),
             Arc::new(config),
+            super::fresh_budget(),
             Some(1),
         ));
 

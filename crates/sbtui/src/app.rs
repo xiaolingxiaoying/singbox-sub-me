@@ -15,6 +15,8 @@ pub(crate) enum Tab {
     Connections,
     Logs,
     Settings,
+    /// The inbounds and routing rules of the configuration the core uses.
+    Rules,
 }
 
 impl Tab {
@@ -24,17 +26,19 @@ impl Tab {
             Self::Proxies => Self::Connections,
             Self::Connections => Self::Logs,
             Self::Logs => Self::Settings,
-            Self::Settings => Self::Dashboard,
+            Self::Settings => Self::Rules,
+            Self::Rules => Self::Dashboard,
         }
     }
 
     pub(crate) fn previous(self) -> Self {
         match self {
-            Self::Dashboard => Self::Settings,
+            Self::Dashboard => Self::Rules,
             Self::Proxies => Self::Dashboard,
             Self::Connections => Self::Proxies,
             Self::Logs => Self::Connections,
             Self::Settings => Self::Logs,
+            Self::Rules => Self::Settings,
         }
     }
 
@@ -45,6 +49,7 @@ impl Tab {
             2 => Self::Connections,
             3 => Self::Logs,
             4 => Self::Settings,
+            5 => Self::Rules,
             _ => return None,
         })
     }
@@ -56,6 +61,7 @@ impl Tab {
             Self::Connections => 2,
             Self::Logs => 3,
             Self::Settings => 4,
+            Self::Rules => 5,
         }
     }
 }
@@ -183,7 +189,6 @@ pub(crate) struct App {
     // Logs tab.
     /// Toggle between the live log tail (default) and a rendering of the
     /// active configuration's routing rules.
-    pub(crate) show_rules: bool,
     /// Rows scrolled back from the newest line; 0 follows the tail.
     pub(crate) log_scroll: usize,
     /// Inner text height of the last rendered log panel, used to page.
@@ -210,13 +215,28 @@ pub(crate) struct App {
     /// (tracked via `last_engine_status`); UI-level messages (filters,
     /// confirmations) write it directly.
     pub(crate) status: String,
+    /// The engine's own severity for `status`, when it has one. `None` means the
+    /// line predates the event-code vocabulary and the colour falls back to
+    /// reading the wording.
+    pub(crate) status_level: Option<client_core::event_code::EventLevel>,
     pub(crate) last_engine_status: String,
+}
+
+/// The footer's status line for the engine's latest state: the newest event
+/// record's Chinese rendering when the current status came from a code, and the
+/// raw engine string otherwise. sbtui has no locale, so Chinese is the only
+/// rendering — and it is byte-identical to the string the engine published.
+pub(crate) fn engine_status(snapshot: &ClientSnapshot) -> String {
+    snapshot
+        .latest_event()
+        .map(|record| record.render_zh())
+        .unwrap_or_else(|| snapshot.status.clone())
 }
 
 impl App {
     pub(crate) fn new(controller: ClientController, dir: PathBuf) -> Self {
         let snapshot = controller.snapshot();
-        let status = snapshot.status.clone();
+        let status = engine_status(&snapshot);
         Self {
             controller,
             snapshot,
@@ -229,7 +249,6 @@ impl App {
             selected_connection_id: None,
             conn_sort: ConnSort::Download,
             conn_filter: String::new(),
-            show_rules: false,
             log_scroll: 0,
             log_view_height: 0,
             paused_logs: None,
@@ -245,6 +264,7 @@ impl App {
             show_help: false,
             status,
             last_engine_status: String::new(),
+            status_level: None,
         }
     }
 
@@ -254,7 +274,8 @@ impl App {
         self.snapshot = self.controller.snapshot();
         if self.snapshot.status != self.last_engine_status {
             self.last_engine_status = self.snapshot.status.clone();
-            self.status = self.snapshot.status.clone();
+            self.status = engine_status(&self.snapshot);
+            self.status_level = self.snapshot.status_level;
         }
         // Keep the display order stable across the engine's periodic
         // connection refreshes; the engine publishes in core order.
@@ -315,6 +336,8 @@ impl App {
 
     pub(crate) fn send(&mut self, command: ClientCommand) {
         self.status = format!("{}…", command.label());
+        // A locally-composed "in progress" line has no engine severity.
+        self.status_level = None;
         let _ = self.controller.send(command);
     }
 }
@@ -326,9 +349,50 @@ mod tests {
     #[test]
     fn tabs_cycle_in_both_directions() {
         assert_eq!(Tab::Dashboard.next(), Tab::Proxies);
-        assert_eq!(Tab::Settings.next(), Tab::Dashboard);
-        assert_eq!(Tab::Dashboard.previous(), Tab::Settings);
+        assert_eq!(Tab::Settings.next(), Tab::Rules);
+        assert_eq!(Tab::Rules.next(), Tab::Dashboard);
+        assert_eq!(Tab::Dashboard.previous(), Tab::Rules);
+        assert_eq!(Tab::Rules.previous(), Tab::Settings);
         assert_eq!(Tab::from_index(2), Some(Tab::Connections));
+        assert_eq!(Tab::from_index(5), Some(Tab::Rules));
         assert_eq!(Tab::from_index(9), None);
+        // Cycling has to cover every tab and come back around, which is what
+        // keeps the header's numbering and the number keys in step with the
+        // enum when a tab is added.
+        let mut tab = Tab::Dashboard;
+        for index in 1..=6 {
+            tab = tab.next();
+            assert_eq!(
+                Tab::from_index(tab.index()),
+                Some(tab),
+                "cycle step {index}"
+            );
+        }
+        assert_eq!(tab, Tab::Dashboard, "six tabs, so the cycle closes at 6");
+    }
+
+    /// sbtui has no locale, so it always renders the record's Chinese — the
+    /// exact string the engine already published, which keeps every golden.
+    #[test]
+    fn the_footer_status_renders_the_records_chinese() {
+        use client_core::event_code::{EventCode, EventRecord};
+        let record = EventRecord::new(EventCode::CoreReadyToStart, Vec::new());
+        let mut snapshot = ClientSnapshot {
+            status: record.render_zh(),
+            ..ClientSnapshot::default()
+        };
+        snapshot.push_record(record);
+        assert_eq!(engine_status(&snapshot), EventCode::CoreReadyToStart.zh());
+    }
+
+    /// A plain `note()` status has no record behind it, so the raw string is
+    /// kept rather than an older record being shown in its place.
+    #[test]
+    fn an_uncoded_status_keeps_the_raw_string() {
+        let snapshot = ClientSnapshot {
+            status: "尚未迁移的状态".to_owned(),
+            ..ClientSnapshot::default()
+        };
+        assert_eq!(engine_status(&snapshot), "尚未迁移的状态");
     }
 }
