@@ -533,6 +533,227 @@ mod tests {
         );
     }
 
+    /// A `DeploymentConfig` with every random or host-dependent choice pinned,
+    /// so the goldens below compare bytes rather than noise. `public_key` is
+    /// re-derived from `private_key` by `canonical::nodes`, so the pair only
+    /// has to be legal, not consistent.
+    fn pinned_five_protocol_config() -> DeploymentConfig {
+        use crate::config::{CertificateMode, SubscriptionMode};
+        let mut config = DeploymentConfig::new(
+            SubscriptionMode::Direct,
+            "sub.example.test".into(),
+            None,
+            None,
+            "ens3".into(),
+            vec![
+                ManagedProtocol::VlessReality,
+                ManagedProtocol::VmessWebsocket,
+                ManagedProtocol::Hysteria2,
+                ManagedProtocol::Tuic,
+                ManagedProtocol::Anytls,
+            ],
+            Some("www.cloudflare.com".into()),
+        )
+        .expect("a five-protocol deployment is valid");
+        config.subscription_credential = "pinnedcredentialpinnedcredentialpinnedcredential0".into();
+        // Domain mode keeps only certificate *paths* in the server artifact;
+        // self-signed mode would generate a fresh key pair on every run.
+        config.certificate_mode = CertificateMode::Domain;
+        config.monthly_traffic_limit = 1_099_511_627_776;
+        if let Some(creds) = config.vless_reality.as_mut() {
+            creds.listen_port = 44321;
+            creds.uuid = "11111111-1111-1111-1111-111111111111".into();
+            creds.private_key = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=".into();
+            creds.public_key = "BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into();
+            creds.short_id = "abcd1234".into();
+        }
+        if let Some(creds) = config.vmess_websocket.as_mut() {
+            creds.listen_port = 44322;
+            creds.uuid = "22222222-2222-2222-2222-222222222222".into();
+            creds.path = "/ws-pinned".into();
+        }
+        if let Some(creds) = config.hysteria2.as_mut() {
+            creds.listen_port = 44323;
+            creds.password = "pinned-hy2-password".into();
+        }
+        if let Some(creds) = config.tuic.as_mut() {
+            creds.listen_port = 44324;
+            creds.uuid = "33333333-3333-3333-3333-333333333333".into();
+            creds.password = "pinned-tuic-password".into();
+        }
+        if let Some(creds) = config.anytls.as_mut() {
+            creds.listen_port = 44325;
+            creds.password = "pinned-anytls-password".into();
+        }
+        config
+    }
+
+    /// Re-serialize JSON with every object's keys sorted by hand.
+    ///
+    /// `serde_json`'s map ordering is a build artifact, not a product decision:
+    /// a root-package build sorts keys, while a `--workspace` build unifies
+    /// `serde_json/preserve_order` on and emits insertion order. Pinning raw
+    /// bytes would make this suite depend on how it was invoked, so the goldens
+    /// pin *content* here and leave ordering free. The text artifacts (URI,
+    /// base64, Shadowrocket) are still snapshotted byte-for-byte, because
+    /// ADR-0021 freezes exactly those.
+    fn canonical_json(contents: &str) -> String {
+        fn walk(value: &serde_json::Value) -> String {
+            match value {
+                serde_json::Value::Object(map) => {
+                    let mut pairs: Vec<(&String, String)> =
+                        map.iter().map(|(key, value)| (key, walk(value))).collect();
+                    pairs.sort_unstable_by(|left, right| left.0.cmp(right.0));
+                    format!(
+                        "{{{}}}",
+                        pairs
+                            .iter()
+                            .map(|(key, rendered)| format!("{key:?}:{rendered}"))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                }
+                serde_json::Value::Array(items) => {
+                    format!("[{}]", items.iter().map(walk).collect::<Vec<_>>().join(","))
+                }
+                other => other.to_string(),
+            }
+        }
+        let parsed: serde_json::Value =
+            serde_json::from_str(contents).expect("a JSON artifact must parse");
+        walk(&parsed)
+    }
+
+    /// The YAML counterpart of [`canonical_json`]: mihomo maps are order-free
+    /// too, so the golden pins content with keys sorted at every level.
+    fn canonical_yaml(contents: &str) -> String {
+        fn walk(value: &serde_yaml::Value) -> String {
+            match value {
+                serde_yaml::Value::Mapping(map) => {
+                    let mut pairs: Vec<(String, String)> = map
+                        .iter()
+                        .map(|(key, value)| (format!("{key:?}"), walk(value)))
+                        .collect();
+                    pairs.sort_unstable();
+                    format!(
+                        "{{{}}}",
+                        pairs
+                            .into_iter()
+                            .map(|(key, rendered)| format!("{key}:{rendered}"))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                }
+                serde_yaml::Value::Sequence(items) => {
+                    format!("[{}]", items.iter().map(walk).collect::<Vec<_>>().join(","))
+                }
+                other => format!("{other:?}"),
+            }
+        }
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(contents).expect("a YAML artifact must parse");
+        walk(&parsed)
+    }
+
+    /// The artifact bytes a subscriber actually receives, with the two
+    /// build/host-dependent degrees of freedom removed: object key order (see
+    /// [`canonical_json`]) and path separators.
+    ///
+    /// Paths are the part that must be normalized rather than tolerated: the
+    /// server artifact embeds certificate and cache paths built with
+    /// `Path::join`, so a golden captured on Windows carries `C:\\Users\\…`
+    /// and fails on the Linux runners that are the only platforms sbctl
+    /// supports (`src/preflight.rs` accepts `ID=debian|ubuntu` alone).
+    /// Production bytes are always POSIX, so the golden pins the POSIX form.
+    fn canonical_artifact(name: &str, contents: &str) -> String {
+        let canonical = if name.ends_with(".json") {
+            canonical_json(contents)
+        } else if name.ends_with(".yaml") {
+            canonical_yaml(contents)
+        } else {
+            contents.to_owned()
+        };
+        canonical.replace("\\\\", "/").replace('\\', "/")
+    }
+
+    /// Every artifact this tool can emit, pinned. The generated set is the only
+    /// thing a subscriber ever downloads, and the administrator override files
+    /// are the only supported way to change it, so a diff here is either an
+    /// intentional product decision or a regression (ADR-0021).
+    #[test]
+    fn the_generated_artifact_set_matches_the_pinned_goldens() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let config = pinned_five_protocol_config();
+        let artifacts = generated_artifacts(&config, fixture.path()).expect("artifacts generate");
+        let mut names: Vec<&str> = artifacts.iter().map(|(name, _)| name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "sing-box-server.json",
+                "subscription-base64-uri.txt",
+                "subscription-clash-1.18.yaml",
+                "subscription-clash.yaml",
+                "subscription-shadowrocket.txt",
+                "subscription-sing-box-1.10.json",
+                "subscription-sing-box-1.11.json",
+                "subscription-sing-box-1.12.json",
+                "subscription-sing-box-1.13.json",
+                "subscription-sing-box-1.14.json",
+                "subscription-sing-box-full.json",
+                "subscription-sing-box.json",
+                "subscription-uri.txt",
+            ],
+            "the artifact set changed shape; the goldens and ADR-0021 need a decision"
+        );
+        for (name, contents) in &artifacts {
+            insta::assert_snapshot!(name.clone(), canonical_artifact(name, contents));
+        }
+    }
+
+    /// The goldens are only worth having if generation is a pure function of
+    /// the pinned config: a hidden clock, counter or host probe would make the
+    /// transaction's `artifacts_changed` comparison flap on a real deployment.
+    #[test]
+    fn generation_from_a_pinned_config_is_byte_identical_across_runs() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let config = pinned_five_protocol_config();
+        let first = generated_artifacts(&config, fixture.path()).expect("artifacts generate");
+        let second = generated_artifacts(&config, fixture.path()).expect("artifacts regenerate");
+        assert_eq!(first, second, "generation must be deterministic");
+    }
+
+    /// `sbctl node --uri` and the index page show links assembled through the
+    /// same code path the `uri` artifact uses. Were they to diverge — one
+    /// forgetting the IPv6 brackets, or the `insecure` flag, or the trailing
+    /// newline — an operator who copied a node from their terminal would hand
+    /// their client different parameters than the client would have downloaded.
+    #[test]
+    fn the_share_links_shown_to_the_operator_are_the_uri_artifact_verbatim() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let config = pinned_five_protocol_config();
+        let artifacts = generated_artifacts(&config, fixture.path()).expect("artifacts generate");
+        let artifact = artifacts
+            .iter()
+            .find(|(name, _)| name == "subscription-uri.txt")
+            .map(|(name, contents)| (name.clone(), contents.clone()))
+            .expect("the uri artifact is generated");
+        let shown = crate::lifecycle::node_share_links(&config);
+        assert_eq!(
+            shown,
+            artifact.1,
+            "the displayed links must be the {name} artifact byte-for-byte",
+            name = artifact.0
+        );
+        let nodes = crate::canonical::nodes(&config);
+        assert_eq!(nodes.len(), 5, "the pinned config enables five nodes");
+        assert_eq!(
+            shown.lines().filter(|line| !line.is_empty()).count(),
+            nodes.len(),
+            "every enabled node needs its own share link; a missing one is silent"
+        );
+    }
+
     #[test]
     fn client_overrides_merge_into_full_profiles_but_never_the_bare_artifact() {
         let fixture = TempDir::new().expect("temporary root is created");

@@ -1,0 +1,9 @@
+---
+source: src/subscription/artifacts.rs
+expression: "canonical_artifact(name, contents)"
+---
+vless://11111111-1111-1111-1111-111111111111@sub.example.test:44321?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.cloudflare.com&fp=chrome&pbk=BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=&sid=abcd1234&type=tcp#sbctl-vless-reality
+vmess://eyJhZGQiOiJzdWIuZXhhbXBsZS50ZXN0IiwiYWlkIjoiMCIsImhvc3QiOiJzdWIuZXhhbXBsZS50ZXN0IiwiaWQiOiIyMjIyMjIyMi0yMjIyLTIyMjItMjIyMi0yMjIyMjIyMjIyMjIiLCJuZXQiOiJ3cyIsInBhdGgiOiIvd3MtcGlubmVkIiwicG9ydCI6IjQ0MzIyIiwicHMiOiJzYmN0bC12bWVzcy13ZWJzb2NrZXQiLCJzY3kiOiJhdXRvIiwic25pIjoic3ViLmV4YW1wbGUudGVzdCIsInRscyI6InRscyIsInR5cGUiOiJub25lIiwidiI6IjIifQ==
+hysteria2://pinned-hy2-password@sub.example.test:44323?insecure=0&sni=sub.example.test#sbctl-hysteria2
+tuic://33333333-3333-3333-3333-333333333333:pinned-tuic-password@sub.example.test:44324?congestion_control=bbr&alpn=h3&insecure=0&sni=sub.example.test#sbctl-tuic
+anytls://pinned-anytls-password@sub.example.test:44325?security=tls&insecure=0&sni=sub.example.test#sbctl-anytls

@@ -13,7 +13,7 @@ use crate::subscription::artifacts::SubscriptionError;
 
 pub(super) use clash::{clash, clash_legacy};
 pub(super) use singbox::{sing_box_full, sing_box_server};
-pub(super) use uri::{shadowrocket, uri};
+pub(super) use uri::{insecure_flag, node_uri, shadowrocket, uri};
 
 pub(crate) fn ensure_subscription_nodes(
     config: &DeploymentConfig,

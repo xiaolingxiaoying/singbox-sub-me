@@ -87,6 +87,21 @@ jobs:
               "https://github.com/SagerNet/sing-box/releases/download/v$version/sing-box-$version-linux-amd64.tar.gz"
             tar -xzf "$directory/archive.tar.gz" -C "$directory" --strip-components=1
           done
+      - name: Record the latest stable sing-box release
+        id: upstream
+        run: |
+          set -euo pipefail
+          # `releases/latest` already excludes drafts and prereleases, so this
+          # is the version `sbctl install` will actually download.
+          tag=$(curl -fsSL --retry 3 \
+            -H 'Accept: application/vnd.github+json' \
+            https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
+          if [ -z "$tag" ] || [ "$tag" = "null" ]; then
+            echo "could not read the latest sing-box tag; refusing to skip the band check" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "latest stable sing-box: $tag"
       - name: Validate every generated profile with its real core
         env:
           SING_BOX_BIN_1_10: ${{ github.workspace }}/sing-box-1.10.7/sing-box
@@ -94,6 +109,7 @@ jobs:
           SING_BOX_BIN_1_12: ${{ github.workspace }}/sing-box-1.12.25/sing-box
           SING_BOX_BIN_1_13: ${{ github.workspace }}/sing-box-1.13.21/sing-box
           SING_BOX_BIN_1_14: ${{ github.workspace }}/sing-box-1.14.1/sing-box
+          SBCTL_UPSTREAM_LATEST: ${{ steps.upstream.outputs.tag }}
         run: cargo test --test version_profiles -- --ignored --nocapture
 
   mihomo-profiles:

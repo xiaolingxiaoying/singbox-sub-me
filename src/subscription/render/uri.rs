@@ -1,11 +1,74 @@
 use base64::Engine;
-use serde_json::json;
 
 use super::client_skip_cert_verify;
 use crate::canonical::CanonicalNode;
 use crate::config::DeploymentConfig;
 use crate::subscription::artifacts::SubscriptionError;
 use crate::subscription::base64_uri;
+
+/// The VMess config is base64-encoded into a byte-frozen artifact (ADR-0021),
+/// so its key order must not depend on how the binary was built: `serde_json`
+/// sorts object keys in a root-package build but preserves insertion order as
+/// soon as another workspace member unifies `preserve_order` on. Emitting the
+/// pairs sorted by hand pins the bytes for both build shapes.
+fn vmess_payload(
+    tag: &str,
+    host: &str,
+    port: u16,
+    uuid: &str,
+    tls_server_name: &str,
+    path: &str,
+) -> String {
+    let mut fields: Vec<(&str, String)> = vec![
+        ("v", "2".to_owned()),
+        ("ps", tag.to_owned()),
+        ("add", host.to_owned()),
+        ("port", port.to_string()),
+        ("id", uuid.to_owned()),
+        ("aid", "0".to_owned()),
+        ("scy", "auto".to_owned()),
+        ("net", "ws".to_owned()),
+        ("type", "none".to_owned()),
+        ("host", tls_server_name.to_owned()),
+        ("path", path.to_owned()),
+        ("tls", "tls".to_owned()),
+        ("sni", tls_server_name.to_owned()),
+    ];
+    fields.sort_unstable_by_key(|(key, _)| *key);
+    let body = fields
+        .iter()
+        .map(|(key, value)| {
+            format!(
+                "{}:{}",
+                serde_json::Value::String((*key).to_owned()),
+                serde_json::Value::String(value.clone())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{{body}}}")
+}
+
+/// The `vmess://` line for one node, shared by the plain and Shadowrocket URI
+/// forms so the frozen payload can never drift between them.
+fn vmess_uri(
+    tag: &str,
+    host: &str,
+    port: u16,
+    uuid: &str,
+    tls_server_name: &str,
+    path: &str,
+) -> String {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(vmess_payload(
+        tag,
+        host,
+        port,
+        uuid,
+        tls_server_name,
+        path,
+    ));
+    format!("vmess://{encoded}\n")
+}
 
 /// The Shadowrocket-adapted Base64 URI list (research:
 /// `docs/research/sing-box-client-version-differences.md` §6). Differences
@@ -48,10 +111,14 @@ pub(crate) fn shadowrocket(
                 uuid,
                 path,
             } => {
-                let payload = json!({"v": "2", "ps": node.tag(), "add": host, "port": port.to_string(), "id": uuid, "aid": "0", "scy": "auto", "net": "ws", "type": "none", "host": tls_server_name, "path": path, "tls": "tls", "sni": tls_server_name});
-                let encoded = base64::engine::general_purpose::STANDARD
-                    .encode(serde_json::to_vec(&payload).expect("JSON values serialize"));
-                uris.push_str(&format!("vmess://{encoded}\n"));
+                uris.push_str(&vmess_uri(
+                    node.tag(),
+                    host,
+                    *port,
+                    uuid,
+                    tls_server_name,
+                    path,
+                ));
             }
             CanonicalNode::Hysteria2 {
                 host,
@@ -117,15 +184,78 @@ fn percent_encode(value: &str) -> String {
     out
 }
 
+/// One node's share link, without the trailing newline.
+///
+/// Split out of [`uri`] so the index page and `sbctl status nodes --uri` can
+/// show the same string a subscriber downloads, rather than making a user fetch
+/// the credential'd artifact to see their own node parameters. `node` must
+/// already carry a bracketed host if it is IPv6: see [`uri`].
+pub(crate) fn node_uri(insecure: u8, node: &CanonicalNode) -> String {
+    match node {
+        CanonicalNode::VlessReality {
+            host,
+            port,
+            uuid,
+            public_key,
+            short_id,
+            decoy_sni,
+            ..
+        } => format!(
+            "vless://{uuid}@{host}:{port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={decoy_sni}&fp=chrome&pbk={public_key}&sid={short_id}&type=tcp#{}\n",
+            node.tag()
+        ),
+        CanonicalNode::VmessWebsocket {
+            host,
+            port,
+            tls_server_name,
+            uuid,
+            path,
+        } => vmess_uri(node.tag(), host, *port, uuid, tls_server_name, path),
+        CanonicalNode::Hysteria2 {
+            host,
+            port,
+            tls_server_name,
+            password,
+        } => format!(
+            "hysteria2://{password}@{host}:{port}?insecure={insecure}&sni={tls_server_name}#{}\n",
+            node.tag()
+        ),
+        CanonicalNode::Tuic {
+            host,
+            port,
+            tls_server_name,
+            uuid,
+            password,
+        } => format!(
+            "tuic://{uuid}:{password}@{host}:{port}?congestion_control=bbr&alpn=h3&insecure={insecure}&sni={tls_server_name}#{}\n",
+            node.tag()
+        ),
+        CanonicalNode::Anytls {
+            host,
+            port,
+            tls_server_name,
+            password,
+        } => format!(
+            "anytls://{password}@{host}:{port}?security=tls&insecure={insecure}&sni={tls_server_name}#{}\n",
+            node.tag()
+        ),
+    }
+}
+
+/// Whether the generated client artifacts skip certificate verification.
+pub(crate) fn insecure_flag(config: &DeploymentConfig) -> u8 {
+    if client_skip_cert_verify(config) {
+        1
+    } else {
+        0
+    }
+}
+
 pub(crate) fn uri(
     config: &DeploymentConfig,
     nodes: &[CanonicalNode],
 ) -> Result<String, SubscriptionError> {
-    let insecure = if client_skip_cert_verify(config) {
-        1
-    } else {
-        0
-    };
+    let insecure = insecure_flag(config);
     let mut uris = String::new();
     // A URI authority needs IPv6 hosts bracketed; the server and Clash
     // renderers deliberately keep the bare address.
@@ -134,57 +264,7 @@ pub(crate) fn uri(
         .map(CanonicalNode::with_bracketed_host)
         .collect::<Vec<_>>();
     for node in &nodes {
-        match &node {
-            CanonicalNode::VlessReality {
-                host,
-                port,
-                uuid,
-                public_key,
-                short_id,
-                decoy_sni,
-                ..
-            } => uris.push_str(&format!("vless://{uuid}@{host}:{port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={decoy_sni}&fp=chrome&pbk={public_key}&sid={short_id}&type=tcp#{}\n", node.tag())),
-            CanonicalNode::VmessWebsocket {
-                host,
-                port,
-                tls_server_name,
-                uuid,
-                path,
-            } => {
-                let payload = json!({"v": "2", "ps": node.tag(), "add": host, "port": port.to_string(), "id": uuid, "aid": "0", "scy": "auto", "net": "ws", "type": "none", "host": tls_server_name, "path": path, "tls": "tls", "sni": tls_server_name});
-                let encoded = base64::engine::general_purpose::STANDARD
-                    .encode(serde_json::to_vec(&payload).expect("JSON values serialize"));
-                uris.push_str(&format!("vmess://{encoded}\n"));
-            }
-            CanonicalNode::Hysteria2 {
-                host,
-                port,
-                tls_server_name,
-                password,
-            } => uris.push_str(&format!(
-                "hysteria2://{password}@{host}:{port}?insecure={insecure}&sni={tls_server_name}#{}\n",
-                node.tag()
-            )),
-            CanonicalNode::Tuic {
-                host,
-                port,
-                tls_server_name,
-                uuid,
-                password,
-            } => uris.push_str(&format!(
-                "tuic://{uuid}:{password}@{host}:{port}?congestion_control=bbr&alpn=h3&insecure={insecure}&sni={tls_server_name}#{}\n",
-                node.tag()
-            )),
-            CanonicalNode::Anytls {
-                host,
-                port,
-                tls_server_name,
-                password,
-            } => uris.push_str(&format!(
-                "anytls://{password}@{host}:{port}?security=tls&insecure={insecure}&sni={tls_server_name}#{}\n",
-                node.tag()
-            )),
-        }
+        uris.push_str(&node_uri(insecure, node));
     }
     Ok(uris)
 }
