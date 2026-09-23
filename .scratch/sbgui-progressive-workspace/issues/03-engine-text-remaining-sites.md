@@ -76,3 +76,24 @@ zh 模板必须与现字符串**逐字相同**，否则下面那批断言与金�
 
 判据（下次跑 EN 腿时用它当验收）：9 张图里除右上角语言按钮外不得出现任何 CJK 字形。
 
+## 那两处 status 不能靠换字符串解决（先想清楚再动手）
+
+`ClientSnapshot` 里**没有 locale**：语言是各 UI 在渲染时决定的（`sbgui/src/lang.rs`、sbtui 同理）。
+所以把 `controller.rs:222` / `state.rs:468` 的字面量改成另一句中文，英文下照样是中文。
+可行的形状只有一种：这两处也走 `note_event(EventCode::…, args)`，让 UI 端用
+`render_zh()` / `render_en()` 按自己的 locale 出字——也就是**默认状态与"未安装内核"状态要先各加一个
+EventCode 变体**，再让两个客户端在渲染 status 时优先看 `event_records` 的尾部而不是 `status` 字符串
+（`status_level` 已经是这么接的，同一套路子）。
+
+因此执行顺序应当调整为：
+
+1. 先加 `CoreNotInstalledHint` 与 `ReadyToImportFirstProfile`（或你偏好的命名）两个变体 + `level()`；
+2. 把两处直接赋值改为 `note_event`（保留 `snapshot.status` 的中文回退，字符串历史不能断）；
+3. UI 端渲染 status 时改用最近一条记录 + locale；
+4. 再动那 21 处 `.note(`；
+5. 最后重跑 `SBGUI_LANG=en` 腿验收（这条腿现在可靠：九张图、零字节守卫、about 页已在列）。
+
+第 2、3 步会牵动 `state.rs:833`、`sbtui/src/style.rs:123`、`sbtui/src/view/logs.rs:113`、
+`sbgui/src/pages/logs.rs:313` 四组断言与 17 份渲染金标准——金标准若动必须逐帧看 diff。
+
+
