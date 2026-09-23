@@ -340,12 +340,19 @@ test "$before" = "$after" || fail 'update --check changed the host'
 mkdir -p "$root/usr/bin"
 printf '#!/bin/sh\nexit 1\n' > "$root/usr/bin/systemctl"
 chmod 0755 "$root/usr/bin/systemctl"
-if "$sbctl" --root "$root" update --manifest "$work/manifest.json" --sbctl-artifact "$fake_sing_box" --sing-box-artifact "$fake_sing_box" >/dev/null 2>&1; then
+# The failure output is the diagnosis: without it a rollback that was never
+# created and an update that aborted before it got that far look identical.
+update_stderr=$("$sbctl" --root "$root" update --manifest "$work/manifest.json" --sbctl-artifact "$fake_sing_box" --sing-box-artifact "$fake_sing_box" 2>&1 >/dev/null) && {
   fail 'update with a failed service health check was accepted'
-fi
+}
+echo "failed-update stderr: $update_stderr"
 test "$(cat "$root/usr/local/bin/sbctl")" = 'known-good sbctl' || fail 'failed update changed sbctl'
 test "$(cat "$root/usr/local/bin/sing-box")" = 'known-good sing-box' || fail 'failed update changed sing-box'
-test -d "$root/var/lib/sbctl/rollback" || fail 'failed update did not keep a rollback point'
+# The rollback point lives where backups live (`ROLLBACK_ROOT` in src/update.rs),
+# and it has to hold something: an empty directory would prove only that the
+# code reached the mkdir, not that a known-good state was saved.
+test -d "$root/var/backups/sbctl/rollback" || fail 'failed update did not keep a rollback point'
+test -n "$(find "$root/var/backups/sbctl/rollback" -type f)" || fail 'the rollback point holds no files'
 
 # Uninstall preserves unrelated proxy/firewall files by default; --purge only removes sbctl data.
 fixture_seed_uninstall
