@@ -12,6 +12,7 @@ use crate::components::{
     connection_chain, connection_header, connection_row, connection_target, inline_empty,
     page_head, setting_line, status_dot, work_surface,
 };
+use crate::lang::established_label;
 use crate::state::{FieldSpec, InputField, Sbgui, Tone};
 use crate::theme::{
     BLUE_2, BODY, BORDER, BORDER_STRONG, CYAN, FAINT, LABEL, LIST_PAGE, MINT, MUTED, PAD_CARD,
@@ -291,11 +292,7 @@ impl Sbgui {
                             ))
                             .child(setting_line(
                                 tr!(locale, "建立时间", "Started"),
-                                if connection.start.is_empty() {
-                                    tr!(locale, "刚刚", "Just now")
-                                } else {
-                                    &connection.start
-                                },
+                                established_label(&connection.start, locale),
                             ))
                     })
             }))

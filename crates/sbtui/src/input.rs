@@ -555,13 +555,16 @@ fn toggle_mode(app: &mut App) {
     if !app.confirm_mode {
         app.confirm_mode = true;
         app.status = format!(
-            "再按 m 确认切换到 {}（下次启动内核时生效；TUN 需要管理员/root 权限）",
+            "再按 m 确认切换到 {}（将重启内核；TUN 需要管理员/root 权限）",
             target.label()
         );
         return;
     }
     app.confirm_mode = false;
-    app.send(ClientCommand::SetTrafficMode(target));
+    app.send(ClientCommand::SetTrafficMode {
+        mode: target,
+        restart: true,
+    });
 }
 
 #[cfg(test)]

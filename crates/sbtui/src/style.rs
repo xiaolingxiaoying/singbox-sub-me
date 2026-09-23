@@ -67,6 +67,22 @@ pub(crate) fn status_color(status: &str) -> Color {
     }
 }
 
+/// The footer colour, preferring the engine's own severity over a guess at its
+/// wording. `None` means the status came from a call site that has not moved to
+/// an event code yet, so the Chinese-substring fallback still applies to it.
+pub(crate) fn status_color_at(
+    level: Option<client_core::event_code::EventLevel>,
+    status: &str,
+) -> Color {
+    use client_core::event_code::EventLevel;
+    match level {
+        Some(EventLevel::Error) => DANGER,
+        Some(EventLevel::Warn) => AMBER,
+        Some(EventLevel::Info) => MINT,
+        None => status_color(status),
+    }
+}
+
 pub(crate) fn delay_color(delay: Option<u64>) -> Color {
     match delay_level(delay) {
         DelayLevel::Fast => MINT,
@@ -84,6 +100,24 @@ mod tests {
     fn meter_keeps_the_requested_visual_width() {
         assert_eq!(meter(0, 12).chars().count(), 12);
         assert_eq!(meter(1024 * 1024, 12).chars().count(), 12);
+    }
+
+    /// The engine's severity must win over the wording, or an English status
+    /// line keeps its colour only by accident of translation.
+    #[test]
+    fn an_engine_severity_beats_the_word_guess() {
+        use client_core::event_code::EventLevel;
+        assert_eq!(status_color_at(Some(EventLevel::Error), "一切正常"), DANGER);
+        assert_eq!(status_color_at(Some(EventLevel::Warn), "一切正常"), AMBER);
+        assert_eq!(
+            status_color_at(Some(EventLevel::Info), "导入订阅失败"),
+            MINT
+        );
+        assert_eq!(
+            status_color_at(None, "导入订阅失败"),
+            DANGER,
+            "an uncoded status still falls back to reading the wording"
+        );
     }
 
     #[test]

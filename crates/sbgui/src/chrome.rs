@@ -14,9 +14,9 @@ use crate::components::{clean_proxy_label, icon, side_rate};
 use crate::lang::outbound_mode;
 use crate::state::{FieldSpec, Page, Sbgui, Tone, switch_language};
 use crate::theme::{
-    BLUE, BODY, BORDER, BORDER_STRONG, BRAND_ICON_PATH, CONTENT_MAX, CONTENT_PAD, CYAN, CYAN_DARK,
-    DANGER, FAINT, GAP_ITEM, LABEL, META, MINT, MUTED, NAV_ACTIVE, RADIUS_CONTROL, ROW_HOVER,
-    SECTION, SIDEBAR_W, SURFACE, SURFACE_2, TEXT, TITLE, TITLEBAR_H, WEIGHT_MEDIUM,
+    AMBER, BLUE, BODY, BORDER, BORDER_STRONG, BRAND_ICON_PATH, CONTENT_MAX, CONTENT_PAD, CYAN,
+    CYAN_DARK, DANGER, FAINT, GAP_ITEM, LABEL, META, MINT, MUTED, NAV_ACTIVE, RADIUS_CONTROL,
+    ROW_HOVER, SECTION, SIDEBAR_W, SURFACE, SURFACE_2, TEXT, TITLE, TITLEBAR_H, WEIGHT_MEDIUM,
     WEIGHT_SEMIBOLD, tone_colors,
 };
 use crate::tr;
@@ -287,12 +287,16 @@ impl Sbgui {
             .as_deref()
             .map(|busy| format!("{busy}…"))
             .unwrap_or_else(|| snapshot.status.clone());
-        let status_color = if status_text.contains("失败") || status_text.contains("错误") {
-            DANGER
-        } else if snapshot.busy.is_some() {
-            CYAN
-        } else {
-            MUTED
+        // Prefer the engine's own severity. The substring test is the legacy
+        // path, kept only for status lines that predate the event-code
+        // vocabulary; it is why an English interface used to lose the colour.
+        let status_color = match snapshot.status_level {
+            Some(client_core::event_code::EventLevel::Error) => DANGER,
+            Some(client_core::event_code::EventLevel::Warn) => AMBER,
+            Some(client_core::event_code::EventLevel::Info) => MUTED,
+            None if status_text.contains("失败") || status_text.contains("错误") => DANGER,
+            None if snapshot.busy.is_some() => CYAN,
+            None => MUTED,
         };
         div()
             .w_full()

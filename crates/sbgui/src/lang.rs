@@ -89,6 +89,20 @@ pub(crate) fn age_label(epoch_seconds: u64, locale: Locale) -> String {
     }
 }
 
+/// The connections table's "started" column. The core reports an absolute
+/// RFC3339 timestamp, which at column width renders as a truncated
+/// `2026-09-23T0…` and reads identically for every connection opened inside the
+/// same second, so the column shows an age instead (issue 05). An unparseable
+/// non-empty value is passed through rather than hidden, because that means the
+/// core reported something this helper does not understand.
+pub(crate) fn established_label(start: &str, locale: Locale) -> String {
+    match client_core::format::seconds_since(start) {
+        Some(seconds) => age_label(now_epoch().saturating_sub(seconds), locale),
+        None if start.is_empty() => tr!(locale, "刚刚", "Just now").to_owned(),
+        None => start.to_owned(),
+    }
+}
+
 /// The subscription quota line, same arrangement as [`age_label`].
 pub(crate) fn usage_label(
     usage: Option<&client_core::subscription::SubscriptionUserinfo>,
@@ -122,7 +136,25 @@ pub(crate) fn usage_label(
 
 #[cfg(test)]
 mod tests {
-    use super::{Locale, age_label, core_age_label, core_usage_label, usage_label};
+    use super::{
+        Locale, age_label, core_age_label, core_usage_label, established_label, usage_label,
+    };
+
+    #[test]
+    fn the_started_column_shows_an_age_rather_than_the_raw_timestamp() {
+        // A fixed instant in the past: the column must phrase it as an age in
+        // both languages instead of printing the ISO string the core sends.
+        let old = "2020-01-02T03:04:05Z";
+        let english = established_label(old, Locale::En);
+        assert!(!english.contains('T'), "still an ISO string: {english}");
+        assert!(english.ends_with("d ago"), "not an age: {english}");
+        let chinese = established_label(old, Locale::Zh);
+        assert!(chinese.ends_with(" 天前"), "not an age: {chinese}");
+        assert_eq!(established_label("", Locale::En), "Just now");
+        assert_eq!(established_label("", Locale::Zh), "刚刚");
+        // A value this helper cannot read is surfaced, not silently blanked.
+        assert_eq!(established_label("n/a", Locale::Zh), "n/a");
+    }
 
     #[test]
     fn the_button_names_the_language_it_switches_to() {

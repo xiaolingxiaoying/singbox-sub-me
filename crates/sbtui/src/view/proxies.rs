@@ -8,7 +8,6 @@ use ratatui::text::Span;
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use crate::app::App;
-use crate::clash_api::SELECTOR_TAG;
 use crate::style::{CYAN, DANGER, MUTED, delay_color, panel};
 
 pub(crate) fn draw_proxies(frame: &mut Frame, area: ratatui::prelude::Rect, app: &mut App) {
@@ -83,9 +82,7 @@ pub(crate) fn draw_proxies(frame: &mut Frame, area: ratatui::prelude::Rect, app:
 
 pub(crate) fn selected_node(app: &App) -> String {
     app.snapshot
-        .proxy_groups
-        .iter()
-        .find(|group| group.name == SELECTOR_TAG)
+        .selector_group()
         .map(|group| group.current.clone())
         .or_else(|| app.snapshot.current_node.clone())
         .unwrap_or_else(|| "等待选择节点".to_owned())

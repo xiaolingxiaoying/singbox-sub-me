@@ -210,6 +210,10 @@ pub(crate) struct App {
     /// (tracked via `last_engine_status`); UI-level messages (filters,
     /// confirmations) write it directly.
     pub(crate) status: String,
+    /// The engine's own severity for `status`, when it has one. `None` means the
+    /// line predates the event-code vocabulary and the colour falls back to
+    /// reading the wording.
+    pub(crate) status_level: Option<client_core::event_code::EventLevel>,
     pub(crate) last_engine_status: String,
 }
 
@@ -245,6 +249,7 @@ impl App {
             show_help: false,
             status,
             last_engine_status: String::new(),
+            status_level: None,
         }
     }
 
@@ -255,6 +260,7 @@ impl App {
         if self.snapshot.status != self.last_engine_status {
             self.last_engine_status = self.snapshot.status.clone();
             self.status = self.snapshot.status.clone();
+            self.status_level = self.snapshot.status_level;
         }
         // Keep the display order stable across the engine's periodic
         // connection refreshes; the engine publishes in core order.
@@ -315,6 +321,8 @@ impl App {
 
     pub(crate) fn send(&mut self, command: ClientCommand) {
         self.status = format!("{}…", command.label());
+        // A locally-composed "in progress" line has no engine severity.
+        self.status_level = None;
         let _ = self.controller.send(command);
     }
 }

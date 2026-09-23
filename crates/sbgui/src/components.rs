@@ -14,7 +14,7 @@ use gpui::{
     StatefulInteractiveElement, Styled, div, px, rgb, svg,
 };
 
-use crate::lang::Locale;
+use crate::lang::{Locale, established_label};
 use crate::state::{Page, Sbgui};
 use crate::theme::{
     AMBER, BLUE, BLUE_2, BODY, BORDER, CYAN, DANGER, DISPLAY, FAINT, GAP_ITEM, LABEL, META, MINT,
@@ -717,11 +717,7 @@ pub(crate) fn connection_row(
                 .flex_shrink_0()
                 .truncate()
                 .text_color(rgb(MUTED))
-                .child(if connection.start.is_empty() {
-                    tr!(locale, "刚刚", "Just now").to_owned()
-                } else {
-                    connection.start.clone()
-                }),
+                .child(established_label(&connection.start, locale)),
         )
         .child(
             div()
@@ -743,7 +739,7 @@ pub(crate) fn connection_row(
 /// One read-only setting: the name on the left, the value on the right of the
 /// same row, so a list of them is one vertical sweep instead of a column of
 /// label/value pairs stacked apart.
-pub(crate) fn setting_line(label: &str, value: &str) -> impl IntoElement {
+pub(crate) fn setting_line(label: &str, value: impl AsRef<str>) -> impl IntoElement {
     div()
         .w_full()
         .min_h(px(68.0))
@@ -769,7 +765,7 @@ pub(crate) fn setting_line(label: &str, value: &str) -> impl IntoElement {
                 .text_size(px(LABEL))
                 .text_color(rgb(MUTED))
                 .truncate()
-                .child(value.to_owned()),
+                .child(value.as_ref().to_owned()),
         )
 }
 
