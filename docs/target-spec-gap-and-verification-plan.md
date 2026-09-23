@@ -787,9 +787,13 @@ L2（WSL，`-p sbctl -p client-core -p sbtui`）同样 fmt 0 / clippy 0 / **364 
   两个脚本里都没有 `kill -9` + `ss -ltnp` 的孤儿断言、没有 `ip a` / `ip rule` 的 TUN 断言、也没有
   429 洪水断言（只有工件形状里的 `tun` 字段检查 `verify.sh:113`、`:280`）。G12 目前的真凭据只有
   宿主上那条 `crates/client-core/tests/orphan_guard.rs`（自派生探针 + 僵尸感知存活判断），**容器内未证**。
-- L3 还欠三条容器断言（写下来，别再说成已过）：① 孤儿回收；② TUN 起来后的 `ip rule` / `ip a` 断言；
-  ③ 限流洪水下"真凭据与错凭据响应相同且永不 5xx"。第 ③ 条有个坑：同一进程里后续断言共用
-  127.0.0.1 这个源地址，洪水必须放在该 server 实例的最后，或为它单独起一个实例。
+- L3 的三条容器断言 **2026-09-23 全部落地**：① 孤儿回收、② TUN 后 `ip a` / `ip rule` 断言在新建的
+  `tests/acceptance/verify-client.sh`（`run.sh` 新增必需 `SBCTUI_ARTIFACT`，privileged 镜像内真跑：
+  `kill -9` 客户端后 `ss -ltnp` 无孤儿内核，TUN 模式下 tun 地址与 auto_route 规则都在）；③ 限流洪水
+  在 `verify.sh`，为该坑单开一个 server 实例，断言真/错凭据在超限时 429 响应逐字节相同、永不 5xx、
+  不回声 credential。**已独立复跑**：`verify-client.sh` 在全新 privileged `debian:12-slim` 容器里
+  `EXIT=0`。ubuntu:22.04 / 24.04 两条腿本轮**未跑完**——宿主代理把 `archive.ubuntu.com` 解析进
+  `198.18.0.0/15` 使 `apt-get` 在镜像构建阶段失败，与本改动无关，**不声称其通过**。
 - §6 的 L3 状态因此从"未执行"变成"**已执行、已修夹具、三发行版全绿**"；Phase 0.6 问的
   "run.sh 能否从 WSL 发起"答案是否定的：**docker 只在 Windows 侧**，必须 Git Bash 跑 `run.sh`、
   产物由 WSL 构建（`.scratch/run-l3.sh` 就是这个顺序）。

@@ -64,3 +64,24 @@ Found: 2026-09-23，由一次只读定位得出。行号是当时的 HEAD，动�
   （`sing_box` / `uri` / `base64` / `shadowrocket`，`artifacts.rs:357-364`）逐字节不变——
   它们根本不经过 `sing_box_full`/`clash`，所以这条断言几乎免费但必须写下来。
 - G3 的内联规则孪生与 G2 的嗅探留到 PR(c)，不要混进这一步。
+
+## Comments
+
+### 2026-09-23：PR(b) 已落地
+
+- 新增 `src/subscription/template.rs`：`ClientTemplate { standard, global, split }` + 编译期
+  `TemplateSpec { groups, rule_sets, inline_rules, dns, sniff, final_group }`（组/规则集用角色描述，
+  两种渲染器各自映射回既有 tag 词汇）。
+- `src/config.rs` 新增 `client_template` 字段（`#[serde(default = "default_client_template")]`），
+  `DeploymentConfig::new` 与 `apply_options` 与 `client_rule_profile` 同构保留。
+- `sing_box_full` 与 `clash` 改从 `TemplateSpec` 读结构；`Standard` 输出逐字节不变（JSON 键序靠条件
+  插入保持）。
+- 判据全绿：`src/subscription/snapshots/` 13 份金标准**零 diff**；新增
+  `an_explicit_standard_template_matches_the_default_configuration_byte_for_byte` 与
+  `global_and_split_templates_are_the_standard_seam_until_pr_c`（Global/Split 暂等同 Standard，
+  四份冻结工件三者逐字节相同）。
+- 按决定，本轮 `global`/`split` **只声明不实现**（`TemplateSpec::for_template` 里 `let _ = template;`），
+  组数与规则集增长断言留 PR(c)。
+
+**仍未做**：PR(c) 的 G3 内联规则孪生、G2 嗅探、`global`/`split` 的更丰富字节；`--client-template`
+CLI 参数与向导主题仍未加（净新增面，ticket 已说明延后）。

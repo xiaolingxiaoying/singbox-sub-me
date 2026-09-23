@@ -96,4 +96,23 @@ EventCode 变体**，再让两个客户端在渲染 status 时优先看 `event_r
 第 2、3 步会牵动 `state.rs:833`、`sbtui/src/style.rs:123`、`sbtui/src/view/logs.rs:113`、
 `sbgui/src/pages/logs.rs:313` 四组断言与 17 份渲染金标准——金标准若动必须逐帧看 diff。
 
+## Comments
+
+### 2026-09-23：init/default status 与消费侧事件列表已落地，EN 腿转绿
+
+- `event_code.rs` 新增 `StoreUnreadable`（带 `{0}`）、`CoreReadyToStart`、`CoreNotInstalledHint`、
+  `ReadyToImportFirstProfile`；zh 模板与 `controller.rs:220/221/222`、`state.rs:468` **逐字相同**。
+- `Engine::new` 的初始状态改走 `note_event`；`ClientController::start` 给发布前的共享快照 seed 一条
+  `ReadyToImportFirstProfile`。`ClientSnapshot::default()` **刻意不 seed 记录**——否则每个
+  `..ClientSnapshot::default()` 夹具都会多一条，17 份 sbtui 金标准与 `events.len()` 断言会一起动。
+- `ClientSnapshot::latest_event()`（仅当尾部记录确实产出当前 status 时才返回，未迁移的 `note()` 不
+  被旧记录覆盖）、`event_lines()`（把 `events` 与 `event_records` 按序配对，裸串不吞后续记录）。
+- `sbgui` 状态行与**事件列表**按 locale 渲染；`sbtui` 渲染记录的 zh（字节不变）。
+- **EN 腿复跑证据**：`SBGUI_LANG=en` 九张图，除右上角 `中文` 按钮外**零 CJK**。第一轮抓到 Logs 页
+  事件列表仍是中文（状态行已修但列表直接渲染 `events` 串），由 `event_lines()` 修掉后重跑确认。
+
+**仍未做**（本 ticket 剩余）：21 处 `.note(` 换 `note_event`；`operation_error` 错误链漏斗；
+`log_level_of` 改读码、事件列表的**过滤/级别**仍按中文串判断（英文下按可见英文搜不到）；
+`ClientCommand::label()` 与 `流量模式/出站模式` 标签。行号已漂移，动手前重新定位。
+
 
