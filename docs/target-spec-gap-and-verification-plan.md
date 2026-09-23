@@ -729,6 +729,33 @@ L2（WSL，`-p sbctl -p client-core -p sbtui`）同样 fmt 0 / clippy 0 / **364 
 是同一个 127.0.0.1 地址，洪水会把它们一起限成 429——必须放在该 server 实例的最后，
 或为限流单独起一个实例。
 
+### L3（Docker 验收）第一次真的跑起来了：结果是红的，且红在本轮没碰过的地方
+
+按 §6 的配方补了一条可执行脚本 `.scratch/run-l3.sh`（两个 Linux 产物在 WSL ext4 里出，
+`docker` 只能从 Git Bash 侧调），本轮第一次真正执行 `tests/acceptance/run.sh`：
+
+- 两个产物都构建成功且确认为 Linux ELF（`target-linux/release/sbctl` 生产构建、
+  `target-fixtures/release/sbctl` 带 `test-signing` 的 fixture 构建——**刻意不同二进制**）。
+- 矩阵在**第一个镜像 `debian:12-slim` 就判红**，`run.sh` 是 `set -eu`，所以 ubuntu 两个没跑。
+- 失败点：`tests/acceptance/verify.sh:348`
+  「failed update did not keep a rollback point」——即一次健康检查失败的 `sbctl update`
+  之后 `var/lib/sbctl/rollback` 不存在。前 347 行**全过**，其中包括本轮新加的两条
+  `; profile-update-interval=24` 断言（:104 逐个格式、:180 pending 态）与统一 404 那一组：
+  G6 因此在真 systemd 容器里被验证过一次。
+- **归因**：本轮 22 个提交没有一个碰过这条路径。证据三条：
+  (1) `git log --name-only` 显示 `src/update.rs` 与 `src/lifecycle.rs` 未被改动；
+  (2) `grep generated_artifacts|regenerate|apply_config_transaction src/update.rs src/lifecycle.rs`
+      **零命中**——update 流程根本不进生成层，所以我改的内核选档/包装函数不可能参与；
+  (3) 验收夹具里的假内核是 `#!/bin/sh; exit 0`，即便被咨询也是全盘接受。
+  所以这条红要么长期存在、要么依赖容器环境，**不能算作本轮引入的回归，也不能算作已通过**。
+- 下一个诊断动作（成本最低的一条）：在容器里手工执行 `verify.sh:343` 那条 update 并打印
+  `rollback_paths(config)` 与 `$root/var/lib/sbctl` 树。可疑机制：`backup()` 只对
+  **当前存在的**文件建立回滚点，若该夹具根目录里一个回滚路径都不存在，目录就从未被创建，
+  于是断言与实现谁对需要裁决（产品该无条件建目录，还是夹具该先放一个可回滚文件）。
+
+结论：§6 的 L3 状态从"未执行"变成"**已执行、当前红**"，Phase 0.6 的"能否从 WSL 发起"答案是
+"不能——`docker` 只在 Windows 侧，必须在 Git Bash 跑 `run.sh`，产物由 WSL 出"。
+
 ### Phase 5（G10）：客户端「入站与分流规则」页（已完成）
 
 - 数据层：`InboundInfo` + `parse_inbounds`，快照在两处填充（见 ticket 29 的记录）。
