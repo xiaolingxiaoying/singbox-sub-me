@@ -38,6 +38,10 @@ node_modules/
 # Local Linux sing-box binary for the headless GUI harness (never committed).
 .scratch/sbgui-demo-bin/
 
+# The pinned real cores used to validate each generated version profile:
+# ~200 MB of downloaded upstream binaries, reproducible from ci.yml's list.
+.scratch/sing-box-cores/
+
 # A sing-box cache_file written with a relative path lands in the process cwd,
 # which for a container bind-mounting the repo is the repo root itself.
 /cache.db

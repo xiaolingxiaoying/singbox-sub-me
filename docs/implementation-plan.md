@@ -78,7 +78,7 @@ sbctl traffic set-used --rx <BYTES> --tx <BYTES>
 - 订阅工件缺失或不可读时返回脱敏 `503`；账期状态缺失或损坏时仍返回真实工件（HTTP 200，不含 `subscription-userinfo`）并写脱敏诊断；
 - 无效路径、query credential 和错误 credential 统一返回 `404`；
 - 日志不得记录完整订阅 credential；
-- `subscription-userinfo` 的 `upload/download/total/expire` 与当前账期状态一致。
+- `subscription-userinfo` 的 `upload/download/total/expire` 与当前账期状态一致，末尾追加 `profile-update-interval=<小时>`（对客户端的建议拉取频率，不描述服务端行为；未知键必须被忽略）。
 
 从 `vps-sub-meter` 吸收：
 
