@@ -742,6 +742,22 @@ L2（WSL，`-p sbctl -p client-core -p sbtui`）同样 fmt 0 / clippy 0 / **364 
 - 同一段里剩下的字段（`rule_set_download_detour`、`sniff_override_destination`）本轮未做：
   前者 1.14 已弃用而后者被 §4.2 真核探针否掉，都不是能靠"加个字段"推进的事。
 
+### L4（Xvfb 截图腿）本轮真跑通，并补上了第 8 页
+
+`scripts/sbgui-shot/shot.sh` 的默认 `PAGES` 里**没有 `about`**——正是 issue 04 抱怨的那个洞。
+加上之后（`SBGUI_PAGE=about` 由 `crates/sbgui/src/state.rs:324` 的 `"about" | "关于" => Page::About`
+解析，所以这不是"塞进列表里假装拍了"）整条腿在容器里跑完：`l4_exit=0`，
+9 张图（含新增 `1440x900-about.png` 与 `exit-confirm`）**全部非空**——这条腿自己带
+`[ ! -s "$f" ] → HARNESS FAILED` 的守卫，所以"零退出但一张没拍"这种假绿它自己会拦。
+我打开了 about 那张确认内容真实：内核 1.14.1 运行中、订阅档案 2、代理组 2、路由规则 10、
+活跃连接 0、数据目录 `/root/.config/sbgui`、平台 linux x86_64。
+
+- 这一腿**仍然没有 CI job 引用**（§6 说的第二个洞没修）。原因与 0.4 同型：它在容器里从零构建
+  GPUI（本轮容器内先 `Updating git repository zed-industries/zed`），把它直接接进 CI 大概率是
+  一个又慢又容易因网络红的作业；正确做法是先确认 `sbgui-shot-target` 卷能稳定复用，再进 CI。
+- 演示用内核是从 WSL 拷进 `.scratch/sbgui-demo-bin/` 的 sing-box 1.14.1（81 MB），
+  跑完已删除；`.gitignore:52` 的 `/.scratch/sbgui-*` 覆盖了截图与它，不会误提交。
+
 ### L3（Docker 验收）第一次真的跑起来了：红是夹具断言写错了路径，修完三镜像全绿
 
 按 §6 的配方补了一条可执行脚本 `.scratch/run-l3.sh`（两个 Linux 产物在 WSL ext4 里出，
