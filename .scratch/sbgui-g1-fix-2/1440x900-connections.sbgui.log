@@ -1,0 +1,34 @@
+poll-trace: tick running=false starting=true pending=true conns=0 events=0
+poll-trace: tick running=true starting=false pending=false conns=0 events=1
+poll-trace: connections ok: 0 rows
+gui-trace: core_running=true conns=0 down=0
+gui-trace: core_running=true conns=0 down=0
+gui-trace: core_running=true conns=0 down=0
+gui-trace: core_running=true conns=0 down=0
+gui-trace: core_running=true conns=0 down=0
+gui-trace: core_running=true conns=0 down=0
+gui-trace: core_running=true conns=0 down=0
+gui-trace: core_running=true conns=0 down=0
+poll-trace: tick running=true starting=false pending=false conns=0 events=1
+poll-trace: connections ok: 0 rows
+gui-trace: core_running=true conns=0 down=0
+gui-trace: core_running=true conns=0 down=0
+gui-trace: core_running=true conns=0 down=0
+gui-trace: core_running=true conns=0 down=0
+gui-trace: core_running=true conns=0 down=0
+gui-trace: core_running=true conns=0 down=0
+gui-trace: core_running=true conns=0 down=0
+gui-trace: core_running=true conns=0 down=0
+gui-trace: core_running=true conns=0 down=0
+gui-trace: core_running=true conns=0 down=0
+poll-trace: tick running=true starting=false pending=false conns=0 events=1
+poll-trace: connections ok: 3 rows
+gui-trace: core_running=true conns=3 down=0
+gui-trace: core_running=true conns=3 down=0
+gui-trace: core_running=true conns=3 down=0
+gui-trace: core_running=true conns=3 down=0
+gui-trace: core_running=true conns=3 down=0
+gui-trace: core_running=true conns=3 down=0
+gui-trace: core_running=true conns=3 down=0
+gui-trace: core_running=true conns=3 down=0
+gui-trace: core_running=true conns=3 down=0

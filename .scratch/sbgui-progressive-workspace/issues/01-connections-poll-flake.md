@@ -1,6 +1,6 @@
 # 连接页 0 行：不是偶发，也不是抓图竞态——轮询在启动后不久就停了
 
-Status: ready-for-agent
+Status: resolved
 Type: task
 
 ## 原始现象（2026-09-22 上午）
@@ -36,3 +36,16 @@ api rows: 3 [('127.0.0.1','8099'), ('127.0.0.1','8099'), ('127.0.0.1','8098')]
 ## 影响
 
 用户在内核确实在跑的时候打开连接页，看到的是"暂无活动连接"。同一条路径还喂概览页的流量数字与内存读数，以及日志页的实时性——如果确认是轮询停摆，这三页一起受影响。
+
+## Comments
+
+2026-09-23 结案。第一、二步的假设被探针证伪，第三步的"调用后拿到 0"也不成立；真实原因是**发布时机**，不是轮询停摆：
+
+- 探针（`CLIENT_POLL_TRACE=1`，引擎每条 tick + 每次 connections 抓取各打一行，GUI 快照侧每 400ms 打一行）显示：
+  - `poll` 一直在跑：`tick running=true …` 与 `connections ok: 0 rows` 循环出现；
+  - 同一时刻 API 已有 3 行，引擎也抓到了：`connections ok: 3 rows`；
+  - 但 GUI 在随后 3.6s 内仍打印 `conns=0`——快照还是旧值。
+- 根因：`poll()` 只在整轮结束时 publish，而 `/traffic`、`/memory` 是流式端点，各自要等约 1–1.5s 的第二个采样；`/proxies` 也在同一轮里。一轮 poll 要 3–4s，连接表因此永远滞后一个周期，抓图落在窗口内就是 0 行。
+- 修复：`poll(&shared)` 在每个刷新阶段完成后立即 `publish`（connections → traffic+memory → proxies），慢流不再拖住已经就绪的表。诊断探针保留为 `CLIENT_POLL_TRACE` 门控接缝。
+- 验证：`PAGES=connections SIZES=1440x900 DEMO_CORE=…` 连跑 3 轮，每轮 `api rows: 3`、引擎 `connections ok: 3 rows`、GUI `conns=3` 连续 9 个采样，3/3 截图渲染出行；证据在 `.scratch/sbgui-g1-fix-{1,2,3}/`（含 `.sbgui.log`）与 `.scratch/sbgui-g1-before/1440x900-connections-after-fix.png`。
+
