@@ -769,6 +769,31 @@ L2（WSL，`-p sbctl -p client-core -p sbtui`）同样 fmt 0 / clippy 0 / **364 
 (b) `ClientTemplate` 轴（`Standard` 必须字节复现今天）+ G3 规则集及其 `minimal` 内联孪生
 （这两件是同一件事：孪生列表是模板的数据）。
 
+### 已验证状态（2026-09-23 收尾）
+
+Phase 7（G8）与 Phase 8（G17）之外，本轮**没有再动代码**；两批新门在两个平台各自复跑：
+Windows 宿主与 WSL(L2) 都是 fmt 0 / clippy 0 / **366 通过 0 失败**（`-p sbctl --lib` 179、
+cli 91、client-core 71、sbtui 18、其余为零散目标）。10 个本地提交在 `refactor/structure`，
+**未推送**。
+
+### 下一轮从 Phase 3 接手的三条实测事实
+
+省掉重复推导：
+
+1. **§Phase 3(3) 的真实成本是签名，不是算法。** 内核二进制路径只到得了
+   `regenerate(store, config, sing_box_bin, update_active_config)`，而选择客户端 profile 的
+   地方在它调用的 **公开函数** `generated_artifacts(config, root)` 里（`artifacts.rs:276`）。
+   要让 `resolve_full_profile` 拿到内核，必须把 `Option<&Path>` 穿进这个 pub 函数，
+   牵连 `regenerate` / `apply_config_transaction` / 金标准测试 / `tests/clash_mihomo.rs` 等调用点。
+   并且它必须是 `(config, 已装内核 minor)` 的**纯函数**——否则安装事务的
+   `artifacts_changed` 比较会抖动（这条是 §Phase 3(3) 自己写的，实测确认没有现成 seam 可走）。
+2. **服务端没有"已装内核版本"的可复用 helper。** `src/update.rs:719` 那个 `--version` 探的是
+   **sbctl 候选二进制**，不是 sing-box。§Phase 3(4) 的告警要自己新增一次 `sing-box version`
+   调用与解析；`crates/client-core/src/core.rs:193-205` 已经在解析同一个字符串
+   （`"sing-box version 1.14.1"`），格式可照抄但不能直接复用（跨 crate，且客户端那份是运行时依赖）。
+3. **注册表存的是 minor（`"1.14"`），内核报的是完整版本（`1.14.1`）。** 比较"已装版本是否
+   高于表顶"必须按 `(major, minor)` 归一，否则 `1.14.1 > 1.14` 会在每次正常安装后误报。
+
 
 ## 12. 收尾里程碑：什么只能证明"尚未失败"
 
