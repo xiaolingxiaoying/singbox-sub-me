@@ -59,6 +59,16 @@ impl Drop for PendingOperation {
     }
 }
 
+/// Diagnostic seam for the poll-stall investigation: with `CLIENT_POLL_TRACE`
+/// set, the engine prints one line per poll tick and per connections fetch, so
+/// a frozen table can be attributed to this loop or to the UI's snapshot
+/// reader. Unset (the default) it does no work beyond one env lookup.
+fn poll_trace(message: impl FnOnce() -> String) {
+    if std::env::var_os("CLIENT_POLL_TRACE").is_some() {
+        eprintln!("poll-trace: {}", message());
+    }
+}
+
 /// Owns the long-lived client state and presents a small command/seam to UIs.
 pub struct ClientController {
     command_tx: mpsc::UnboundedSender<ClientCommand>,
@@ -282,7 +292,7 @@ impl Engine {
                     // A stop/exit must never wait for a stalled API request.
                     tokio::select! {
                         command = command_rx.recv() => command,
-                        _ = self.poll() => { self.publish(&shared); continue; }
+                        _ = self.poll(&shared) => { self.publish(&shared); continue; }
                     }
                 }
             };
@@ -997,7 +1007,26 @@ impl Engine {
         Ok(())
     }
 
-    async fn poll(&mut self) {
+    /// Refreshes telemetry and publishes after each stage.
+    ///
+    /// The streaming endpoints (`/traffic`, `/memory`) each block for about a
+    /// second while they wait for their second sample, so one full poll takes
+    /// seconds. Publishing only at the end made the connection table lag a
+    /// whole cycle behind the API: the core had three live connections, the
+    /// refresh had already stored them, and the window still showed the
+    /// previous snapshot. Each completed stage is therefore published on its
+    /// own, so a slow stream cannot delay a table that is already up to date.
+    async fn poll(&mut self, shared: &Arc<Mutex<ClientSnapshot>>) {
+        poll_trace(|| {
+            format!(
+                "tick running={} starting={} pending={} conns={} events={}",
+                self.snapshot.core_running,
+                self.snapshot.starting,
+                self.pending.is_some(),
+                self.snapshot.connections.connections.len(),
+                self.snapshot.events.len(),
+            )
+        });
         // Tail even while stopped, so a failed startup leaves its sing-box
         // diagnostics visible in the log view.
         self.tail_core_log();
@@ -1011,6 +1040,7 @@ impl Engine {
             if now.duration_since(self.last_connections_at) >= CONNECTIONS_EVERY {
                 self.last_connections_at = now;
                 self.refresh_connections().await;
+                self.publish(shared);
             }
             if now.duration_since(self.last_traffic_at) >= TRAFFIC_EVERY {
                 self.last_traffic_at = now;
@@ -1019,12 +1049,14 @@ impl Engine {
                     Ok(memory) => self.snapshot.memory_used = memory,
                     Err(_) => self.snapshot.memory_used = 0,
                 }
+                self.publish(shared);
             }
             if now.duration_since(self.last_proxies_at) >= PROXIES_EVERY {
                 self.last_proxies_at = now;
                 if let Err(error) = self.refresh_proxies().await {
                     self.note(format!("刷新代理组失败: {error}"));
                 }
+                self.publish(shared);
             }
             if self.pending.is_none()
                 && self.auto_update_due()
@@ -1073,6 +1105,7 @@ impl Engine {
     async fn refresh_connections(&mut self) {
         match self.api.connections().await {
             Ok(snapshot) => {
+                poll_trace(|| format!("connections ok: {} rows", snapshot.connections.len()));
                 self.snapshot.total_upload = snapshot.upload_total;
                 self.snapshot.total_download = snapshot.download_total;
                 self.snapshot.active_connections = snapshot.connections.len();
@@ -1083,7 +1116,10 @@ impl Engine {
                 ));
                 self.snapshot.connections = snapshot;
             }
-            Err(error) => self.note(format!("刷新连接失败: {error}")),
+            Err(error) => {
+                poll_trace(|| format!("connections failed: {error}"));
+                self.note(format!("刷新连接失败: {error}"))
+            }
         }
     }
 

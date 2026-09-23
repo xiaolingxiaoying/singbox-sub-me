@@ -39,6 +39,7 @@ MSYS_NO_PATHCONV=1 "$DOCKER" run --rm \
   -e SBGUI_SHOW_EXIT_CONFIRM="${SBGUI_SHOW_EXIT_CONFIRM:-}" \
   -e SBGUI_LANG="${SBGUI_LANG:-}" \
   -e SBGUI_SETTINGS_SECTION="${SBGUI_SETTINGS_SECTION:-}" \
+  -e CLIENT_POLL_TRACE="${CLIENT_POLL_TRACE:-}" \
   "$IMAGE" bash -c 'tr -d "\r" < /src/scripts/sbgui-shot/inside.sh > /tmp/inside.sh; exec bash /tmp/inside.sh'
 
 echo "=== $OUT_REL ==="

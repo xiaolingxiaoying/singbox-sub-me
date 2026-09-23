@@ -146,6 +146,14 @@ fn main() {
                                 };
                                 entity.update(cx, |view: &mut Sbgui, cx| {
                                     let snapshot = view.controller.snapshot();
+                                    if std::env::var_os("CLIENT_POLL_TRACE").is_some() {
+                                        eprintln!(
+                                            "gui-trace: core_running={} conns={} down={}",
+                                            snapshot.core_running,
+                                            snapshot.connections.connections.len(),
+                                            snapshot.download_speed,
+                                        );
+                                    }
                                     // Repainting unconditionally kept a window
                                     // redrawing, decoding icons and resampling
                                     // the graph four times a second while nothing
