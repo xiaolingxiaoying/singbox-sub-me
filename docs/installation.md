@@ -10,9 +10,15 @@
 对应工件均可公开访问。
 
 ```bash
-wget -O /tmp/sbctl-install.sh https://raw.githubusercontent.com/xiaolingxiaoying/singbox-sub-me/master/scripts/install.sh
+curl -fL -o /tmp/sbctl-install.sh \
+  https://github.com/xiaolingxiaoying/singbox-sub-me/releases/latest/download/install.sh
 bash /tmp/sbctl-install.sh
 ```
+
+取**发布工件**里的 `install.sh`，不要从 `raw.githubusercontent.com` 拿仓库中的那一份：
+仓库里的是模板，`SBCTL_PUBLIC_KEY_PEM` 还是 `@SBCTL_RELEASE_PUBLIC_KEY_PEM@` 占位符，
+由 `scripts/prepare-installer.py` 在打包时才替换成生产公钥。用模板安装会得到
+「此安装脚本尚未配置生产公钥」并退出 2 —— 这是有意的，签好名的脚本才是信任锚。
 
 首次无参数运行会进入中文引导菜单：选择 Direct、External proxy 或 IP fallback，再填写订阅
 域名/IP、可选代理连接主机、网卡和 Reality 伪装 SNI；随后逐项确认需要启用的协议。协议端口

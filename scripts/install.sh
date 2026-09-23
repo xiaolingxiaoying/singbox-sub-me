@@ -124,7 +124,14 @@ case "$artifact_url" in
 esac
 curl --fail --location --silent --show-error "$artifact_url" >"$work_dir/sbctl"
 printf '%s  %s\n' "$expected_sha" "$work_dir/sbctl" | sha256sum --check --status
-install -m 0755 "$work_dir/sbctl" /usr/local/bin/sbctl
+# Replace by rename, never in place: `install`/`cp` truncates the target, and a
+# running sbctl is exactly the case during a re-install or an upgrade - writing
+# over a live executable fails with ETXTBSY. A rename swaps the directory entry,
+# the old inode stays alive for the running process, and the new one is what
+# every later exec sees. `sbctl` itself does the same thing in Rust
+# (src/lifecycle.rs).
+install -m 0755 "$work_dir/sbctl" /usr/local/bin/.sbctl.new
+mv -f /usr/local/bin/.sbctl.new /usr/local/bin/sbctl
 ln -sf /usr/local/bin/sbctl /usr/local/bin/ly
 green "sbctl 已安装；快捷方式：ly"
 
