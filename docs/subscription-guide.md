@@ -58,8 +58,9 @@ sbctl 在同一份节点模型上生成多种订阅格式。所有链接都在 `
 
 ## mihomo 差异（1.18 → 1.19）
 
-- `clash.yaml` 使用 rule-providers（远程 `.mrs`，`@meta` 分支：geosite/geoip 的 cn 与 private 四个规则集）+ 三组代理组（🚀节点选择 / ♻️自动选择 / 🎯全球直连）+ AI 域名分流；需要 mihomo ≥1.14（rule-set）。
+- `clash.yaml` 使用 rule-providers（远程 `.mrs`，`@meta` 分支：geosite/geoip 的 cn 与 private 四个规则集）+ 三组代理组（🌍选择代理节点 / ♻️自动选择 / 🎯全球直连）+ AI 域名分流；需要 mihomo ≥1.14（rule-set）。
 - `clash-1.18.yaml` 保留内置 GEOIP,CN 直连写法，不引用任何远程规则集，适合旧内核或不想加载远程规则的场景。
+- 两份 Clash 工件都带 `sniffer: {enable: true, sniffing: [http, tls, quic]}`：mihomo 默认**关闭**嗅探（`Enable: false` 且不选任何协议），不写就没有"从 TLS SNI / HTTP Host 还原真实域名再分流"的能力。键名与取值是用 CI 同一 pin 的内核（v1.19.30）实测出来的：`domain`、`dns` 会被直接拒绝（`not find the sniffer[domain]`），`override-destination` 故意不写（它会改变远端服务器看到的目的地），`dns-hijack` 也不写（它属于 `tun:`，默认已是 `0.0.0.0:53`，从订阅里输出 `tun:` 会覆盖客户端自己的 TUN 设置）。
 - 1.19.6 起配置内所有本地路径被限制在 workdir 内：rule-providers 的 `path` 均为相对路径 `./ruleset/*.mrs`，符合该限制。
 
 ## Shadowrocket 适配说明

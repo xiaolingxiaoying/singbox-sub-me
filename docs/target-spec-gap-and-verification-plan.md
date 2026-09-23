@@ -252,7 +252,7 @@ canonical nodes → template（内置）→ client_rule_profile（是否用 CDN�
 | 差距 | 精确证明 | 腿 |
 |---|---|---|
 | G1 | 金标准：`Standard` 字节不变；`--client-template split` 增加组与规则集；`sbctl config override show` 列出生效模板 | U, C, D |
-| G2 | 逐 minor 断言 `action:sniff` 及其门控键能被真核 `check` 接受（`tests/version_profiles.rs`）；断言 Clash YAML 有 `sniffers:` / `dns-hijack` 且过 `mihomo -t`（`tests/clash_mihomo.rs`） | U, C, D |
+| G2 | Clash 侧：两份工件都带 `sniffer.enable: true` + `sniffing: [http, tls, quic]`、各只出现一次，且**不含**被真核拒绝或不该由订阅写出的键（U：`both_clash_artifacts_enable_the_sniffers_the_pinned_core_accepts`）；pin 住的 v1.19.30 `mihomo -t` 接受两份工件（C：`tests/clash_mihomo.rs`）。sing-box 侧可表达空间只有"有/无"两态，现有写法已经正确（§4.2），所以不再有逐 minor 门控键要断言 | U, C |
 | G3 | 按 模板 × `client_rule_profile` 断言 `route.rule_set[]` / `rule-providers:`；**`minimal` 必须保留内联规则**（针对 `singbox.rs:159`、`clash.rs:138` 那个回归） | U, C |
 | G3 可达性 | 规则 CDN 在国内、以及手机走蜂窝网的实际拉取 | **仅 V** |
 | G4 | 按模板 + 具名节点的金标准；真核逐 minor `check`；组名能 round-trip 过 `client-core` 的代理发现 | U, C, D |
@@ -695,10 +695,33 @@ G6 的 header 门在 Linux 上同样为绿，且**在 mihomo 之前**没有让�
    这条基线是 Phase 2 PR(c)（Clash `sniffers` / `dns-hijack`）的前置判据——没有它，改完再跑就是
    单变量对照缺失（§9 的排期陷阱）。CI 的 `mihomo-profiles` 作业用的是同一个 pin。
 
+### Phase 2 PR(c) 的 Clash 半边：G2 嗅探（已完成，但**结论与原计划不同**）
+
+计划写的"顶层 `sniffers: [domain, http, tls, quic]` + `dns-hijack: any:53`，legacy 用 `sniff: true`"
+**三处全错**，被 CI 同一 pin 的真核（mihomo v1.19.30）逐项否掉，证据与判据见 §4.3。落地为两份 Clash
+工件统一 `sniffer: {enable: true, sniffing: [http, tls, quic]}`；`dns-hijack` 与
+`override-destination` 都不写，理由写在 `render/clash.rs::clash_sniffer` 的注释里（前者属于 `tun:`
+且默认已是 `0.0.0.0:53`，从订阅输出 `tun:` 会覆盖客户端自己的设置；后者改变远端看到的目的地，
+不该静默代客户决定）。
+
+- **金标准如期判红**，且只有两份 Clash 移动，其余 11 份逐字节不变——这正是 ADR-0021 要的形状：
+  冻结的工件没动，客户端面的全量配置动了，且是一次**有记录的**产品决定。
+- **真核门通过**：`MIHOMO_BIN=~/bin/mihomo cargo test --test clash_mihomo -- --ignored` →
+  `mihomo accepted subscription-clash.yaml` + `subscription-clash-1.18.yaml`。这条门的判据在改动前
+  刚建立为绿（单变量对照成立），并且已知它**能**拒绝错的 sniffer 名，所以"接受"这次有信息量。
+- 宿主 fmt 0 / clippy 0 / `cargo test -p sbctl --lib` 173 全绿；Linux(WSL) `-p sbctl -p client-core
+  -p sbtui` **358 全绿**。
+- 新增 `both_clash_artifacts_enable_the_sniffers_the_pinned_core_accepts`，除了断言块存在且只出现一次，
+  还断言两份工件**不含** `dns-hijack` / `sniffers:` / `override-destination` / `- domain` / `- dns`
+  ——即把这次纠正本身钉住，防止有人照"网上常见写法"改回去。
+- 记录一条既有测试的门失效风险：`config::tests::concurrent_reads_observe_only_complete_state_versions`
+  在宿主全量跑 + WSL 并发构建时出现过一次 `PermissionDenied`（单独重跑 10/10、全量重跑 3/3 均绿）。
+  与本仓改动无关，已开 ticket 28 处理它的重试构造，不当成已通过。
+
 ### Phase 2 剩余
 
-(b) `ClientTemplate` 轴（`Standard` 必须字节复现今天）、(c) Clash 顶层 `sniffers`/`dns-hijack`
-+ 规则集的内联孪生（真核基线已就绪）。
+(b) `ClientTemplate` 轴（`Standard` 必须字节复现今天）+ G3 规则集及其 `minimal` 内联孪生
+（这两件是同一件事：孪生列表是模板的数据）。
 
 
 ## 12. 收尾里程碑：什么只能证明"尚未失败"
