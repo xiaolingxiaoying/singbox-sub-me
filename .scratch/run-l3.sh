@@ -27,13 +27,19 @@ wsl -d Ubuntu-22.04 -- bash -lc \
   >>"$out" 2>&1
 say "build_prod_exit=$?"
 
+say "== building the sbtui client artifact in WSL (the acceptance image now needs it)"
+wsl -d Ubuntu-22.04 -- bash -lc \
+  '. "$HOME/.cargo/env"; cd ~/src/singbox-sub-me && cargo build --release -p sbtui --target-dir /mnt/c/Users/ranly/Documents/singbox-sub-me/target-linux' \
+  >>"$out" 2>&1
+say "build_sbtui_exit=$?"
+
 say "== rsync (source may have moved) then building the test-signing fixture binary"
 wsl -d Ubuntu-22.04 -- bash -lc \
   'rsync -a --delete --exclude target --exclude target-* --exclude .git --exclude node_modules /mnt/c/Users/ranly/Documents/singbox-sub-me/ ~/src/singbox-sub-me/ && . "$HOME/.cargo/env" && cd ~/src/singbox-sub-me && cargo build --release --features sbctl/test-signing --target-dir /mnt/c/Users/ranly/Documents/singbox-sub-me/target-fixtures' \
   >>"$out" 2>&1
 say "build_fixture_exit=$?"
 
-for pair in "target-linux/release/sbctl" "target-fixtures/release/sbctl"; do
+for pair in "target-linux/release/sbctl" "target-linux/release/sbtui" "target-fixtures/release/sbctl"; do
   if [ -f "$root/$pair" ]; then
     say "artifact ok: $pair ($(file "$root/$pair" 2>/dev/null | cut -c1-90 || echo unknown))"
   else
@@ -44,6 +50,7 @@ done
 say "== running tests/acceptance/run.sh (debian:12-slim, ubuntu:22.04, ubuntu:24.04)"
 SBCTL_ARTIFACT=./target-linux/release/sbctl \
   SBCTL_TEST_ARTIFACT=./target-fixtures/release/sbctl \
+  SBCTUI_ARTIFACT=./target-linux/release/sbtui \
   sh tests/acceptance/run.sh >>"$out" 2>&1
 say "run_sh_exit=$?"
 
