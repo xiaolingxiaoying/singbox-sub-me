@@ -330,9 +330,9 @@ Linux 上构建 `sbgui` 会启用 GPUI 的 X11 后端（Wayland 桌面经 XWayla
 `libxkbcommon-x11-dev`、`libgl1-mesa-dev`、`libegl1-mesa-dev`、`libvulkan-dev`、`libasound2-dev`。
 只构建服务端（`-p sbctl`）或终端客户端（`-p sbtui`）不需要这些库。
 
-功能（两个客户端一致）：订阅导入与自动归一化、代理组节点切换与延迟测试
-（含内核上报的节点延迟）、系统代理开关、TUN 模式、实时速率、内核内存与
-运行版本、连接表、日志与分流规则查看、内核下载与版本管理。
+功能（两个客户端基本一致，规则视图的呈现方式不同）：订阅导入与自动归一化、代理组节点
+切换与延迟测试（含内核上报的节点延迟）、系统代理开关、TUN 模式、实时速率、内核内存与
+运行版本、连接表、日志查看、入站与分流规则查看（`sbtui` 为独立「入站」页）、内核下载与版本管理。
 控制通道在每次启动时改写为独立的本机 clash_api 端口和随机认证秘密，避免控制其他代理实例。
 
 详见 [sbtui 说明](crates/sbtui/README.md) 与 [sbgui 说明](crates/sbgui/README.md)；

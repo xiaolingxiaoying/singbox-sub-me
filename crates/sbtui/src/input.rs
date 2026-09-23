@@ -57,7 +57,7 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
         KeyCode::BackTab => app.tab = app.tab.previous(),
         KeyCode::Left if app.tab == Tab::Proxies => move_proxy_group(app, -1),
         KeyCode::Right if app.tab == Tab::Proxies => move_proxy_group(app, 1),
-        KeyCode::Char(ch @ '1'..='5') => {
+        KeyCode::Char(ch @ '1'..='6') => {
             if let Some(tab) = Tab::from_index(ch as usize - '1' as usize) {
                 app.tab = tab;
             }

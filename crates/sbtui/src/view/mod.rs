@@ -218,7 +218,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         Line::from(""),
         Line::from(vec![
             Span::styled("全局  ", Style::default().fg(MUTED)),
-            Span::styled("Tab / 1–5", Style::default().fg(TEXT)),
+            Span::styled("Tab / 1–6", Style::default().fg(TEXT)),
             Span::styled(" 切换页面  ·  ", Style::default().fg(MUTED)),
             Span::styled("o", Style::default().fg(TEXT)),
             Span::styled(" 切换出站  ·  ", Style::default().fg(MUTED)),
@@ -453,8 +453,8 @@ mod render_tests {
         }
     }
 
-    /// The rules view is a toggle inside the Logs tab rather than its own page,
-    /// which makes it the easiest thing in the client to lose by accident.
+    /// The rules view is its own tab (index 5, titled 入站); the Logs tab's `r`
+    /// jumps to it and `r` there jumps back.
     #[tokio::test]
     async fn the_logs_tab_switches_to_the_rules_view() {
         let mut snapshot = dense_snapshot();

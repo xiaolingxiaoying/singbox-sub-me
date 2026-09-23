@@ -1635,9 +1635,10 @@ mod tests {
         engine.api = ClashApi::new(&base);
         engine.snapshot.core_running = true;
         engine.last_connections_at = Instant::now() - CONNECTIONS_EVERY;
+        let shared = Arc::new(Mutex::new(ClientSnapshot::default()));
 
         {
-            let poll = engine.poll();
+            let poll = engine.poll(&shared);
             tokio::pin!(poll);
             assert!(
                 tokio::time::timeout(Duration::from_millis(80), poll.as_mut())
@@ -1648,7 +1649,7 @@ mod tests {
         }
         assert_eq!(engine.snapshot.active_connections, 0);
 
-        engine.poll().await;
+        engine.poll(&shared).await;
         assert_eq!(
             engine.snapshot.active_connections, 3,
             "a cancelled poll must not spend the slot without fetching \
@@ -1672,7 +1673,8 @@ mod tests {
         engine.snapshot.core_running = true;
         let seeded = Instant::now() - CONNECTIONS_EVERY;
         engine.last_connections_at = seeded;
-        engine.poll().await;
+        let shared = Arc::new(Mutex::new(ClientSnapshot::default()));
+        engine.poll(&shared).await;
         assert!(
             engine.last_connections_at > seeded,
             "a refused request must still consume the slot, or every tick \
