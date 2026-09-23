@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use tempfile::TempDir;
 
+#[cfg(unix)]
+use crate::fixture::write_systemctl_restart_race_fixture;
 use crate::fixture::{
     command_fixture, corrupt_manifest_signature, filesystem_snapshot, initialize_update_fixture,
     sing_box_check_fixture, write_lib_signed_manifest, write_managed_file, write_release_manifest,
@@ -155,6 +157,64 @@ fn failed_update_health_check_restores_the_known_good_binaries_and_keeps_a_rollb
         old_artifact
     );
     assert!(rollback_point.join("etc/sbctl/config.toml").is_file());
+}
+
+/// The VPS 2026-09-22 P0 regression: a candidate that passes `sing-box check`
+/// but whose service exits immediately must fail the update, restore the
+/// known-good binary, and observe the restored unit as stable. The systemctl
+/// stub reports active once right after `restart` — the `Type=simple` fork
+/// window — so a single `is-active` probe would commit the broken candidate
+/// while `Restart=on-failure` loops it.
+#[cfg(unix)]
+#[test]
+fn standalone_sing_box_update_rolls_back_a_candidate_that_crashes_on_start() {
+    let fixture = TempDir::new().expect("temporary root is created");
+    initialize_update_fixture(&fixture);
+    let candidate = sing_box_check_fixture(&fixture, true, &[]);
+    let mut contents = fs::read(&candidate).expect("candidate is readable");
+    contents.extend_from_slice(b"\n# CRASHES-ON-RUN\n");
+    fs::write(&candidate, &contents).expect("candidate is written");
+
+    write_systemctl_restart_race_fixture(&fixture, "CRASHES-ON-RUN");
+    let old_sing_box = b"known-good sing-box";
+    write_managed_file(&fixture, "usr/local/bin/sing-box", old_sing_box);
+    write_managed_file(&fixture, "usr/local/bin/sbctl", b"known-good sbctl");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "sing-box",
+            "update",
+            "--artifact",
+            candidate.to_str().expect("candidate path is UTF-8"),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("service health check failed"));
+
+    assert_eq!(
+        fs::read(fixture.path().join("usr/local/bin/sing-box")).expect("old sing-box is restored"),
+        old_sing_box
+    );
+    assert!(fixture.path().join(ROLLBACK_ROOT).exists());
+    assert_eq!(
+        fs::read_to_string(fixture.path().join(".systemctl-unit-state"))
+            .expect("the stub recorded the unit state"),
+        "stable",
+        "the rollback must restart the unit on the restored binary"
+    );
+    for probe in 0..3 {
+        let status = std::process::Command::new(fixture.path().join("usr/bin/systemctl"))
+            .args(["is-active", "--quiet", "sing-box.service"])
+            .status()
+            .expect("the stub runs");
+        assert!(
+            status.success(),
+            "the restored unit must stay active (probe {probe})"
+        );
+    }
 }
 
 #[test]

@@ -490,6 +490,60 @@ pub(crate) fn write_systemctl_health_failing_fixture(_fixture: &TempDir) {
     }
 }
 
+/// A systemctl stub whose unit behaves like `Type=simple` with
+/// `Restart=on-failure`: right after `restart` the first `is-active` probe
+/// reports active (the fork window), and later probes report the crash loop
+/// whenever the managed binary contains `crash_marker`. This reproduces the
+/// standalone-update false success without real systemd. The unit state and
+/// probe counter are written under the fixture root as
+/// `.systemctl-unit-state` and `.systemctl-unit-probes`.
+#[cfg(unix)]
+pub(crate) fn write_systemctl_restart_race_fixture(fixture: &TempDir, crash_marker: &str) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = fixture.path().join("usr/bin/systemctl");
+        fs::create_dir_all(path.parent().expect("systemctl has a parent"))
+            .expect("systemctl directory is created");
+        let script = format!(
+            "#!/bin/sh\n\
+             root='{}'\n\
+             marker='{}'\n\
+             case \"$1\" in\n\
+               restart)\n\
+                 if grep -q \"$marker\" \"$root/usr/local/bin/sing-box\" 2>/dev/null; then\n\
+                   printf 'crash' > \"$root/.systemctl-unit-state\"\n\
+                 else\n\
+                   printf 'stable' > \"$root/.systemctl-unit-state\"\n\
+                 fi\n\
+                 printf '0' > \"$root/.systemctl-unit-probes\"\n\
+                 exit 0\n\
+                 ;;\n\
+               is-active)\n\
+                 probes=$(cat \"$root/.systemctl-unit-probes\" 2>/dev/null || printf '0')\n\
+                 probes=$((probes + 1))\n\
+                 printf '%s' \"$probes\" > \"$root/.systemctl-unit-probes\"\n\
+                 if [ \"$(cat \"$root/.systemctl-unit-state\" 2>/dev/null)\" = stable ]; then\n\
+                   exit 0\n\
+                 fi\n\
+                 if [ \"$probes\" -le 1 ]; then\n\
+                   exit 0\n\
+                 fi\n\
+                 exit 1\n\
+                 ;;\n\
+               *)\n\
+                 exit 0\n\
+                 ;;\n\
+             esac\n",
+            fixture.path().display(),
+            crash_marker
+        );
+        fs::write(&path, script).expect("systemctl fixture is written");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+            .expect("systemctl fixture is executable");
+    }
+}
+
 /// Why `serve` refuses a Direct bind: production hosts name the missing
 /// socket unit, other platforms name the unsupported socket activation.
 pub(crate) fn refusal_message() -> &'static str {

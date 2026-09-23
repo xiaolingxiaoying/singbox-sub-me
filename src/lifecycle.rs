@@ -45,7 +45,7 @@ fn sing_box_unit() -> &'static str {
 /// high ports and never install this socket.
 fn sbctl_unit(direct: bool) -> String {
     let socket_dependency = if direct {
-        "\nRequires=sbctl-http.socket\nAfter=sbctl-http.socket\nSockets=sbctl-http.socket"
+        "\nRequires=sbctl-http.socket\nAfter=sbctl-http.socket"
     } else {
         ""
     };
@@ -136,9 +136,16 @@ pub fn install_checked_sing_box(root: &Path, candidate: &Path) -> Result<(), Con
     Ok(())
 }
 
+/// Restarts the data plane and requires it to survive the same observation
+/// window as an install. A single `is-active` probe is not enough: `Type=simple`
+/// reports active the moment the process forks, so a candidate that passes
+/// `sing-box check` and then exits immediately would be committed as a healthy
+/// update while `Restart=on-failure` loops it. The standalone `sbctl sing-box
+/// update` path used to do exactly that; sharing the window with
+/// `restart_services` is what makes its rollback trigger.
 pub fn restart_sing_box_service(root: &Path) -> Result<(), String> {
     systemctl(root, &["restart", "sing-box.service"])?;
-    systemctl(root, &["is-active", "--quiet", "sing-box.service"])
+    wait_for_stable_activation(root, "sing-box.service")
 }
 
 pub fn remove_managed_sing_box(root: &Path) -> Result<(), String> {
@@ -1003,5 +1010,26 @@ mod tests {
         rollback_fresh_installation(root.path(), PreexistingState::default());
 
         assert!(!root.path().join("var/lib/sbctl").exists());
+    }
+
+    /// `Sockets=` is not a valid `[Unit]` key: Ubuntu 22.04 systemd logs
+    /// `Unknown key name 'Sockets' in section 'Unit', ignoring.` and the unit
+    /// no longer passes a warning-free `systemd-analyze verify`. The socket
+    /// unit already names the service (`Service=sbctl.service`), and the
+    /// service declares the dependency explicitly.
+    #[test]
+    fn the_direct_service_unit_uses_valid_dependency_keys_only() {
+        let direct = sbctl_unit(true);
+        assert!(direct.contains("Requires=sbctl-http.socket"));
+        assert!(direct.contains("After=sbctl-http.socket"));
+        assert!(
+            !direct.contains("Sockets="),
+            "Sockets= belongs to no valid [Unit] key and is ignored by systemd"
+        );
+
+        let external = sbctl_unit(false);
+        assert!(!external.contains("Requires=sbctl-http.socket"));
+        assert!(!external.contains("After=sbctl-http.socket"));
+        assert!(!external.contains("Sockets="));
     }
 }
