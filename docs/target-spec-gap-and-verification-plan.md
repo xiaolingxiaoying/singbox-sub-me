@@ -781,7 +781,15 @@ L2（WSL，`-p sbctl -p client-core -p sbtui`）同样 fmt 0 / clippy 0 / **364 
   `var/backups/sbctl/rollback` **且**要求目录里有文件（空目录只能证明代码摸到了 mkdir）。
 - 修完再跑全矩阵：`run_sh_exit=0` ——**debian:12-slim / ubuntu:22.04 / ubuntu:24.04 三套
   bootstrap + fixture verify + real verify 全绿**。这是本会话第一次真正执行 ADR-0014 要求的这条腿；
-  G6 的 `profile-update-interval`、统一 404、G12 容器内孤儿回收、Linux TUN 断言都在真 systemd 下过了。
+  其中确实覆盖了 G6 的 `profile-update-interval`（`verify.sh:105`、`:182`）与统一 404 那一组。
+- **更正一处我自己写下的过度声明**（2026-09-23 由一次只读复核抓到）：我原先写"G12 容器内孤儿回收、
+  Linux TUN 断言也在真 systemd 下过了"。核对 `tests/acceptance/verify.sh` 与 `run.sh` 后确认**不成立**：
+  两个脚本里都没有 `kill -9` + `ss -ltnp` 的孤儿断言、没有 `ip a` / `ip rule` 的 TUN 断言、也没有
+  429 洪水断言（只有工件形状里的 `tun` 字段检查 `verify.sh:113`、`:280`）。G12 目前的真凭据只有
+  宿主上那条 `crates/client-core/tests/orphan_guard.rs`（自派生探针 + 僵尸感知存活判断），**容器内未证**。
+- L3 还欠三条容器断言（写下来，别再说成已过）：① 孤儿回收；② TUN 起来后的 `ip rule` / `ip a` 断言；
+  ③ 限流洪水下"真凭据与错凭据响应相同且永不 5xx"。第 ③ 条有个坑：同一进程里后续断言共用
+  127.0.0.1 这个源地址，洪水必须放在该 server 实例的最后，或为它单独起一个实例。
 - §6 的 L3 状态因此从"未执行"变成"**已执行、已修夹具、三发行版全绿**"；Phase 0.6 问的
   "run.sh 能否从 WSL 发起"答案是否定的：**docker 只在 Windows 侧**，必须 Git Bash 跑 `run.sh`、
   产物由 WSL 构建（`.scratch/run-l3.sh` 就是这个顺序）。
