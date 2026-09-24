@@ -30,7 +30,8 @@ pub(crate) async fn shutdown_signal() {
     }
     #[cfg(windows)]
     {
-        let mut close = tokio::signal::windows::ctrl_close().expect("the console close can be caught");
+        let mut close =
+            tokio::signal::windows::ctrl_close().expect("the console close can be caught");
         let mut break_event =
             tokio::signal::windows::ctrl_break().expect("the console break can be caught");
         tokio::select! {
