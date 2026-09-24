@@ -20,7 +20,7 @@ Blocked by: 02, 03, 04
 ## 验收标准
 
 - [x] 重复执行读取命令和订阅请求不会改变 accounting state mtime/content。
-- [x] `download=RX`、`upload=TX`、`total=RX+TX` 与当前 period 一致。
+- [x] ~~`download=RX`、`upload=TX`、`total=RX+TX` 与当前 period 一致。~~ —— **2026-09-24 更正**：`total` 语义不变；`upload=`/`download=` 改为按订阅客户端视角标签（`upload=RX`、`download=TX`），因为消费方把它们显示成"我上传/我下载"。勾选保留，因为这条当时确实按当时的定义验收过。
 - [x] pending-first-reset 返回零流量和首个 reset，而非 5xx。
 - [x] query 参数 credential 永远不能授权，所有错误 credential/path 均为 404。
 - [x] artifact 故障返回脱敏 503；state 故障降级为真实工件（200、无 `subscription-userinfo`、脱敏诊断）。

@@ -303,7 +303,11 @@ pub(crate) fn sing_box_full(
         for mut fields in
             sing_box_matchers(&spec, rule.matcher, rule.minimal_twin, remote_rule_sets)
         {
-            // Matchers first, verdict last: the key order the goldens pin.
+            // Matchers first, verdict last. Insertion order is deliberate for
+            // readability, but nothing pins it: the goldens compare
+            // `canonical_artifact`, which re-sorts JSON keys, so a reordering
+            // here cannot fail the suite. Only the four text artifacts are
+            // compared byte-for-byte.
             let object = fields
                 .as_object_mut()
                 .expect("a matcher expands into a JSON object");

@@ -298,7 +298,11 @@ manifest 还必须声明经过测试的 sing-box 版本兼容矩阵；安装或�
 - 状态缺失、损坏和 schema 不匹配；
 - 手工设置总已用流量；
 - 手工设置 RX/TX；
-- `download=RX`、`upload=TX`；
+- ~~`download=RX`、`upload=TX`~~ —— **2026-09-24 已作废**：`subscription-userinfo` 的两个键按
+  **订阅客户端的视角**输出（`upload=` 是 VPS 的 rx、`download=` 是 VPS 的 tx），因为消费方把它们显示成
+  "我上传/我下载了多少"。统计源仍是网卡 rx/tx。见 `docs/subscription-guide.md` 的
+  "`subscription-userinfo` 的字段含义"一节与 `src/subscription/serve.rs::subscription_userinfo` 注释。
+  本行保留只为说明这一带历史决定的来龙去脉，不要再据它"修正"代码。
 - 五协议四格式生成；
 - query credential 返回 404；
 - 工件缺失返回 503；账期状态故障降级为 200 且不含 `subscription-userinfo`；均不泄露 credential；

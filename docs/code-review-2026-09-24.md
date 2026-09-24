@@ -346,17 +346,79 @@ done
 
 
 
+## R16 — 一次"专挑我毛病"的复审，以及它抓到的东西
+
+方法：另派只读 subagent，任务是**推翻**本轮 8 个提交里的 10 条断言，而不是复核它们。
+结果分三类，全部由我自己回到 `file:line` 复核过。
+
+### 我写的代码里的真 bug（已修）
+
+| # | 缺陷 | 证据 | 修在哪 |
+| --- | --- | --- | --- |
+| 1 | `reap_child` 等 5 s，而 `SHUTDOWN_GRACE` 只有 3 s —— 退出路径上 UI 先放弃并报告"已干净关闭"，引擎还在等那个占着 mixed 口的进程。**这条修复恰好在它要防的那一档里不兑现**，而 `shutdown()` 的注释写着"blocks until the engine has reaped its child"是假的 | `controller.rs:45` vs 旧的 `:362` | `a3c68c9`（改成 `REAP_GRACE=2s` + 一条不变式测试） |
+| 2 | `vmess_outbound` 拿到的是"fragment 缺失就退化成 host"的 URI tag，于是**地址压过了面板在 `ps` 里起的名字**——与我提交信息写的"载荷为准、URI 兜底"正好相反 | `subscription.rs:377` + 调用点 | `a3c68c9`（只传 fragment，优先级 fragment > `ps` > 地址） |
+| 3 | 上一条的后果：同地址多节点 tag 全同，`summarize` 按 tag 去重 → **用户看到的节点比订阅里少**，而生成出的配置里仍是重复 tag（内核可能直接拒）。`raw` 与节点列表描述的不是同一套东西 | `subscription.rs:222-223` | `a3c68c9`（合并前统一改名，`same_host_nodes_keep_their_names_and_all_survive`） |
+| 4 | `verify.ps1` 的 `Deliver-Binaries` 只建 `…\shots`，不建父目录；而每条腿开头都 `revert`，所以在全新快照下第一条二进制拷贝就失败并中止整腿。L5 从没跑过，因此没人知道 | `scripts/winvm/verify.ps1` | `d07aa37` |
+| 5 | 同一脚本里 `& vmrun @a 2>&1` 在 `$ErrorActionPreference='Stop'` 下把原生命令的 stderr 升级成 `NativeCommandError`，于是 `-AllowFail` 形同不存在，一条无害提示就能掀掉整腿 | 同上 | `d07aa37` |
+
+### 我说得太满的地方（本轮已把话收回来）
+
+1. **"13 份金标准未动 ⇒ `Standard` 逐字节相同"不成立。** 金标准比的是
+   `canonical_artifact`（`artifacts.rs`），它把 `.json/.yaml` **按键重排**后比较，还会把反斜杠归一；
+   只有 4 份文本工件按字节比。所以准确说法是：**内容一致，字节一致只对文本工件成立**。
+   同时 `render/singbox.rs` 里那句"the key order the goldens pin"是错的，已就地改正并注明
+   "调顺序不会让门变红"。想让键序成为契约，需要一份按原始字节比对的快照——
+   这与 ticket 27（构建形态影响 `serde_json` 键序）是同一个结，不能只加一条测试。
+2. **"回退只要还原这四处"漏了三处仍在说旧方向的文档**：`docs/implementation-plan.md:301`、
+   `.scratch/sbctl-release/spec.md:96`、`:102`、`issues/05:23`。它们与已发布代码**直接矛盾**，
+   留着就是下一次"照文档把代码改回去"的引信。本轮用带日期的更正划掉旧写法并指向权威说明，
+   已勾选的验收项保留勾选并注明"当时确实是按当时的定义验收的"。
+3. **"没有人的部署会被静默改动"过头了。** 向导以前问不到 `client_template`，但**手改过
+   `config.toml` 写成 `global`/`split`** 的部署，升级前拿到的是 standard 字节、升级后立刻变成新内容 →
+   工件变化 → `apply_config_transaction` 判定 `artifacts_changed` → 真重启被管内核。影响面窄，但不是零。
+4. **"`minimal` 永不接触 CDN"对 Clash 侧不成立。** `minimal` 下 sing-box 走编译期内联孪生，
+   但 Clash 的 CN/private 孪生是 `GEOIP,CN` / `GEOIP,LAN`，mihomo 需要本地 GeoDB，缺了就去 GitHub 拉
+   ——这正是 `mihomo -t` 本轮超时的原因。要让这句话成真，Clash 侧也得改用编译期域名/CIDR 列表
+   （`CN_DOMAIN_SUFFIXES` 目前只在 sing-box 路径生效）。记入待办。
+5. **限流跳过的谓词选错了。** 我用"模式 == external-proxy"，属性其实是"**对端是回环**"：
+   `--mode ip-fallback` + 本机前置代理同样会全员共用一个桶。没直接换成 `peer.is_loopback()` 的原因很尴尬：
+   那会让 `tests/acceptance/verify.sh` 的洪水测试（正是从 127.0.0.1 打）静默失效——
+   一个被测试形状绑住的设计，而不是属性驱动的设计。要么给洪水测试换一个非回环源，要么把两者一起改。
+
+### 判定为"成立"的（记下来免得重查）
+
+- userinfo 方向本身、`parse_userinfo` 无二次翻转、`index_page`/`status` 不受影响；
+- 默认值仍是 `standard`、老 `config.toml` 缺字段落到 `standard`；
+- `regenerate` 的 prune 只在完整列表上运行（所有失败路径都在它之前 return），warn-only 安全；
+- external-proxy 下对端确实恒为回环，Direct/IpFallback 的限流没被削弱，既有洪水测试仍在真进 429 分支；
+- `deep_merge` 的搬迁是逐字的（唯一改动是 `serde_json::Value` → 导入别名，
+  以及 YAML 侧 `key == "rules"` → `key.as_str() == Some("rules")`，两种形态在 `rules` 键上判据一致）。
+
+## R17 — 由 R16 新开的待办
+
+1. Clash 侧 `minimal` 的内联孪生改成编译期列表（去掉 `GEOIP,*` 的 GeoDB 依赖）。
+2. 限流谓词从"模式"改成"对端是回环"，同时给 `verify.sh` 的洪水测试换一个非回环源。
+3. 键序若要成为契约：原始字节金标准 + ticket 27（构建形态决定键序）一并解决。
+4. `verify.ps1 all` 真跑一次；`release.yml` 的 sbgui/MSI 两个 job 在 runner 上跑一次。
+5. 复审还指出：`sbtui`/`sbgui` 需要接住"`parse_uri_list` 现在对全不可解析的列表直接报错"这一变化
+   （过去是空档案），下一批 GUI/TUI 对齐时一并验。
+
+
+
 ## 提交对应关系
 
 - `feat(winvm)`：R1
-- `fix(client-core)`：R3–R7；第二笔：L2 抓到的 unix 编译错误（R14）
+- `fix(client-core)` ×2：R3–R7 与 L2 抓到的 unix 编译错误（R14）
 - `fix(server)`：R8、R9
 - `fix(packaging)`：R2
 - `fix(release)`：R10
-- `feat(subscription)`：R13（G3 模板轴）；`test(subscription)`：真核门覆盖三档模板（R15 的 CDN 实测属这一批）
-- `docs`：本文件、`known-gaps-after-merge.md`、`verification-and-build-flow.md`、
-  `client-description.md` 与 `subscription-guide.md` 的现状回写
-- `chore(dev)`：`scripts/dev/fetch-sing-box-cores.sh`、`scripts/dev/wsl-real-cores.sh`
+- `feat(subscription)` + `test(subscription)`：R13、R15（模板轴 + 真核门覆盖三档模板 + CDN 实测）
+- `docs` ×3：R11/R12 的撤回与待办、`verification-and-build-flow.md` 现状、
+  `client-description.md` 与 `subscription-guide.md` 的口径补齐
+- `feat(clients)`：G4 覆写核心（含 R16 的 1/2/3 三条修复）
+- `fix(winvm)`：R16 的 4/5 两条
+- R16/R17 的文档更正（`implementation-plan.md`、`.scratch/sbctl-release/*`、`render/singbox.rs` 注释）随本批提交
+
 
 
 
