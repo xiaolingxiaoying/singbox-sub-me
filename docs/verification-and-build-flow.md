@@ -214,3 +214,17 @@ C:\Users\ranly\Documents\ChatGPT\singbox-sub-me-local\
 ```
 
 `target*` 已 `cargo clean`，仓库目录从约 12GB 降到约 225MB。
+
+## 2026-09-24 晚上的 L3 复跑（含 R31 那次服务端改动）
+
+`SRC_REV=HEAD` 从**已提交**的树导出三个 Linux 产物（`scripts/dev/build-acceptance-artifacts.sh`），
+再跑 `tests/acceptance/run.sh`：**12/12 `acceptance passed`，退出码 0**
+（debian:12-slim / ubuntu:22.04 / ubuntu:24.04 × verify-bootstrap / verify / verify-real / verify-client）。
+这一轮必须重跑的理由写在 R31：金标准测试原来会读主机有没有 IPv6 路由，
+而我把那个探测改成了参数 + fixture 显式钉住 `ipv4_only`——生成逻辑的**输出形态**因此可能在
+"有 IPv6 的机器"与"没有的机器"之间不同，只有真容器矩阵能证明两端都对。矩阵里跑的正是无 IPv6 的容器。
+
+同日 `cargo test --workspace`：**426 passed / 0 failed**，`clippy --workspace --all-targets
+-D warnings` 与 `fmt --all --check` 退出码 0。这条门是今天才发现的漏洞：
+G11/G12/G13 全在 `crates/*`，服务端一行没动，却正好落在**唯一一条没人跑的服务端门**的盲区里
+——单 crate 的门不等于工作区的门。
