@@ -134,6 +134,13 @@ pub(crate) const CONTENT_MAX: f32 = 1440.0;
 /// How many rows the rules and connections lists draw before asking.
 pub(crate) const LIST_PAGE: usize = 120;
 
+/// The horizontal inset every data table shares — header and rows alike. It was
+/// `14` on the header and `13` on the rules row, which is the 1px drift issue 02
+/// item 8 named: the column labels sat one pixel away from the values under them.
+/// One constant because the two must agree, and the gate in `components.rs`
+/// fails if either goes back to a literal.
+pub(crate) const TABLE_X: f32 = 14.0;
+
 // The subscriptions table at narrow width, as numbers that have to add up.
 // They were literals until issue 01 item 8: the columns summed past what an
 // 860-wide window can show, the `overflow_x_scroll` wrapper engaged, and the

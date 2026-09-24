@@ -20,7 +20,7 @@ use crate::state::{Page, Sbgui};
 use crate::theme::{
     AMBER, BLUE, BLUE_2, BODY, BORDER, CYAN, CYAN_DARK, DANGER, DISPLAY, FAINT, GAP_ITEM, LABEL,
     META, MINT, MUTED, PAD_SURFACE_X, PAD_SURFACE_Y, RADIUS, RADIUS_CONTROL, ROW_HOVER, ROW_X,
-    ROW_Y, SECTION, SURFACE, SURFACE_2, TEXT, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD,
+    ROW_Y, SECTION, SURFACE, SURFACE_2, TABLE_X, TEXT, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD,
 };
 use crate::tr;
 
@@ -437,7 +437,7 @@ pub(crate) fn table_head_row() -> gpui::Div {
     div()
         .w_full()
         .min_h(px(37.0))
-        .px(px(14.0))
+        .px(px(TABLE_X))
         .flex()
         .items_center()
         .gap(px(12.0))
@@ -529,7 +529,7 @@ pub(crate) fn rule_row(index: usize, rule: &RouteRuleSnapshot, locale: Locale) -
         .id(format!("rule-row-{index}"))
         .w_full()
         .min_h(px(39.0))
-        .px(px(13.0))
+        .px(px(TABLE_X))
         .flex()
         .items_center()
         .gap(px(12.0))
@@ -1067,5 +1067,39 @@ mod tests {
             "nor the two off tracks"
         );
         assert_ne!(switch_track(true, false), CYAN);
+    }
+
+    /// Issue 02 item 8: the rules header inset its labels by 14 while its rows
+    /// inset by 13, so every column name sat one pixel away from the values under
+    /// it. Both read `theme::TABLE_X` now, and the part that can be checked
+    /// without a window is that neither builder goes back to its own number.
+    ///
+    /// Line endings are normalised first: this crate's files are CRLF on disk, and
+    /// a pattern written with bare `\n` would match nothing and read as a pass.
+    #[test]
+    fn a_table_header_and_its_rows_take_their_inset_from_one_token() {
+        let raw = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/components.rs"),
+        )
+        .expect("the crate can read its own source");
+        let source = raw.replace("\r\n", "\n");
+        for builder in ["pub(crate) fn table_head_row", "pub(crate) fn rule_row"] {
+            let body = source
+                .split_once(builder)
+                .unwrap_or_else(|| panic!("{builder} disappeared; this gate needs it"))
+                .1
+                .split_once("\n}\n")
+                .unwrap_or_else(|| panic!("{builder} has no readable end"))
+                .0;
+            let bare_inset = body.contains(".px(px(1") || body.contains(".px(px(2");
+            assert!(
+                body.contains(".px(px(TABLE_X))"),
+                "{builder} no longer takes its horizontal inset from theme::TABLE_X"
+            );
+            assert!(
+                !bare_inset,
+                "{builder} has a bare inset again - that is the 1px drift this gate exists for"
+            );
+        }
     }
 }
