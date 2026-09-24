@@ -499,8 +499,8 @@ pub fn restart_services(root: &Path) -> Result<(), String> {
         // A socket-activated service must be started by a connection to its
         // socket. `systemctl restart sbctl.service` starts it without LISTEN_FDS,
         // so `sbctl serve` exits and systemd enters a restart loop.
-        systemctl(root, &["enable", "--now", "sbctl-http.socket"])?;
         systemctl(root, &["stop", "sbctl.service"])?;
+        systemctl(root, &["enable", "--now", "sbctl-http.socket"])?;
         trigger_direct_socket()?;
     } else {
         if root.join(SBCTL_HTTP_SOCKET).is_file() {
