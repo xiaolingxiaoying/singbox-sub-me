@@ -41,32 +41,62 @@ BIN=$CARGO_TARGET_DIR/debug/sbtui
 
 # A private data directory: the client writes its lock file and settings there,
 # and nothing about the run can touch the distro's own configuration.
+#
+# The signal has to go to sbtui itself. An earlier draft matched `pgrep -f`
+# against the wrapper's own command line and so signalled `script`, which catches
+# SIGTERM and exits 0 on its own — a pass that measured the wrong process. The
+# control case below is what caught it: KILL gave 137 while TERM gave 0 for the
+# same, wrong target. Match the child's exact command line, and refuse to run a
+# case whose target pid is the wrapper's.
 run_case() { # <label> <signal> <expected exit code>
   local label=$1 signal=$2 expected=$3
-  local home out code
+  local home out code pid wrapper tries
   home=$(mktemp -d)
   out=$(mktemp)
   # `script -e` propagates the child's exit status, including 128+signum when it
   # dies from a signal we did not catch.
   HOME="$home" XDG_CONFIG_HOME="$home/.config" \
     setsid script -qeefc "$BIN" /dev/null >"$out" 2>&1 &
-  local wrapper=$!
-  local pid
-  for _ in $(seq 1 50); do
-    pid=$(pgrep -f "script -qeefc $BIN" | head -1 || true)
+  wrapper=$!
+  pid=""
+  tries=0
+  while [ "$tries" -lt 60 ]; do
+    pid=$(pgrep -x "$(basename "$BIN")" | head -1 || true)
     [ -n "$pid" ] && break
-    sleep 0.2
+    tries=$((tries + 1))
+    sleep 0.25
   done
-  if [ -z "${pid:-}" ]; then
+  if [ -z "$pid" ]; then
     echo "FAIL [$label]: sbtui never started under the pty; output was:"
     tail -20 "$out"
-    kill "$wrapper" 2>/dev/null || true
+    kill -9 "$wrapper" 2>/dev/null || true
+    rm -rf "$home" "$out"
     return 1
   fi
+  if [ "$pid" = "$wrapper" ]; then
+    echo "FAIL [$label]: the target pid is the wrapper, so this case would measure the wrong process"
+    kill -9 "$pid" 2>/dev/null || true
+    rm -rf "$home" "$out"
+    return 1
+  fi
+  echo "case $label: wrapper=$wrapper sbtui=$pid, signalling sbtui with -$signal"
   # Give the loop a tick to install its handler and paint a frame.
   sleep 2
   kill -"$signal" "$pid" 2>/dev/null || true
-  wait "$wrapper" && code=0 || code=$?
+  # Poll for the child to go; a handler that never fires would hang this gate
+  # forever, and a hung gate reads like a slow pass.
+  tries=0
+  while [ "$tries" -lt 40 ] && kill -0 "$pid" 2>/dev/null; do
+    tries=$((tries + 1))
+    sleep 0.5
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "case $label: sbtui survived kill -$signal for 20s -> treated as a failure"
+    kill -9 "$pid" 2>/dev/null || true
+    code=255
+  else
+    wait "$wrapper" && code=0 || code=$?
+  fi
   echo "case $label: kill -$signal -> exit $code (expected $expected)"
   rm -rf "$home" "$out"
   [ "$code" = "$expected" ]
