@@ -572,8 +572,44 @@ fn reconcile_subscription_units(root: &Path, direct: bool) -> Result<(), String>
             }
         }
     }
+    reconcile_certificate_hook(root, direct)?;
     if changed {
         systemctl(root, &["daemon-reload"])?;
+    }
+    Ok(())
+}
+
+fn reconcile_certificate_hook(root: &Path, direct: bool) -> Result<(), String> {
+    let path = root.join(CERTBOT_DEPLOY_HOOK);
+    if direct {
+        if path.exists() {
+            let existing = fs::read_to_string(&path)
+                .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+            if !existing.contains(CERTBOT_DEPLOY_HOOK_MARKER) {
+                return Err(
+                    "the Certbot deploy hook path is occupied by an unmanaged file; refusing to replace it"
+                        .to_owned(),
+                );
+            }
+            if existing != certbot_deploy_hook() {
+                write_unit(root, CERTBOT_DEPLOY_HOOK, certbot_deploy_hook())
+                    .map_err(|error| error.to_string())?;
+            }
+        } else {
+            write_unit(root, CERTBOT_DEPLOY_HOOK, certbot_deploy_hook())
+                .map_err(|error| error.to_string())?;
+        }
+        set_executable(&path).map_err(|error| error.to_string())?;
+    } else if path.exists() {
+        let existing = fs::read_to_string(&path)
+            .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+        if !existing.contains(CERTBOT_DEPLOY_HOOK_MARKER) {
+            return Err(
+                "the Certbot deploy hook path is occupied by an unmanaged file; refusing to remove it"
+                    .to_owned(),
+            );
+        }
+        remove_file_if_present(&path)?;
     }
     Ok(())
 }

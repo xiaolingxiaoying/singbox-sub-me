@@ -490,11 +490,13 @@ pub(crate) fn commit_config_change(
                 // configuration readable by the sing-box service account. Without
                 // this, the rewritten /etc/sing-box/config.json stays 0600
                 // root:root and the service cannot start (deployment issue #5).
-                sbctl::lifecycle::prepare_daemon_storage(
-                    root,
-                    new.subscription_mode == sbctl::config::SubscriptionMode::Direct,
-                )
-                .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+                let direct = new.subscription_mode == sbctl::config::SubscriptionMode::Direct;
+                if root == Path::new("/") {
+                    sbctl::lifecycle::prepare_daemon_prerequisites(root, direct)
+                        .map_err(sbctl::config::ConfigError::StateContent)?;
+                }
+                sbctl::lifecycle::prepare_daemon_storage(root, direct)
+                    .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
                 restart_services_with_rollback(root, || {
                     let _ = sbctl::subscription::restore_config_transaction(store, &snapshot);
                 })?;
