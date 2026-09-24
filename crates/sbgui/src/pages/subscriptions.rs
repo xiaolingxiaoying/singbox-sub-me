@@ -71,9 +71,12 @@ impl Sbgui {
         let narrow = window.viewport_size().width < px(940.0);
         // The action cell is fixed so the header lines up with the rows: its
         // content is wider than the "Actions" label, and an auto width would
-        // shift the grow columns per row. Three buttons now, and the cell wraps
-        // rather than clips when one language's labels do not fit the track.
-        let action_width = if narrow { 168.0 } else { 250.0 };
+        // shift the grow columns per row. The track has to fit the widest *pair*
+        // in either language — 设为当前 + 编辑链接 / "Set as current" + "Edit
+        // link" — because `flex_wrap` only breaks lines inside the track, and a
+        // track narrower than the pair overflows the card and cuts the last
+        // glyph off (issue 01 item 8, seen at 860×640).
+        let action_width = if narrow { 250.0 } else { 268.0 };
         let usage = self.snapshot.subscription_usage;
         let node_count = self
             .snapshot

@@ -855,3 +855,18 @@ M18 追加改成覆写 → `startup.rs` 五道红。
 按"最宽那对按钮 + 间隙"算，而不是先写一个数再看帧。
 `import-panel` 与 `url-editor` 两张 860 帧在本次会话结束前还没落盘，所以面板高度把表格
 挤到哪儿这条**仍未验证**。
+
+## R28 — 工单 01 第 8 项的修复尝试：状态是「未验证」，不是「已修」
+
+`pages/subscriptions.rs:76` 的操作列轨道从 `narrow 168 / wide 250` 改成 `250 / 268`，理由写进注释：
+`flex_wrap` 只在轨道**内部**换行，轨道比"最宽那对按钮"窄时就会越出卡片，所以宽度必须按最宽的一对
+（中文「设为当前 + 编辑链接」/ 英文 "Set as current" + "Edit link"）来给，而不是先猜一个数再看帧。
+
+- 已核：`cargo test -p sbgui` 53 passed、clippy `--all-targets -D warnings`、fmt `--check`，
+  三项退出码都是 0（直接取码，不走管道）。
+- **未核**：两张 860×640 复核帧（中文 `.scratch/shots-item8-fix/`、英文 `.scratch/shots-item8-fix-en/`）
+  在本次提交时还在容器里构建，我没看过。**所以这一笔不算第 8 项验收**。帧若仍显示越界、
+  或把表格挤成需要横向滚动，就 `git revert` 这一笔、工单第 8 项回到开放态；
+  帧若干净，还要补第 8 项要求的静态门（操作列宽度不得写成裸字面量）才闭环。
+- 同时留一笔诚实账：`every_input_field_indexes_the_array_at_its_own_slot` 这道门**仍未被变异证明**
+  （N8 的 perl 因 CRLF 没匹配上，等于没做变异）。
