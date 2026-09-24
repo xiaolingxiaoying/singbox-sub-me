@@ -136,11 +136,15 @@ grep -n 'sbgui' .github/workflows/release.yml | head -3   # 有（job 已写）�
 
 # G3 已落地：期望"无输出"（模板参数不再被丢弃）
 grep -n 'let _ = template' src/subscription/template.rs || echo 'G3: axis wired'
-# G3 未验部分：新模板从未过真核（这两个测试只渲染默认模板）
-grep -n 'client_template' tests/version_profiles.rs tests/clash_mihomo.rs || echo 'G3: real-core covers default template only'
+# G3 真核覆盖情况（2026-09-24 后）：两条真核门都已按模板参数化
+grep -n 'for (template' tests/clash_mihomo.rs || grep -n 'ClientTemplate::Split' tests/clash_mihomo.rs
+grep -n 'SING_BOX_VERSION_PROFILES.len() \* 3' tests/version_profiles.rs   # 5 内核 × 3 模板
 
-# G4 见下（本轮进行中）：有输出即已实现
-grep -rn 'overrides/' crates/client-core/src | head -3 || echo 'G4: absent'
+# G4 引擎 + TUI 已落地：四条都期望"有输出"
+grep -rn 'overrides/' crates/client-core/src | head -2
+grep -n 'Override,' crates/sbtui/src/app.rs                    # 第 7 个页签
+grep -n 'ClearOverride' crates/sbtui/src/input.rs              # O 清空（缺它时用户删不掉 sha256 命名的文件）
+grep -n 'Page::Overrides' crates/sbgui/src/state.rs            # GUI 同页（2026-09-24 落地）
 
 # G6 期望"无输出"
 git grep -n tray-icon -- crates || echo 'G6: dep gone'
@@ -151,8 +155,16 @@ git grep -c '\.note(' -- crates | awk -F: '{s+=$2} END {print "G7 note() calls:"
 # G9 仍是人工滑带：期望命中（表还在），配合 CI 带检查
 grep -n 'SING_BOX_VERSION_PROFILES' src/subscription/profile.rs | head -1
 
+# R19：拒绝文案分两计数（期望"0 行不受支持"与"2 行无法解析"同时出现）
+grep -n '不受支持' crates/client-core/src/subscription.rs | head -2
+# R20：minimal 的 Clash 工件不该再要 geo 数据库。别用 grep 判（源码里 GEOIP 仍出现在
+# 注释与 standard 分支里）——用这条门本身：
+cargo test -p sbctl --lib minimal_rule_profile_names_no_rule_cdn 2>&1 | tail -3   # 期望 ok
+
 # G8/G15：Windows 平台行为，只有真跑过 verify.ps1 all 才有证据
 ls .scratch/winvm 2>/dev/null || echo 'G8: no real-machine evidence collected yet'
+# 跑之前必须先指认虚机：不设 WINVM_VMX 时期望**报错并列出两台候选**（脚本刻意不猜）
+echo "$WINVM_VMX"; ls .scratch/win11-vm/../../.scratch/reshoot-override.sh 2>/dev/null
 ```
 
 2026-09-24 的实测结果与逐条修复过程见 [code-review-2026-09-24.md](code-review-2026-09-24.md)。
