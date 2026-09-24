@@ -723,3 +723,75 @@ M18 追加改成覆写 → `startup.rs` 五道红。
 而是靠旁边的句子（概览"改动需重启内核"、设置页那句完整说明）与光标——
 `components.rs:172` 的 `.when(clickable, cursor_pointer)` 保证 inert 时不给手型。
 这够用了，但记下来：以后谁想把置灰当唯一信号用，1.11:1 是不够的。
+
+## R25 — TUI 六项能力逐条对证据，挖出两条真缺陷
+
+只读审计 + 我自己逐条复核（`grep` 命中数与行号都自己跑过，不采信报告原文）。
+
+**先说结论里"没问题"的部分**（这些以前是口头判断，现在有行号）：
+解析订阅（`client-core/src/subscription.rs:22/:232/:246/:252`，JSON/base64/裸 URI 列表三条路都有测试）、
+启停内核（`core.rs:44-147` 端口探测 → `active-config.json` → `sing-box check` 闸门 → 就绪等待；
+崩溃重启上限 5、退避 `controller.rs:39`/`core.rs:413`）、入站与规则页（`view/rules.rs:21/:54/:66`）、
+日志级别与关键字过滤（`view/logs.rs:60/:69/:91`）、13 张 insta 快照**每帧都额外断言**
+"绘制不动光标 / 不泄密 / 不碰宿主临时目录"（`view/mod.rs:537/:545/:552`）。
+
+**缺陷一（用户会被咬到）：Linux 上非正常退出会把系统代理留在开启态。**
+`sbtui` 与 `client-core` 里**没有任何信号处理**（全库 `SIGTERM|signal::|ctrl_c` 只命中
+`core.rs:377` 的 `prctl(PR_SET_PDEATHSIG)`——那是给子进程 sing-box 的，杀 TUI 时内核确实会被带走，
+但代理恢复不在其中）。清理路径只有 `sbtui/src/lib.rs:129-142` 的正常退出。
+于是 `kill`、systemd 停服、关终端（SIGHUP）都会跳过它：**用户的上网代理被永久留在 127.0.0.1 上，
+直到手动改回来**。这条比一般"边界没测"重，它是丢在用户机器上的状态。
+→ 工单 `.scratch/client-config-override/issues/03-unclean-exit-leaves-system-proxy-on.md`。
+
+**缺陷二（能力缺口的准确形状）：没有任何客户端能创建覆写文件。**
+`ClientCommand::SetOverride{profile, contents}` 在引擎里声明并处理
+（`command.rs:77`、`controller.rs:542`），但 `grep -rn SetOverride crates/sbtui/src crates/sbgui/src`
+**零命中**。覆写页能做的只有：看脱敏后的生效配置、开关片段、两击删除、原样显示解析错误——
+`config_override.rs:230` 明写"本页只读，不编辑 JSON"（这是 ADR-0023 的边界，不是遗漏）。
+问题是**写入这一半也没人做**：目标写的是"覆写配置文件内容"，而今天的路径是
+"用户自己用编辑器把 JSON 放到 `<data dir>/overrides/<sha256>.json`"。
+只读页 + 引擎能写 = 差一个"从文件装载/粘贴内容 → 交给引擎落盘"的入口。
+→ 记进工单，按 ADR 边界做（不做任意 JSON 编辑器，只做装载 + 校验 + 回显引擎原话）。
+
+**顺带记下的覆盖缺口**（不是 bug，是门没盖到的地方）：sbtui 没有任何测试按过 `n/f/e/u`
+（导入路径的四个键）；Windows 的 `can_use_tun` 走 `net session`（`system_proxy.rs:495-507`）无测试；
+`tun_device_gate_rejects_a_writable_regular_file` 是 `#[cfg(unix)]`；
+非 GNOME 的 Linux 代理写不进去时只报一句 env 提示（`:432`），Windows 注册表路径成功（`:288`），
+两边都没有测试；`core.rs:1056` 那条 Windows zip 用例在 Linux 门上永不运行。
+
+## R26 — 工单 02 剩下的四条：量化之后挖出三条真缺陷（含一条 Windows 级）
+
+只读审计先出清单，**下面每条关键行号我都自己打开文件核过**（包括 pinned 的 gpui 源码）。
+
+**新缺陷 A：GUI 在 Windows 上主动把输入法关掉了。**
+不是"组合输入丢字"，是**根本没有 IME**。链条：`sbgui` 全库没有一处实现 gpui 的 `InputHandler`
+（`grep -rn "InputHandler" crates/sbgui/src` 零命中，我自己跑的），输入靠 `on_key_down`
+逐字符往 `TextField.text` 里 append；而 pinned 那版 gpui 的 Windows 后端
+`crates/gpui_windows/src/events.rs:699-702` 这样算开关：
+`with_input_handler(|h| h.query_accepts_text_input()).unwrap_or(false)` —— 没有 handler 就是 `false`，
+于是走 `:722` 的 `ImmAssociateContextEx(handle, HIMC::default(), 0)`，**把这个窗口的 IME 上下文解绑**。
+后果正落在目标平台上：中文用户在 GUI 任何输入框里都打不出拼音/候选，只能贴 ASCII。
+修法是把输入框换成真正的输入元素（大工程），所以进工单而不是本轮顺手改。
+
+**新缺陷 B：日志页「导出」无视筛选，「复制」尊重筛选。**
+`pages/logs.rs:123-136` 先按级别（和关键字）过滤出 `kernel` / `events`，画面与
+`copy_text`（`:161-170`）都吃这两个过滤后的向量；而 `:272-290` 的导出闭包重新从
+`view.snapshot.core_logs` / `event_lines()` 取**未过滤**的全量。
+用户把级别调到 Error、屏幕三行、点导出，拿到几百行：**看到的那份与文件里那份不是同一批**。
+同一页两个按钮两种语义，按缺陷对待。
+
+**新缺陷 C（小，但可静态钉死）：规则表头与行差 1px。**
+`components.rs:440` 的 `table_head_row` 用 `px(14.0)`，`:532` 的 `rule_row` 用 `px(13.0)`；
+列宽（40/124/170）对得上，但表头没有 `border_b_1`、首行没有 `border_t_1`。
+工单 02 第 8 条那句"表头/行 1px 对齐"是真的，而且能复用 `theme.rs` 那套静态扫描写成门。
+
+**顺带量到的两处**：`copy_text` 每次绘制都重建再 clone 进闭包（`:161-170`，与第 9 条同源）；
+硬编码颜色只剩 8 处字面量，其中 3 处是 `rgba(0x0000_0000)` 透明占位，
+真正要收的只有 `overlay.rs:42/:188` 的遮罩、`:264` 的 `0x8c3232`、`settings.rs:64/:66` 两块琥珀底。
+
+**第 2 条（保存语义）为什么这轮不动**：审计数出来是**六套并存**的提交路径
+（实时过滤器的 Enter 什么都不提交 / 设置字段的 Enter 立即写 / 「保存更改」无条件重写五个字段且永不禁用 /
+三个开关绕开前两者直接发命令 / 坏值静默 reset 不给提示 / `sync_fields` 在失焦时用快照值覆盖未保存编辑），
+徽标只数那 5 个字段、不含开关、还滞后一个 400ms 轮询。
+它的验收是"引擎到底收到了什么"——既不是纯函数也不是截图能证的，而且要一次删掉五条路径，
+**属于语义决策，不适合派给并发的 writer**（它正在改的正是 `app.rs`/`state.rs`）。已单独记进工单。
