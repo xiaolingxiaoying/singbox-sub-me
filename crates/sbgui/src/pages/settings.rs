@@ -221,7 +221,7 @@ impl Sbgui {
                         div()
                             .px(px(8.0))
                             .text_size(px(META))
-                            .text_color(rgb(FAINT))
+                            .text_color(rgb(MUTED))
                             .child(tr!(locale, "使用中", "In use"))
                             .into_any_element()
                     } else {

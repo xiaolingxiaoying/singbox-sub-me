@@ -772,7 +772,7 @@ impl Sbgui {
                             .border_color(rgb(BORDER))
                             .bg(rgb(SURFACE))
                             .text_size(px(META))
-                            .text_color(rgb(FAINT))
+                            .text_color(rgb(MUTED))
                             .child(tr!(
                                 locale,
                                 format!(

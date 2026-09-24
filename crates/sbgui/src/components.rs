@@ -17,9 +17,9 @@ use gpui::{
 use crate::lang::{Locale, established_label};
 use crate::state::{Page, Sbgui};
 use crate::theme::{
-    AMBER, BLUE, BLUE_2, BODY, BORDER, CYAN, DANGER, DISPLAY, FAINT, GAP_ITEM, LABEL, META, MINT,
-    MUTED, PAD_SURFACE_X, PAD_SURFACE_Y, RADIUS, RADIUS_CONTROL, ROW_HOVER, ROW_X, ROW_Y, SECTION,
-    SURFACE, SURFACE_2, TEXT, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD,
+    AMBER, BLUE, BLUE_2, BODY, BORDER, CYAN, CYAN_DARK, DANGER, DISPLAY, FAINT, GAP_ITEM, LABEL,
+    META, MINT, MUTED, PAD_SURFACE_X, PAD_SURFACE_Y, RADIUS, RADIUS_CONTROL, ROW_HOVER, ROW_X,
+    ROW_Y, SECTION, SURFACE, SURFACE_2, TEXT, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD,
 };
 use crate::tr;
 
@@ -208,7 +208,7 @@ pub(crate) fn accordion(
                 .child(
                     div()
                         .text_size(px(META))
-                        .text_color(rgb(FAINT))
+                        .text_color(rgb(MUTED))
                         .child(subtitle),
                 ),
         )
@@ -286,7 +286,7 @@ pub(crate) fn metric_cell(
             div()
                 .mt(px(3.0))
                 .text_size(px(META))
-                .text_color(rgb(FAINT))
+                .text_color(rgb(MUTED))
                 .child(text)
         }))
 }
@@ -296,7 +296,7 @@ pub(crate) fn side_rate(label: &str, value: u64, color: u32) -> impl IntoElement
         .flex()
         .items_center()
         .gap(px(6.0))
-        .child(div().text_color(rgb(FAINT)).child(label.to_owned()))
+        .child(div().text_color(rgb(MUTED)).child(label.to_owned()))
         .child(
             div()
                 .font_weight(WEIGHT_MEDIUM)
@@ -329,7 +329,7 @@ pub(crate) fn info_cell(
         .child(
             div()
                 .text_size(px(META))
-                .text_color(rgb(FAINT))
+                .text_color(rgb(MUTED))
                 .child(label),
         )
         .child(
@@ -501,7 +501,7 @@ pub(crate) fn rule_row(index: usize, rule: &RouteRuleSnapshot, locale: Locale) -
                 .w(px(40.0))
                 .flex_shrink_0()
                 .text_size(px(META))
-                .text_color(rgb(FAINT))
+                .text_color(rgb(MUTED))
                 .child((index + 1).to_string()),
         )
         .child(
@@ -526,7 +526,7 @@ pub(crate) fn rule_row(index: usize, rule: &RouteRuleSnapshot, locale: Locale) -
                 .flex_shrink_0()
                 .truncate()
                 .font_weight(WEIGHT_MEDIUM)
-                .text_color(rgb(CYAN))
+                .text_color(rgb(CYAN_DARK))
                 .child(rule.outbound.clone()),
         )
         .into_any_element()
@@ -704,7 +704,7 @@ pub(crate) fn connection_row(
             div()
                 .w(px(130.0))
                 .flex_shrink_0()
-                .text_color(rgb(CYAN))
+                .text_color(rgb(CYAN_DARK))
                 .child(format!(
                     "↓ {} ↑ {}",
                     human_bytes(connection.download),
@@ -843,7 +843,7 @@ pub(crate) fn empty_state(
             .border_color(rgb(BLUE_2))
             .text_size(px(LABEL))
             .font_weight(WEIGHT_MEDIUM)
-            .text_color(rgb(CYAN))
+            .text_color(rgb(CYAN_DARK))
             .hover(|style| style.bg(rgb(SURFACE_2)))
             .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
                 // The button routes by its own wording, so the test has to

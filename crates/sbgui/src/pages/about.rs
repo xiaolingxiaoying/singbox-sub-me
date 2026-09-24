@@ -10,8 +10,8 @@ use gpui::{Context, Div, ParentElement, Styled, div, px, rgb};
 use crate::components::icon;
 use crate::state::Sbgui;
 use crate::theme::{
-    BODY, BORDER, CYAN, FAINT, LABEL, META, MUTED, RADIUS, ROW_X, SECTION, SURFACE, TEXT,
-    WEIGHT_MEDIUM, WEIGHT_SEMIBOLD,
+    BODY, BORDER, CYAN, LABEL, META, MUTED, RADIUS, ROW_X, SECTION, SURFACE, TEXT, WEIGHT_MEDIUM,
+    WEIGHT_SEMIBOLD,
 };
 use crate::tr;
 
@@ -100,7 +100,7 @@ impl Sbgui {
                         div()
                             .text_size(px(LABEL))
                             .font_weight(WEIGHT_MEDIUM)
-                            .text_color(rgb(FAINT))
+                            .text_color(rgb(MUTED))
                             .child(tr!(locale, "当前状态", "Current status")),
                     )
                     .child(row(
@@ -128,7 +128,7 @@ fn row(label: &'static str, value: &str) -> gpui::Div {
         .child(
             div()
                 .text_size(px(META))
-                .text_color(rgb(FAINT))
+                .text_color(rgb(MUTED))
                 .child(label),
         )
         .child(

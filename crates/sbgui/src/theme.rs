@@ -24,10 +24,20 @@ pub(crate) const BORDER_STRONG: u32 = 0xcbd8d4;
 
 pub(crate) const TEXT: u32 = 0x13201e;
 
-pub(crate) const MUTED: u32 = 0x687774;
+/// Secondary text. The kit's own `#687774` clears AA on pure white (4.69:1) and
+/// fails on every background the app actually paints — panel `#f3f6f5`,
+/// `#f7f9f8`, the selected nav item (4.09:1) — so a screenshot of one surface
+/// could never tell whether the rest were readable. Darkened to clear 4.5:1 on
+/// all six; see the tests at the bottom of this file.
+pub(crate) const MUTED: u32 = 0x5d6b68;
 
+/// Decoration only: separators, disabled glyphs, unit suffixes. At 2.5–2.8:1 it
+/// is below even the 3:1 non-text floor for some pairings, which is why the test
+/// below refuses to let it become a label color.
 pub(crate) const FAINT: u32 = 0x8f9c99;
 
+/// Accent for borders, focus bars and indicator dots — not for text. Its text
+/// sibling is [`CYAN_DARK`], which clears 4.79:1 on the lightest nav background.
 pub(crate) const CYAN: u32 = 0x0d9488;
 
 pub(crate) const CYAN_DARK: u32 = 0x08766d;
@@ -53,7 +63,9 @@ const EDGE: u32 = 0x08766d;
 
 pub(crate) const MINT: u32 = 0x16a06d;
 
-pub(crate) const AMBER: u32 = 0xb45309;
+/// Warning text. `#b45309` sat at 4.38:1 on the nav tint and 4.62:1 on the panel,
+/// i.e. right on the AA line where a background change pushes it under.
+pub(crate) const AMBER: u32 = 0x9a4708;
 
 pub(crate) const DANGER: u32 = 0xa33c3c;
 
@@ -134,5 +146,118 @@ pub(crate) fn tone_colors(tone: Tone) -> (u32, u32, u32) {
         Tone::Neutral => (TEXT, SURFACE_2, BORDER),
         Tone::Warning => (0x985c08, 0xfff5e5, 0xf2dfbf),
         Tone::Danger => (DANGER, SURFACE, BORDER_STRONG),
+    }
+}
+
+/// WCAG 2.1 relative-luminance contrast ratio between two `0xRRGGBB` colors,
+/// from 1.0 (identical) to 21.0 (black on white). Kept here rather than in a dev
+/// dependency so the palette tests below can run on any platform, headless, with
+/// no GPU and no window — the thing being measured is a number in a constant.
+#[cfg(test)]
+pub(crate) fn contrast(fg: u32, bg: u32) -> f64 {
+    let luminance = |color: u32| {
+        let channel = |shift: u32| {
+            let value = f64::from((color >> shift) & 0xff) / 255.0;
+            if value <= 0.039_28 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+    };
+    let (one, other) = (luminance(fg), luminance(bg));
+    (one.max(other) + 0.05) / (one.min(other) + 0.05)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WCAG 2.1 AA for body-size text.
+    const AA: f64 = 4.5;
+
+    /// The surfaces a label can end up on: the window, a card, a raised card,
+    /// the selected nav item, and the two table-row states.
+    const SURFACES: &[(&str, u32)] = &[
+        ("BG", BG),
+        ("SURFACE", SURFACE),
+        ("SURFACE_2", SURFACE_2),
+        ("NAV_ACTIVE", NAV_ACTIVE),
+        ("ROW_HOVER", ROW_HOVER),
+        ("ROW_SELECTED", ROW_SELECTED),
+    ];
+
+    /// Tokens that are painted as text somewhere in the app.
+    const TEXT_TOKENS: &[(&str, u32)] = &[
+        ("TEXT", TEXT),
+        ("MUTED", MUTED),
+        ("CYAN_DARK", CYAN_DARK),
+        ("AMBER", AMBER),
+        ("DANGER", DANGER),
+    ];
+
+    /// The pairing that made the old palette look fine in a screenshot: `MUTED`
+    /// cleared AA on pure white and failed on the four backgrounds the app
+    /// actually paints around it. Checking one surface proves nothing, so every
+    /// text token is checked against every surface.
+    #[test]
+    fn every_text_token_clears_aa_on_every_surface_it_can_land_on() {
+        let mut failures: Vec<String> = Vec::new();
+        for (fg_name, fg) in TEXT_TOKENS {
+            for (bg_name, bg) in SURFACES {
+                let ratio = contrast(*fg, *bg);
+                if ratio < AA {
+                    failures.push(format!("{fg_name} on {bg_name} = {ratio:.2}:1"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "below AA: {}", failures.join(", "));
+    }
+
+    /// The warning button's own colors are literals in `tone_colors`, so they are
+    /// not covered by the token table above and would drift unnoticed.
+    #[test]
+    fn the_warning_button_itsself_clears_aa() {
+        let (text, background, _) = tone_colors(Tone::Warning);
+        let ratio = contrast(text, background);
+        assert!(ratio >= AA, "Tone::Warning label = {ratio:.2}:1");
+    }
+
+    /// `FAINT` and `CYAN` stay decoration: separators, focus bars, indicator
+    /// dots. Neither clears AA as text on the lightest background in the app, so
+    /// a single use of either as a label color is a readability bug, not a style choice
+    /// — and the only way to keep it out is to look for it.
+    #[test]
+    fn decoration_tokens_are_never_used_as_text() {
+        let needles: Vec<String> = ["FAINT", "CYAN"]
+            .iter()
+            .map(|token| format!("text_color(rgb({token}))"))
+            .collect();
+        let mut offenders: Vec<String> = Vec::new();
+        let mut stack = vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("the crate's own src is readable") {
+                let path = entry.expect("a readable entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|ext| ext != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("a readable source file");
+                for needle in &needles {
+                    if text.contains(needle.as_str()) {
+                        offenders.push(format!("{}: {needle}", path.display()));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "decoration-only tokens painted as text:\n{}",
+            offenders.join("\n")
+        );
     }
 }

@@ -468,7 +468,7 @@ impl Sbgui {
                             .items_center()
                             .gap(px(8.0))
                             .child(icon("globe", CYAN, 15.0))
-                            .child(div().text_size(px(META)).text_color(rgb(FAINT)).child(tr!(
+                            .child(div().text_size(px(META)).text_color(rgb(MUTED)).child(tr!(
                                 locale,
                                 "当前节点",
                                 "Current node"
@@ -588,7 +588,7 @@ impl Sbgui {
             .child(
                 div()
                     .text_size(px(META))
-                    .text_color(rgb(FAINT))
+                    .text_color(rgb(MUTED))
                     .child(label.to_owned()),
             )
             .child(

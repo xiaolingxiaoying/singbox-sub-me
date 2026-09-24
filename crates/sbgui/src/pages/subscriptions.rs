@@ -280,7 +280,7 @@ impl Sbgui {
                     vec![
                         div()
                             .text_size(px(META))
-                            .text_color(rgb(FAINT))
+                            .text_color(rgb(MUTED))
                             .child(tr!(
                                 locale,
                                 "未启用时无用量信息",
@@ -330,7 +330,7 @@ impl Sbgui {
                                 div()
                                     .mt(px(4.0))
                                     .text_size(px(META))
-                                    .text_color(rgb(FAINT))
+                                    .text_color(rgb(MUTED))
                                     .truncate()
                                     .child(profile.url.clone()),
                             ),

@@ -14,7 +14,7 @@ use crate::components::{
 };
 use crate::state::{FieldSpec, InputField, Sbgui, Tone};
 use crate::theme::{
-    BODY, BORDER, CYAN, FAINT, LABEL, LIST_PAGE, META, MINT, MUTED, RADIUS_CONTROL, ROW_HOVER,
+    BODY, BORDER, CYAN_DARK, FAINT, LABEL, LIST_PAGE, META, MINT, MUTED, RADIUS_CONTROL, ROW_HOVER,
     SURFACE, WEIGHT_MEDIUM,
 };
 use crate::tr;
@@ -161,7 +161,7 @@ impl Sbgui {
                                         .truncate()
                                         .text_size(px(BODY))
                                         .font_weight(WEIGHT_MEDIUM)
-                                        .text_color(rgb(CYAN))
+                                        .text_color(rgb(CYAN_DARK))
                                         .child(set.tag.clone()),
                                 )
                                 .child(
@@ -169,7 +169,7 @@ impl Sbgui {
                                         .w(px(64.0))
                                         .flex_shrink_0()
                                         .text_size(px(META))
-                                        .text_color(rgb(FAINT))
+                                        .text_color(rgb(MUTED))
                                         .child(set.kind.clone()),
                                 )
                                 .child(
@@ -266,7 +266,7 @@ impl Sbgui {
             .bg(rgb(SURFACE))
             .text_size(px(LABEL))
             .font_weight(WEIGHT_MEDIUM)
-            .text_color(rgb(CYAN))
+            .text_color(rgb(CYAN_DARK))
             .cursor_pointer()
             .hover(|s| s.bg(rgb(ROW_HOVER)))
             .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {

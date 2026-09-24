@@ -23,9 +23,9 @@ use crate::lang::{Locale, outbound_mode, usage_label};
 use crate::pages::logs::localised_event_line;
 use crate::state::{Page, Sbgui};
 use crate::theme::{
-    AMBER, BLUE, BLUE_2, BODY, BORDER, BORDER_STRONG, CYAN, DANGER, DISPLAY, FAINT, GAP_SECTION,
-    LABEL, META, MINT, MUTED, RADIUS_CONTROL, SECTION, SECTION_LG, SURFACE, SURFACE_2, TEXT,
-    WEIGHT_MEDIUM, WEIGHT_SEMIBOLD,
+    AMBER, BLUE, BLUE_2, BODY, BORDER, BORDER_STRONG, CYAN, CYAN_DARK, DANGER, DISPLAY, FAINT,
+    GAP_SECTION, LABEL, META, MINT, MUTED, RADIUS_CONTROL, SECTION, SECTION_LG, SURFACE, SURFACE_2,
+    TEXT, WEIGHT_MEDIUM, WEIGHT_SEMIBOLD,
 };
 use crate::tr;
 
@@ -319,7 +319,7 @@ impl Sbgui {
                                                     .justify_center()
                                                     .text_size(px(META))
                                                     .font_weight(WEIGHT_MEDIUM)
-                                                    .text_color(rgb(CYAN))
+                                                    .text_color(rgb(CYAN_DARK))
                                                     .child((index + 1).to_string()),
                                             )
                                             .child(
@@ -622,7 +622,7 @@ impl Sbgui {
                                         div()
                                             .mt(px(3.0))
                                             .text_size(px(META))
-                                            .text_color(rgb(FAINT))
+                                            .text_color(rgb(MUTED))
                                             .truncate()
                                             .child(delay.map_or_else(
                                                 || {
@@ -709,7 +709,7 @@ impl Sbgui {
                             .items_center()
                             .gap(px(20.0))
                             .text_size(px(META))
-                            .text_color(rgb(FAINT))
+                            .text_color(rgb(MUTED))
                             .child(legend(CYAN, tr!(locale, "下载", "Download"), snapshot.download_speed))
                             .child(legend(BLUE, tr!(locale, "上传", "Upload"), snapshot.upload_speed))
                             .child(tr!(locale, "本机 sing-box 实时采样", "Live samples from this sing-box")),
@@ -732,7 +732,7 @@ impl Sbgui {
                             .child(
                                 div()
                                     .text_size(px(LABEL))
-                                    .text_color(rgb(FAINT))
+                                    .text_color(rgb(MUTED))
                                     .child(tr!(
                                     locale,
                                     "内核运行并产生上下行后，这里绘制曲线。",
@@ -747,7 +747,7 @@ impl Sbgui {
                     .flex()
                     .justify_between()
                     .text_size(px(META))
-                    .text_color(rgb(FAINT))
+                    .text_color(rgb(MUTED))
                     .child(tr!(
                         locale,
                         format!("{} 个采样点", snapshot.traffic_history.len()),
@@ -973,7 +973,7 @@ impl Sbgui {
                                         .items_center()
                                         .text_size(px(LABEL))
                                         .font_weight(WEIGHT_MEDIUM)
-                                        .text_color(rgb(CYAN))
+                                        .text_color(rgb(CYAN_DARK))
                                         .cursor_pointer()
                                         .hover(|style| style.bg(rgb(SURFACE_2)))
                                         .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
@@ -988,7 +988,7 @@ impl Sbgui {
                                 div()
                                     .mt(px(12.0))
                                     .text_size(px(BODY))
-                                    .text_color(rgb(FAINT))
+                                    .text_color(rgb(MUTED))
                                     .child(tr!(
                                         locale,
                                         "客户端还没有产生事件记录。",
