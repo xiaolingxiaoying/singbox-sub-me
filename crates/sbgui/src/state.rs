@@ -270,6 +270,16 @@ pub(crate) struct Sbgui {
     pub(crate) log_level: LogLevelFilter,
     pub(crate) settings_section: SettingsSection,
     pub(crate) show_subscription_import: bool,
+    /// Why the last 「添加」 click did nothing, kept as a code so the panel can
+    /// say it in the language it is rendering. It is what stops an empty link
+    /// from being a silent no-op; issue 02 item 4.
+    pub(crate) subscription_error: Option<crate::parse::ImportReject>,
+    /// What the launch path had to work around, told once inside the window it
+    /// still managed to open (issue 02 item 5). It cannot ride on
+    /// `snapshot.status`, which the engine republishes four times a second and
+    /// which would therefore be blank again before the first frame finished
+    /// drawing, so it is the window's own message and the user clears it.
+    pub(crate) startup_notice: Option<String>,
     pub(crate) show_rule_sets: bool,
     /// Rules pages are walls of text on a real subscription: the list starts
     /// capped and the user opens the rest on demand.
@@ -286,8 +296,10 @@ pub(crate) struct Sbgui {
     /// Scroll position of the log panel, so "自动滚动" can pin the view to the
     /// newest line instead of being a label that does nothing.
     pub(crate) log_scroll: ScrollHandle,
-    /// Row count of the last rendered log panel; a change means new lines.
-    pub(crate) log_rows: std::cell::Cell<usize>,
+    /// The row the log panel pinned itself to last paint. Comparing it is what
+    /// recognises a new line once the ring buffers and the panel's own caps have
+    /// saturated the row count; see [`crate::pages::logs::LogTail`].
+    pub(crate) log_tail: std::cell::Cell<Option<crate::pages::logs::LogTail>>,
     /// Minute of the last repaint: `age_label` renders relative times from the
     /// wall clock at paint time, so a quiet snapshot still needs one repaint per
     /// minute or those labels freeze.
@@ -380,6 +392,21 @@ pub(crate) fn env_show_exit_confirm() -> bool {
 /// click the screenshot harness cannot make.
 pub(crate) fn env_show_stop_confirm() -> bool {
     std::env::var("SBGUI_SHOW_STOP_CONFIRM").is_ok_and(|value| value == "1")
+}
+
+/// Review seam for the subscription import panel, which only opens on a click.
+/// With it set, the window also presses 「添加」 once on an empty field — see
+/// `crate::app`, so the frame shows the panel *and* its refusal, and a panel
+/// that vanished on that click is visible as a missing frame.
+pub(crate) fn env_show_import_panel() -> bool {
+    std::env::var("SBGUI_SHOW_IMPORT_PANEL").is_ok_and(|value| value == "1")
+}
+
+/// Review seam for the launch notice band (issue 02 item 5), which the real
+/// launch path only fills when a persisted file cannot be read. See `crate::app`
+/// for what it renders: the same sentence the real outcome produces.
+pub(crate) fn env_startup_notice() -> bool {
+    std::env::var("SBGUI_STARTUP_NOTICE").is_ok_and(|value| value == "1")
 }
 
 /// Review seam for the override page's armed delete bar, same reason. It arms

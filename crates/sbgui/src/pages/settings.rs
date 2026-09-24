@@ -10,7 +10,7 @@ use gpui::{
 };
 
 use crate::components::{
-    icon, page_head, setting_line, setting_row_intro, toggle_line, work_surface,
+    icon, page_head, setting_line, setting_row_intro, toggle_line, tun_toggle, work_surface,
 };
 use crate::lang::{age_label, outbound_mode, traffic_mode};
 use crate::state::{FieldSpec, InputField, Sbgui, SettingsSection, Tone};
@@ -350,15 +350,23 @@ impl Sbgui {
                     tun_on,
                     "toggle-tun-settings",
                     cx,
-                    SettingsPatch {
-                        traffic_mode: Some(if tun_on {
-                            TrafficMode::SystemProxy
-                        } else {
-                            TrafficMode::Tun
-                        }),
-                        ..Default::default()
-                    },
+                    tun_toggle(tun_on, snapshot.core_running, snapshot.starting),
                 ))
+                .children((snapshot.core_running || snapshot.starting).then(|| {
+                    // The greyed track needs its sentence: the engine refuses the
+                    // patch outright while the core is up, so the control is not
+                    // queued, it is denied. Same reason the overview gives.
+                    div()
+                        .py(px(10.0))
+                        .text_size(px(LABEL))
+                        .line_height(px(19.0))
+                        .text_color(rgb(MUTED))
+                        .child(tr!(
+                            locale,
+                            "内核正在运行；切换流量模式需要重启内核，请先停止内核。",
+                            "The core is running; switching the traffic mode needs a core restart, so stop the core first.",
+                        ))
+                }))
                 .child(setting_row_intro(
                     tr!(locale, "需要重启", "Restart required"),
                     tr!(
@@ -383,20 +391,20 @@ impl Sbgui {
                     snapshot.settings.auto_start,
                     "toggle-autostart",
                     cx,
-                    SettingsPatch {
+                    Some(ClientCommand::UpdateSettings(SettingsPatch {
                         auto_start: Some(!snapshot.settings.auto_start),
                         ..Default::default()
-                    },
+                    })),
                 ))
                 .child(toggle_line(
                     tr!(locale, "内核就绪后自动开启系统代理", "Enable the system proxy once the core is ready"),
                     snapshot.settings.auto_system_proxy,
                     "toggle-autoproxy",
                     cx,
-                    SettingsPatch {
+                    Some(ClientCommand::UpdateSettings(SettingsPatch {
                         auto_system_proxy: Some(!snapshot.settings.auto_system_proxy),
                         ..Default::default()
-                    },
+                    })),
                 ))
                 .child(self.edit_line(
                     tr!(locale, "自动更新间隔（分钟）", "Auto-update interval (min)"),

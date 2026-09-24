@@ -8,6 +8,7 @@ use client_core::clash_api::Connection;
 use client_core::command::SettingsPatch;
 use client_core::format::{DelayLevel, delay_level, human_bytes};
 use client_core::state::{LogLevel, RouteRuleSnapshot};
+use client_core::system_proxy::TrafficMode;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     ClickEvent, Context, ElementId, InteractiveElement, IntoElement, ParentElement,
@@ -112,6 +113,45 @@ pub(crate) fn health_dot(on: bool) -> impl IntoElement {
         )
 }
 
+/// The track's fill. An inert switch never wears the accent: the toolbar and the
+/// overview have long held the TUN switch back while the core runs, and a switch
+/// that still looked live on the settings page was the dead click issue 02
+/// item 3 is about. The knob's side is what carries on/off, so the greyed track
+/// keeps the state readable.
+fn switch_track(on: bool, enabled: bool) -> u32 {
+    match (on, enabled) {
+        (true, true) => CYAN,
+        (true, false) => FAINT,
+        (false, true) => 0xc7cbd1,
+        (false, false) => BORDER,
+    }
+}
+
+/// The TUN switch's command, or `None` while the core holds the traffic mode.
+///
+/// The engine will not retake the traffic mode of a live core: `UpdateSettings`
+/// with a `traffic_mode` patch ends in `set_traffic_mode(restart: false)`, which
+/// bails out with "内核正在运行；切换流量模式需要重启内核…". `starting` counts
+/// as holding it because the inbound list is being written at that moment. All
+/// three places that offer TUN — toolbar, overview, settings — ask here, so none
+/// of them can offer a click the engine refuses.
+pub(crate) fn tun_toggle(
+    tun_on: bool,
+    core_running: bool,
+    starting: bool,
+) -> Option<ClientCommand> {
+    (!core_running && !starting).then(|| {
+        ClientCommand::UpdateSettings(SettingsPatch {
+            traffic_mode: Some(if tun_on {
+                TrafficMode::SystemProxy
+            } else {
+                TrafficMode::Tun
+            }),
+            ..Default::default()
+        })
+    })
+}
+
 /// The kit's switch: a 46 x 26 track with a 20 px knob, inside a hitbox that
 /// keeps the whole control at the 34 px minimum a pointer target needs.
 /// `command` is `None` while the setting cannot change (a running core will
@@ -146,7 +186,7 @@ pub(crate) fn switch(
                 .items_center()
                 .when(on, |track| track.justify_end())
                 .when(!on, |track| track.justify_start())
-                .bg(rgb(if on { CYAN } else { 0xc7cbd1 }))
+                .bg(rgb(switch_track(on, clickable)))
                 .child(
                     div()
                         .w(px(20.0))
@@ -791,12 +831,15 @@ pub(crate) fn setting_row_intro(label: &str, detail: &str) -> impl IntoElement {
         )
 }
 
+/// One labelled switch row. `command` is `None` while the setting cannot change
+/// right now — the TUN mode takes it from [`tun_toggle`] — and [`switch`] then
+/// greys the track and ignores the click.
 pub(crate) fn toggle_line(
     label: &'static str,
     on: bool,
     id: &'static str,
     cx: &mut Context<Sbgui>,
-    patch: SettingsPatch,
+    command: Option<ClientCommand>,
 ) -> impl IntoElement {
     div()
         .w_full()
@@ -816,12 +859,7 @@ pub(crate) fn toggle_line(
                 .text_color(rgb(TEXT))
                 .child(label),
         )
-        .child(switch(
-            id,
-            on,
-            Some(ClientCommand::UpdateSettings(patch)),
-            cx,
-        ))
+        .child(switch(id, on, command, cx))
 }
 
 pub(crate) fn empty_state(
@@ -976,5 +1014,58 @@ pub(crate) fn connection_chain(connection: &Connection, locale: Locale) -> Strin
             .map(|value| clean_proxy_label(value))
             .collect::<Vec<_>>()
             .join(" → ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue 02 item 3: the toolbar and the overview held the TUN switch back
+    /// while the core ran, the settings page did not, and the engine's answer to
+    /// that patch is an outright refusal (`set_traffic_mode` with
+    /// `restart: false` bails). One rule for all three now.
+    #[test]
+    fn the_tun_switch_offers_nothing_while_the_core_holds_the_traffic_mode() {
+        for (running, starting) in [(true, false), (false, true), (true, true)] {
+            for tun_on in [false, true] {
+                assert_eq!(
+                    tun_toggle(tun_on, running, starting),
+                    None,
+                    "a core that is up or coming up refuses the patch: running={running} starting={starting}"
+                );
+            }
+        }
+        let toggled = |on: bool| {
+            Some(ClientCommand::UpdateSettings(SettingsPatch {
+                traffic_mode: Some(if on {
+                    TrafficMode::SystemProxy
+                } else {
+                    TrafficMode::Tun
+                }),
+                ..Default::default()
+            }))
+        };
+        assert_eq!(tun_toggle(false, false, false), toggled(false));
+        assert_eq!(tun_toggle(true, false, false), toggled(true));
+    }
+
+    /// `None` command has to be *visible* as grey, or the control reads as live
+    /// and the click that does nothing is the bug this fixes. The knob's side
+    /// still carries which way the switch is set.
+    #[test]
+    fn an_inert_switch_does_not_wear_the_accent() {
+        assert_eq!(switch_track(true, true), CYAN);
+        assert_ne!(
+            switch_track(true, false),
+            switch_track(true, true),
+            "an enabled-on and a held-back-on track cannot be the same colour"
+        );
+        assert_ne!(
+            switch_track(false, false),
+            switch_track(false, true),
+            "nor the two off tracks"
+        );
+        assert_ne!(switch_track(true, false), CYAN);
     }
 }

@@ -3,7 +3,6 @@
 
 use client_core::ClientCommand;
 use client_core::ClientSnapshot;
-use client_core::command::SettingsPatch;
 use client_core::system_proxy::TrafficMode;
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -11,7 +10,7 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window, WindowControlArea, div, img, px, rgb, rgba,
 };
 
-use crate::components::{clean_proxy_label, icon, side_rate};
+use crate::components::{clean_proxy_label, icon, side_rate, tun_toggle};
 use crate::lang::{Locale, outbound_mode};
 use crate::state::{FieldSpec, Page, Sbgui, Tone, switch_language};
 use crate::theme::{
@@ -513,16 +512,7 @@ impl Sbgui {
                 "network",
                 if tun_on { MINT } else { MUTED },
                 cx,
-                (!running && !snapshot.starting).then_some(ClientCommand::UpdateSettings(
-                    SettingsPatch {
-                        traffic_mode: Some(if tun_on {
-                            TrafficMode::SystemProxy
-                        } else {
-                            TrafficMode::Tun
-                        }),
-                        ..Default::default()
-                    },
-                )),
+                tun_toggle(tun_on, running, snapshot.starting),
             ))
             .child(
                 div()

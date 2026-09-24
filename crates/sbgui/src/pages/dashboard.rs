@@ -6,7 +6,6 @@
 //! disclosure inside the first one rather than as a fourth card.
 
 use client_core::ClientCommand;
-use client_core::command::SettingsPatch;
 use client_core::format::human_bytes;
 use client_core::system_proxy::TrafficMode;
 use gpui::prelude::FluentBuilder;
@@ -17,7 +16,7 @@ use gpui::{
 
 use crate::components::{
     accordion, clean_proxy_label, delay_color, detail_item, health_dot, icon, info_cell, legend,
-    metric_cell, pill, switch, traffic_chart, work_surface,
+    metric_cell, pill, switch, traffic_chart, tun_toggle, work_surface,
 };
 use crate::lang::{Locale, outbound_mode, usage_label};
 use crate::pages::logs::localised_event_line;
@@ -399,16 +398,7 @@ impl Sbgui {
                     switch(
                         "dashboard-tun",
                         tun_on,
-                        (!running).then(|| {
-                            ClientCommand::UpdateSettings(SettingsPatch {
-                                traffic_mode: Some(if tun_on {
-                                    TrafficMode::SystemProxy
-                                } else {
-                                    TrafficMode::Tun
-                                }),
-                                ..Default::default()
-                            })
-                        }),
+                        tun_toggle(tun_on, snapshot.core_running, snapshot.starting),
                         cx,
                     ),
                 ),

@@ -24,6 +24,7 @@ mod lang;
 mod overlay;
 mod pages;
 mod parse;
+mod startup;
 mod state;
 mod theme;
 
@@ -64,12 +65,29 @@ impl AssetSource for SereinAssets {
 }
 
 /// Loads one settings file the same way the engine does, so the window can
-/// open before the engine's first poll completes.
-fn load_settings(dir: &Path) -> Settings {
-    Settings::load_or_create(dir).unwrap_or_default()
+/// open before the engine's first poll completes. The error is the caller's
+/// business: falling back to defaults silently would show the user settings
+/// they never chose.
+fn load_settings(dir: &Path) -> Result<Settings> {
+    Settings::load_or_create(dir)
+}
+
+/// Records one launch outcome in the trace file, and keeps its sentence for the
+/// window when the process still gets to open one.
+fn report(
+    dir: &Path,
+    outcome: &startup::Launch,
+    locale: crate::lang::Locale,
+    notices: &mut Vec<String>,
+) {
+    if let Some(trace) = outcome.trace() {
+        startup::record(dir, &trace);
+    }
+    notices.extend(outcome.notice(locale));
 }
 
 fn main() {
+    let locale = state::env_locale();
     // The engine (controller task, tokio::fs, reqwest) runs on this runtime for
     // the whole process lifetime. It is leaked on purpose: moved into the GPUI
     // launch closure it would be dropped the moment that closure returns, the
@@ -81,29 +99,66 @@ fn main() {
             .build()
             .expect("tokio runtime"),
     ));
-    let dir = settings::data_dir_for(DATA_DIR).expect("data directory");
+    let dir = match settings::data_dir_for(DATA_DIR) {
+        Ok(dir) => dir,
+        Err(error) => {
+            // The data directory is where the trace file lives, so this is the
+            // one outcome with nowhere to write: the console and a non-zero exit
+            // code are all that a start this early can leave behind.
+            let outcome = startup::Launch::NoDataDir(error.to_string());
+            eprintln!(
+                "sbgui: {}",
+                outcome.trace().expect("a failed start always has a reason")
+            );
+            std::process::exit(1);
+        }
+    };
+    startup::record(
+        &dir,
+        &format!("sbgui {} 启动 / starting", env!("CARGO_PKG_VERSION")),
+    );
+    // From here on, a panic is also a start that failed with no console to say
+    // so; the hook is what keeps GPUI's own abort from being silent.
+    startup::install_panic_hook(&dir);
+    let mut notices: Vec<String> = Vec::new();
     // The mixed port, the OS proxy and the runtime configuration are all
     // per-directory or machine-global, so a second instance would fight the
     // first over all three. Held for as long as the event loop runs.
-    let _instance = match settings::acquire_instance_lock(&dir) {
-        Ok(lock) => lock,
-        Err(error) => {
-            eprintln!(
-                "{}",
-                tr!(
-                    state::env_locale(),
-                    format!("无法锁定数据目录: {error}"),
-                    format!("Could not lock the data directory: {error}")
-                )
-            );
-            return;
-        }
+    let lock = settings::acquire_instance_lock(&dir);
+    let outcome = match &lock {
+        Ok(Some(_)) => startup::Launch::Proceed,
+        Ok(None) => startup::Launch::AlreadyRunning,
+        Err(error) => startup::Launch::LockFailed(error.to_string()),
     };
-    if _instance.is_none() {
+    report(&dir, &outcome, locale, &mut notices);
+    if outcome.fatal() {
+        // Leaving is right; leaving without a word was the bug. The trace file
+        // now carries the reason, in the language the user reads and the one the
+        // support channel does, next to the process id that said it.
         return;
     }
-    let _ = load_settings(&dir);
-    let _ = Profiles::load_or_create(&dir);
+    // Past the fatal outcomes, so the lock is held.
+    let _instance = lock.expect("only an uncontended lock reaches this point");
+    // The files the engine is about to read: opening them here is what lets the
+    // window show up before the first poll, and failing to open one used to be
+    // something the client kept to itself.
+    if let Err(error) = load_settings(&dir) {
+        report(
+            &dir,
+            &startup::Launch::DefaultsInstead(format!("settings.toml ({error})")),
+            locale,
+            &mut notices,
+        );
+    }
+    if let Err(error) = Profiles::load_or_create(&dir) {
+        report(
+            &dir,
+            &startup::Launch::DefaultsInstead(format!("profiles.toml ({error})")),
+            locale,
+            &mut notices,
+        );
+    }
+    let ui_startup_notice = (!notices.is_empty()).then(|| notices.join(" · "));
     let ui_data_dir = dir.clone();
     let controller = {
         let _guard = runtime.enter();
@@ -135,7 +190,7 @@ fn main() {
                     apply_windows_window_chrome(window);
 
                     let view = cx.new(|cx| {
-                        let view = Sbgui::new(controller, ui_data_dir, cx);
+                        let view = Sbgui::new(controller, ui_data_dir, ui_startup_notice, cx);
                         let refresh = cx.spawn(async move |this, cx| {
                             loop {
                                 cx.background_executor()

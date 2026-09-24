@@ -14,8 +14,8 @@ use crate::components::{
 use crate::lang::age_label;
 use crate::state::{FieldSpec, InputField, Sbgui, Tone};
 use crate::theme::{
-    BODY, BORDER, BORDER_STRONG, CYAN, FAINT, LABEL, META, MINT, MUTED, RADIUS_CONTROL, ROW_HOVER,
-    ROW_SELECTED, SURFACE, SURFACE_2, TEXT, WEIGHT_MEDIUM,
+    BODY, BORDER, BORDER_STRONG, CYAN, DANGER, FAINT, LABEL, META, MINT, MUTED, RADIUS_CONTROL,
+    ROW_HOVER, ROW_SELECTED, SURFACE, SURFACE_2, TEXT, WEIGHT_MEDIUM,
 };
 use crate::tr;
 
@@ -82,6 +82,8 @@ impl Sbgui {
                 cx,
                 |view, cx| {
                     view.show_subscription_import = true;
+                    // A panel opened afresh starts without the last complaint.
+                    view.subscription_error = None;
                     cx.notify();
                 },
             ))
@@ -158,6 +160,7 @@ impl Sbgui {
                                     .hover(|s| s.bg(rgb(ROW_HOVER)))
                                     .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
                                         view.show_subscription_import = false;
+                                        view.subscription_error = None;
                                         cx.notify();
                                     }))
                                     .child(icon("close", MUTED, 14.0)),
@@ -198,11 +201,24 @@ impl Sbgui {
                                 None,
                                 cx,
                                 |view, cx| {
-                                    view.submit_sub_url(cx);
-                                    view.show_subscription_import = false;
+                                    // The panel closes when the link was taken and
+                                    // stays open when it was not: an empty field
+                                    // used to close it too, which read as the
+                                    // client eating what the user typed.
+                                    if view.submit_sub_url(cx) {
+                                        view.show_subscription_import = false;
+                                    }
                                 },
                             )),
-                    ),
+                    )
+                    .children(self.subscription_error.map(|reject| {
+                        div()
+                            .mt(px(10.0))
+                            .text_size(px(LABEL))
+                            .line_height(px(19.0))
+                            .text_color(rgb(DANGER))
+                            .child(reject.label(locale))
+                    })),
             );
         }
 

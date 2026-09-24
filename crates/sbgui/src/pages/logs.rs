@@ -25,6 +25,68 @@ pub(crate) fn localised_event_line(line: &EventLine<'_>, locale: Locale) -> Stri
     }
 }
 
+/// How many lines of each stream the page paints: the newest kernel lines and
+/// the newest client events. Both are windows over longer buffers, so the
+/// painted row count stops growing here long before the log does.
+const KERNEL_ROWS: usize = 180;
+const EVENT_ROWS: usize = 60;
+
+/// Which row the log page pinned "自动滚动" to on the previous paint.
+///
+/// The engine keeps rings (500 kernel lines, 200 events) and the page paints at
+/// most [`KERNEL_ROWS`] + [`EVENT_ROWS`] rows, so once either is full the row
+/// count can never grow again — a follow test built on the count silently stops
+/// firing exactly when the log is busy, which is when tailing matters. The last
+/// row's own identity — which stream it came from and which line it carries —
+/// keeps telling a new line apart from a repaint, which is how the terminal
+/// client's `log_window` renders the newest rows rather than counting them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LogTail {
+    /// Rows the page paints, i.e. the index of the last one plus one.
+    rows: usize,
+    /// The stream the last row came from, so an event and a kernel line that
+    /// happen to read the same are still different rows.
+    source: &'static str,
+    /// The last row's text.
+    line: String,
+}
+
+impl LogTail {
+    /// The tail the page is about to paint from these two filtered streams.
+    fn new(kernel: &[String], events: &[String], event_source: &'static str) -> Self {
+        let shown_kernel = kernel.len().min(KERNEL_ROWS);
+        let shown_events = events.len().min(EVENT_ROWS);
+        // Events are painted after the kernel rows, so the last row is an event
+        // whenever any event shows.
+        let (source, line) = if shown_events > 0 {
+            (event_source, events.last())
+        } else {
+            ("sing-box", kernel.last())
+        };
+        Self {
+            rows: shown_kernel + shown_events,
+            source,
+            line: line.cloned().unwrap_or_default(),
+        }
+    }
+
+    /// The row to pin the view to, or `None` while nothing is painted.
+    fn last_row(&self) -> Option<usize> {
+        self.rows.checked_sub(1)
+    }
+}
+
+/// The row "自动滚动" jumps to on this paint, or `None` when the scroll must be
+/// left alone: follow is off, or no new row arrived. The very first paint has
+/// nothing pinned yet, so it follows to wherever the newest line is.
+fn follow_target(seen: Option<&LogTail>, tail: &LogTail, follow: bool) -> Option<usize> {
+    let repaint = seen == Some(tail);
+    if !follow || repaint {
+        return None;
+    }
+    tail.last_row()
+}
+
 impl Sbgui {
     // ----------------------------------------------------------------- logs
 
@@ -73,11 +135,11 @@ impl Sbgui {
             .map(|line| localised_event_line(&line, locale))
             .collect();
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
-        for (index, line) in kernel.iter().rev().take(180).rev().enumerate() {
+        for (index, line) in kernel.iter().rev().take(KERNEL_ROWS).rev().enumerate() {
             rows.push(log_row(index, "sing-box", line, self.log_wrap));
         }
         let event_offset = rows.len();
-        for (index, line) in events.iter().rev().take(60).rev().enumerate() {
+        for (index, line) in events.iter().rev().take(EVENT_ROWS).rev().enumerate() {
             rows.push(log_row(
                 event_offset + index,
                 client_source,
@@ -85,11 +147,16 @@ impl Sbgui {
                 self.log_wrap,
             ));
         }
-        // "自动滚动" pins the view to the newest line whenever the panel grew;
-        // scrolling a list that did not change would fight the user's wheel.
-        let rows_seen = self.log_rows.replace(rows.len());
-        if self.log_follow && rows.len() > rows_seen {
-            self.log_scroll.scroll_to_item(rows.len() - 1);
+        // "自动滚动" pins the view to the newest line whenever a line arrived.
+        // Scrolling on a paint that brought nothing new would fight the user's
+        // wheel, which is why the guard compares the tail row itself rather than
+        // the row count: see [`LogTail`].
+        let tail = LogTail::new(&kernel, &events, client_source);
+        let seen = self.log_tail.take();
+        let pin_to = follow_target(seen.as_ref(), &tail, self.log_follow);
+        self.log_tail.set(Some(tail));
+        if let Some(row) = pin_to {
+            self.log_scroll.scroll_to_item(row);
         }
         let copy_text = kernel
             .iter()
@@ -192,7 +259,7 @@ impl Sbgui {
                                 // The engine owns the buffers: hiding lines
                                 // by count stops working once the ring is full.
                                 view.send(ClientCommand::ClearLogs);
-                                view.log_rows.set(0);
+                                view.log_tail.set(None);
                                 cx.notify();
                             },
                         ))
@@ -328,6 +395,92 @@ impl Sbgui {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The panel's window over a saturated kernel ring: exactly `KERNEL_ROWS`
+    /// lines, the newest one being `newest`.
+    fn full_kernel(newest: usize) -> Vec<String> {
+        (newest - KERNEL_ROWS + 1..=newest)
+            .map(|number| format!("INFO line {number}"))
+            .collect()
+    }
+
+    #[test]
+    fn following_keeps_working_after_the_row_count_saturates() {
+        let seen = LogTail::new(&full_kernel(500), &[], "Client");
+        assert_eq!(seen.rows, KERNEL_ROWS);
+
+        // The core writes one more line: the ring drops its oldest entry, so the
+        // painted row count is unchanged — the count-based guard that used to
+        // decide this stopped firing here, and the view silently stopped tailing.
+        let tail = LogTail::new(&full_kernel(501), &[], "Client");
+        assert_eq!(
+            tail.rows, seen.rows,
+            "the whole point: a saturated window cannot report growth by count"
+        );
+        assert_eq!(
+            follow_target(Some(&seen), &tail, true),
+            Some(KERNEL_ROWS - 1),
+            "a new last row is a new line, so the view pins to it"
+        );
+
+        // And it keeps working line after line, not just once.
+        let next = LogTail::new(&full_kernel(502), &[], "Client");
+        assert_eq!(
+            follow_target(Some(&tail), &next, true),
+            Some(KERNEL_ROWS - 1)
+        );
+    }
+
+    #[test]
+    fn a_repaint_of_an_unchanged_tail_leaves_the_scroll_alone() {
+        let kernel = full_kernel(500);
+        let seen = LogTail::new(&kernel, &[], "Client");
+        let tail = LogTail::new(&kernel, &[], "Client");
+        assert_eq!(
+            follow_target(Some(&seen), &tail, true),
+            None,
+            "scrolling on a paint that brought nothing new fights the wheel"
+        );
+        assert_eq!(follow_target(Some(&seen), &tail, false), None);
+    }
+
+    #[test]
+    fn follow_switches_off_and_an_empty_panel_stop_the_jump() {
+        let kernel = ["INFO one".to_owned(), "INFO two".to_owned()];
+        let tail = LogTail::new(&kernel, &[], "Client");
+        assert_eq!(follow_target(None, &tail, true), Some(1));
+        assert_eq!(
+            follow_target(None, &tail, false),
+            None,
+            "自动滚动 off means off, even on a first paint"
+        );
+        assert_eq!(
+            follow_target(None, &LogTail::new(&[], &[], "Client"), true),
+            None,
+            "an empty panel has no row to pin to; the old code underflowed here"
+        );
+    }
+
+    #[test]
+    fn the_newest_event_is_the_tail_even_when_the_kernel_ring_is_full() {
+        let kernel = full_kernel(500);
+        let events = vec!["节点已切换".to_owned()];
+        let tail = LogTail::new(&kernel, &events, "Client");
+        assert_eq!(tail.rows, KERNEL_ROWS + 1);
+        assert_eq!(follow_target(None, &tail, true), Some(KERNEL_ROWS));
+
+        // Two rows that read the same from different streams are still different
+        // rows, so a repaint of one as the other cannot pass for "nothing new".
+        let kernel_last = LogTail::new(&kernel, &[], "Client");
+        let trimmed: Vec<String> = kernel.iter().take(KERNEL_ROWS - 1).cloned().collect();
+        let event_last = LogTail::new(&trimmed, &["INFO line 500".to_owned()], "Client");
+        assert_eq!(kernel_last.rows, event_last.rows);
+        assert_eq!(kernel_last.line, event_last.line);
+        assert_ne!(
+            kernel_last, event_last,
+            "the source column is part of the last row's identity"
+        );
+    }
 
     #[test]
     fn the_info_chip_keeps_unmarked_client_events() {

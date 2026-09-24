@@ -154,7 +154,11 @@ fi
 
 for size in $SIZES; do
   for page in $PAGES; do
+    # The import-panel seam opens the panel *and* presses 「添加」, so it must not
+    # leak into the ordinary page frames: a subscriptions frame with the panel
+    # pushed down is no longer a frame of the subscriptions table.
     SBGUI_PAGE=$page SBGUI_SIZE=$size SBGUI_SETTINGS_SECTION="${SBGUI_SETTINGS_SECTION:-}" \
+    SBGUI_SHOW_IMPORT_PANEL= \
       xvfb-run -a -s "-screen 0 ${size}x24" \
       bash "$HERE/inside.sh" --capture "$page" "$size" "$OUT" "$BIN"
   done
@@ -165,6 +169,29 @@ done
 SBGUI_SHOW_EXIT_CONFIRM=1 SBGUI_PAGE=dashboard \
   xvfb-run -a -s "-screen 0 1440x900x24" \
   bash "$HERE/inside.sh" --capture exit-confirm 1440x900 "$OUT" "$BIN"
+
+# The settings sections the page loop cannot reach, because picking one is a
+# click: `network` carries the ports, `tun` carries the switch that has to be
+# grey while the core runs. Both sizes, because the ticket asks for a narrow
+# frame of every new interaction, and `SBGUI_SIZE` is what makes the window
+# actually that size — the Xvfb screen alone would leave it at its default.
+for size in $SIZES; do
+  for section in network tun; do
+    SBGUI_SETTINGS_SECTION=$section SBGUI_PAGE=settings SBGUI_SIZE=$size SBGUI_SHOW_IMPORT_PANEL= \
+      xvfb-run -a -s "-screen 0 ${size}x24" \
+      bash "$HERE/inside.sh" --capture "settings-$section" "$size" "$OUT" "$BIN"
+  done
+done
+
+# The subscription import panel with 「添加」 pressed on an empty field, asked for
+# by the operator because it opens the panel on every subscriptions frame.
+if [ -n "${SBGUI_SHOW_IMPORT_PANEL:-}" ]; then
+  for size in $SIZES; do
+    SBGUI_PAGE=subscriptions SBGUI_SIZE=$size \
+      xvfb-run -a -s "-screen 0 ${size}x24" \
+      bash "$HERE/inside.sh" --capture subscriptions-import-panel "$size" "$OUT" "$BIN"
+  done
+fi
 
 echo "=== $OUT ==="
 ls -la "$OUT"

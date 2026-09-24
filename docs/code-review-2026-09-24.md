@@ -619,3 +619,107 @@ exit=0，计数 client-core 114 / sbctl lib 203 / sbtui 39 / json-merge 等 92 /
 
 `cargo test -p sbgui` 33/33（新增 3 道门）、clippy `-D warnings`、fmt 全绿；
 改色之后重抓了覆写页三种尺寸的画面复核。
+
+## R24 — 工单 02 第 1/3/4/5 条：接管现场，以及一次"绿门不覆盖结论"的复验
+
+上一位 writer agent 停在「三门已绿（47 tests），现在去抓画面」之前，改动全部未提交、
+画面一张没拍。本轮是接管：通读它 1065 行 diff + 新增 `startup.rs`（280 行）+ harness 的两个新 seam，
+自己复跑门，再对它新写的 14 个测试逐个做变异检验。
+
+**复跑的门（真实退出码，不走管道）**：`cargo test -p sbgui` exit 0 / 47 passed，
+`cargo clippy -p sbgui --all-targets -- -D warnings` exit 0，`cargo fmt -p sbgui -- --check` exit 0。
+R23 记下的是 33，现在 47；差值与它新增测试数逐个对得上：`startup.rs` 6、`pages/logs.rs` 4、
+`components.rs` 2、`parse.rs` 2 = 14。数字对得上才算门真的跑到了这些测试，而不是"总数看着多了"。
+
+**四项落地内容**：
+
+- 第 1 条（日志自动滚动在行数饱和后失效）：判据从"行数变多"换成"最后一行本身变了"，
+  `pages/logs.rs:44` `LogTail{rows,source,line}` + `pages/logs.rs:82` `follow_target`。
+  换掉的理由写在注释里：引擎给的是环（500 内核行 / 200 事件），页面各自再截
+  180 / 60 行，环一满行数就不可能再涨——**恰恰在最需要 tail 的时候旧判据停止触发**。
+- 第 3 条（设置页 TUN 在内核运行时要置灰）：三处 TUN 开关（工具条 / 概览 / 设置）现在都问
+  `components.rs:138` `tun_toggle(tun_on, core_running, starting)`；`starting` 也算持有，
+  因为那一刻入站清单正在写。置灰由 `components.rs:121` `switch_track(on, enabled)` 承担，
+  未启用的开不再穿强调色，同时设置页补了那句"请先停止内核"——它是**被拒**，不是排队。
+- 第 4 条（空输入点「添加」不再静默关面板）：校验抽成纯函数 `parse.rs:53` `classify_import`，
+  返回 `Submit{url,keep_in_field}` 或 `Reject(EmptyUrl)`；面板只在链接被接受时关闭，
+  拒绝时留着并把原因画出来（中英文由 `ImportReject::label(locale)` 现地取）。
+- 第 5 条（单实例锁 / 初始化失败不再无控制台静默退出）：新增 `startup.rs`，
+  `Launch` 五种结局（`startup.rs:88`）各有一句中文 + 一句英文，写进数据目录里的
+  `serein-startup.log`（`startup.rs:38`，追加、带 epoch 与 pid），能在窗口里说的（`DefaultsInstead`）
+  再由 `main.rs` 交给窗口的一条可关闭横幅；`install_panic_hook`（`startup.rs:68`）
+  把 panic 也记进去，因为 release GUI 根本没有控制台。数据目录都拿不到的那种失败
+  只剩控制台 + `exit(1)`（原来是 `return` → 退出码 0）。
+
+**17 次变异检验：16 咬住，1 漏网**。逐个把生产代码改回"旧 bug 的形状"，看指定测试是否变红：
+M1 把 `follow_target` 换回比较行数（**旧逻辑原样**）→ `following_keeps_working_after_the_row_count_saturates` 红；
+M2 去掉重绘判断、M3 `checked_sub` 换成 `saturating_sub`（空面板会钉到第 0 行）、
+M4 干脆不理 `log_follow`、M5 让尾行忘掉事件流 → 对应测试各自红；
+M7 把 `starting` 从判据里去掉、M8 干脆恒给命令 → TUN 那道红；
+M9 置灰轨道换回强调色、M10 两种 off 轨道同色 → 颜色那道红；
+M11 允许空链接通过、M12 让非 HTTP 链接也清字段 → `parse.rs` 两道红；
+M13 让已退出的进程仍带窗口提示、M14 追踪行丢英文、M16 报错不带路径、M17 丢 pid、
+M18 追加改成覆写 → `startup.rs` 五道红。
+**漏网的一条要写清楚**：把 `install_panic_hook` 里"无法解析的恐慌负载"兜底串换成空串，
+`a_panic_line_names_the_payload_and_the_place` 仍然绿——因为该测试是**直接拿现成 payload 调 `panic_line`**，
+够不到 hook 里那条 downcast 失败分支。也就是说 hook 函数体本身没有测试覆盖，
+只有它的纯函数部分有；这条不作为"已验证"记。
+（M15/M16 第一次跑时被我自己的并发改源码撞成 BUILD-NOISE，脚本串行重跑后才拿到上面的结论。）
+
+**我改它的两处**：
+
+1. `submit_sub_url` 的提交分支丢了 `cx.notify()`（只有拒绝分支留了）。这里没有兜底：
+   `chrome.rs:650` 的 `button()` 只跑闭包、`app.rs:86` 的 `send()` 只管发命令，
+   而 `main.rs:216` 的轮询**只在快照真的变了才重绘**（那是 R2x 为省电特意加的）。
+   于是"点了「添加」、链接合法、面板该关"这一步可能停在旧画面，等到下次快照变化或整分钟才恢复。
+   修法是把 notify 收回两条分支的共同出口（`app.rs:244`）。
+   同族的兄弟 handler（开面板、关面板、"知道了"）本来就各自 notify，约定是：**改 view 状态就要 notify**。
+2. 第 5 条的横幅是全新的视觉元素（flex-wrap + `min_w(240)` + 按钮，860 宽正是被裁过的位置），
+   而它只在 `settings.toml` 读失败时才出现，harness 造不出这个条件 → 加 `state.rs:408`
+   `env_startup_notice()`（`SBGUI_STARTUP_NOTICE=1`），走的是同一条 `Launch::notice(locale)`，
+   画的是真句子而不是为截图写死的字符串。
+
+**已知不足（不当成已完成）**：
+① `serein-startup.log` 只追加、不轮转，一次启动一行约 60 B——量化后判断是可接受，写在这里以免日后被当成日志系统；
+② 横幅文案在启动那一刻按当时 locale 定稿，切语言不会重译（它是一次性、要点"知道了"的东西）；
+③ 第 1 条"视图确实滚到底"单帧证明不了，证据只有纯函数 + 环饱和的推理；
+④ 第 3 条的置灰态必须有内核在跑才会出现，所以画面要靠 `DEMO_CORE` 种子，空态帧对它什么都没说。
+
+## R24 续 — 画面复核，以及 harness 自己的一处缺陷
+
+三轮 `scripts/sbgui-shot/shot.sh`（都带 `DEMO_CORE` 种子，退出码 0，12 + 12 + 窄屏补充若干）：
+
+- `1440x900-settings-tun.png`：内核运行中（顶栏「内核 运行中」），「启用 TUN 模式」轨道是灰的，
+  下面新加的那句"内核正在运行；切换流量模式需要重启内核，请先停止内核。"确实画出来了 → 第 3 条成立。
+- `1440x900-subscriptions-import-panel.png` 与 `860x640-*` 同帧：面板**没有消失**，空字段下面
+  红色「订阅链接不能为空。」→ 第 4 条成立（这正是旧行为里被吃掉的那一次点击）。
+- `shots-ticket02-notice/860x640-dashboard.png`：启动横幅在窄屏画得下——左红字一句、右「知道了」按钮，
+  没有换行也没有裁切。这条是**加 seam 的全部理由**：它是新布局，而新布局在 860 上会不会裁，只有画出来才知道。
+  帧里正文是中文而右上角按钮写着 English，这是对的：语言按钮标的是"切过去"的那个语言。
+- 概览帧（`860x640-dashboard.png`）顺带复核了第 3 条的另两处调用点：TUN 行写着"已关闭 · 改动需重启内核"。
+
+**harness 的缺陷（agent 加 seam 时带进来的，已修）**：`SBGUI_SHOW_IMPORT_PANEL=1` 是进程级环境变量，
+而 `Sbgui::new` 每次都读它，于是**普通 `subscriptions` 帧也被面板顶开了**——那张本该是订阅表格的帧
+（工单 04 的 860 裁切修复就靠它复核）不再画表格。修法是在页面循环里显式清空
+（`SBGUI_SHOW_IMPORT_PANEL=`，判定是 `== "1"`，空串即关），只让专门的 `subscriptions-import-panel` 帧带着它。
+顺带把两个 extras 从写死的 1440 改成跟着 `$SIZES` 走并补传 `SBGUI_SIZE`——工单 02 的验收明写
+"860×640 与 1440×900 各一张"，而 `SBGUI_SIZE` 才是真正决定窗口宽度的那个变量
+（Xvfb 的屏幕尺寸不会自己缩窗口）。
+
+第三轮（`shots-ticket02-narrow`，860×640）复核这两处改动的结果：
+
+- `860x640-subscriptions.png` 回到了**表格帧**（紧凑四列、操作列与表头对齐、无裁切），
+  工单 04 那次修复的复核画面因此仍然可用；带面板与红色原因的那张单独叫
+  `860x640-subscriptions-import-panel.png`。seam 泄漏确认已堵住。
+- `860x640-settings-tun.png` 只到"分区列表里 TUN 被选中"这一层：设置页在窄屏把两栏折成
+  列表在上、内容在下，开关与那句说明在滚动区之外，而 harness 的 `--capture` 没有滚动控制。
+  所以**第 3 条的窄屏画面证据是缺的**，不要拿这张帧当"860 下置灰也验证过"。
+  它的 1440 帧、概览帧与两道单测才是这条的依据。
+
+**`switch_track` 的量化边界**（别把那道四态互不相等的测试当成可辨识度门）：
+按 R23 的 `contrast()` 算，两种 off 轨道 `#c7cbd1` 与 `#cbd8d4` 彼此只差 **1.11:1**，
+各自对白卡也才 1.63 / 1.47（这个 3:1 以下在改动前就存在，不是新引入的）；
+两种 on 轨道差 1.32:1，肉眼可分。所以"这个开关现在点不动"在 off 态**不是靠轨道颜色传达的**，
+而是靠旁边的句子（概览"改动需重启内核"、设置页那句完整说明）与光标——
+`components.rs:172` 的 `.when(clickable, cursor_pointer)` 保证 inert 时不给手型。
+这够用了，但记下来：以后谁想把置灰当唯一信号用，1.11:1 是不够的。

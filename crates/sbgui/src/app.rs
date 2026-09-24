@@ -11,24 +11,41 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 
-use crate::parse::{parse_count, parse_port};
+use crate::parse::{ImportAttempt, classify_import, parse_count, parse_port};
 use crate::state::{
-    ExitChoice, INPUT_FIELDS, InputField, LogLevelFilter, Page, Sbgui, TextField, env_locale,
+    ExitChoice, INPUT_FIELDS, InputField, LogLevelFilter, Page, Sbgui, TextField, Tone, env_locale,
     env_page, env_settings_section, env_show_clear_confirm, env_show_exit_confirm,
-    env_show_stop_confirm,
+    env_show_import_panel, env_show_stop_confirm, env_startup_notice,
 };
-use crate::theme::{BG, BORDER, CONTENT_MAX, CONTENT_PAD, GAP_SECTION, TEXT, WINDOW_RADIUS};
+use crate::theme::{
+    BG, BORDER, CONTENT_MAX, CONTENT_PAD, DANGER, GAP_ITEM, GAP_SECTION, LABEL, TEXT, WINDOW_RADIUS,
+};
+use crate::tr;
 
 impl Sbgui {
     pub(crate) fn new(
         controller: ClientController,
         data_dir: PathBuf,
+        startup_notice: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
         let snapshot = controller.snapshot();
-        Self {
+        // The band this is only ever filled by a read that failed at launch,
+        // which the screenshot harness never causes. The seam produces the
+        // sentence the real outcome produces, so the layout has frame evidence.
+        let startup_notice = startup_notice.or_else(|| {
+            env_startup_notice()
+                .then(|| {
+                    crate::startup::Launch::DefaultsInstead(
+                        "settings.toml (Permission denied (os error 13))".to_owned(),
+                    )
+                })?
+                .notice(env_locale())
+        });
+        let mut view = Self {
             controller,
             data_dir,
+            startup_notice,
             snapshot,
             page: env_page().unwrap_or(Page::Dashboard),
             group_index: 0,
@@ -42,7 +59,8 @@ impl Sbgui {
             }),
             log_level: LogLevelFilter::default(),
             settings_section: env_settings_section().unwrap_or_default(),
-            show_subscription_import: false,
+            show_subscription_import: env_show_import_panel(),
+            subscription_error: None,
             show_rule_sets: false,
             show_all_rules: false,
             show_all_connections: false,
@@ -52,14 +70,21 @@ impl Sbgui {
             paused_connections: None,
             selected_connection: None,
             log_scroll: ScrollHandle::default(),
-            log_rows: std::cell::Cell::new(0),
+            log_tail: std::cell::Cell::new(None),
             painted_minute: 0,
             log_wrap: true,
             log_follow: true,
             confirm_close_all: false,
             confirm_delete_profile: None,
             confirm_clear_override: env_show_clear_confirm(),
+        };
+        // The seam replays the click instead of painting its result: the panel is
+        // open, so pressing 「添加」 on the still-empty field goes through the very
+        // path a user takes. A frame that shows no panel is the old bug returning.
+        if env_show_import_panel() {
+            view.submit_sub_url(cx);
         }
+        view
     }
 
     pub(crate) fn field(&self, field: InputField) -> &TextField {
@@ -169,7 +194,9 @@ impl Sbgui {
             | InputField::LogQuery
             | InputField::ProxySearch
             | InputField::RuleSearch => {}
-            InputField::SubUrl => self.submit_sub_url(cx),
+            InputField::SubUrl => {
+                self.submit_sub_url(cx);
+            }
             InputField::Mirror => self.send(ClientCommand::UpdateSettings(SettingsPatch {
                 mirror: Some(text),
                 ..Default::default()
@@ -206,21 +233,33 @@ impl Sbgui {
         }
     }
 
-    pub(crate) fn submit_sub_url(&mut self, cx: &mut Context<Self>) {
-        let text = self.field(InputField::SubUrl).text.trim().to_owned();
-        if text.is_empty() {
-            return;
-        }
-        self.send(ClientCommand::ImportSubscription {
-            name: None,
-            url: text.clone(),
-        });
-        // A non-HTTP line stays in the field so it can be fixed; the engine's
-        // rejection shows up in the header status line either way.
-        if text.starts_with("https://") || text.starts_with("http://") {
-            self.field_mut(InputField::SubUrl).text.clear();
-        }
+    /// Submits the import panel's link and reports whether it was taken, which
+    /// is the only answer that lets the panel close. An empty field used to be a
+    /// silent early `return` while the click handler closed the panel anyway, so
+    /// the entry vanished without a word (issue 02 item 4).
+    ///
+    /// Both branches repaint: `button()` and `send()` notify nobody, and the poll
+    /// loop only notifies when the snapshot actually changed, so a branch that
+    /// mutated view state without notifying could sit un-drawn for a minute.
+    pub(crate) fn submit_sub_url(&mut self, cx: &mut Context<Self>) -> bool {
+        let taken = match classify_import(&self.field(InputField::SubUrl).text) {
+            ImportAttempt::Submit { url, keep_in_field } => {
+                self.subscription_error = None;
+                self.send(ClientCommand::ImportSubscription { name: None, url });
+                // A non-HTTP line stays in the field so it can be fixed; the
+                // engine's rejection shows up in the header status line either way.
+                if !keep_in_field {
+                    self.field_mut(InputField::SubUrl).text.clear();
+                }
+                true
+            }
+            ImportAttempt::Reject(reason) => {
+                self.subscription_error = Some(reason);
+                false
+            }
+        };
         cx.notify();
+        taken
     }
 
     pub(crate) fn save_settings(&mut self, cx: &mut Context<Self>) {
@@ -252,6 +291,11 @@ impl Sbgui {
             InputField::CoreVersion => self.snapshot.settings.core_version.clone(),
         };
         self.field_mut(field).text = value;
+        // Disowning the link also disowns the complaint about it: the error
+        // speaks about the text that was there, which Esc has just removed.
+        if field == InputField::SubUrl {
+            self.subscription_error = None;
+        }
     }
 
     /// Sends a command, holding back the ones that must not happen by accident.
@@ -354,6 +398,40 @@ impl Render for Sbgui {
                             .flex()
                             .flex_col()
                             .child(self.toolbar(page, cx))
+                            .children(self.startup_notice.clone().map(|message| {
+                                // One band between the toolbar and the page, in
+                                // the palette's own warning colour: it is the
+                                // launch path speaking, not the engine, and the
+                                // user decides when it has said enough.
+                                div()
+                                    .px(px(CONTENT_PAD))
+                                    .pt(px(GAP_SECTION))
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(GAP_ITEM))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(240.0))
+                                            .text_size(px(LABEL))
+                                            .line_height(px(19.0))
+                                            .text_color(rgb(DANGER))
+                                            .child(message),
+                                    )
+                                    .child(self.button(
+                                        "dismiss-startup-notice",
+                                        tr!(self.locale, "知道了", "Got it"),
+                                        Tone::Neutral,
+                                        None,
+                                        cx,
+                                        |view, cx| {
+                                            view.startup_notice = None;
+                                            cx.notify();
+                                        },
+                                    ))
+                            }))
                             .child(
                                 div()
                                     .id("page-scroll")

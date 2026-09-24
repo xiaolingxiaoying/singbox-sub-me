@@ -79,6 +79,10 @@
 ## G5 — GUI 与 TUI 功能对齐 / UI 一致性 / a11y
 
 - 证据：`.scratch/gui-completion/issues/01-tui-parity-actions.md`（GUI 缺 `ImportProfileFile`、`SetProfileUrl`、档案命名、连接排序、日志暂停、帮助浮层，**以及 2026-09-24 新增的第 7 页「覆写」**）、`02-ui-consistency-and-a11y.md`（9 条：自动滚动饱和、保存语义三套、TUN 置灰、空输入静默、单实例失败静默、对比度、键盘/IME、硬编码颜色、长列表虚拟化）。
+- 2026-09-24 进度：工单 01 第 6 条（覆写页）与工单 02 第 1/3/4/5/6 条已落地（R22、R23、R24）。
+  工单 01 复核后**差集只剩三个命令**，其中 `SetTrafficMode` 是新发现的**能力缺口**：
+  TUI 的 `m` 走 `restart: true` 能在内核运行时换 TUN，GUI 只会发 `UpdateSettings`，
+  内核运行时被引擎拒绝——工单 02 第 3 条治好的是死点击，不是这个缺口（已记进工单 01 第 7 项）。
 - 建议：逐条按工单实现；一致性项优先于纯视觉项。
 
 ## G6 — `tray-icon` 死依赖 + CI 无未用依赖门禁
