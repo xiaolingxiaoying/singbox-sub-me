@@ -16,8 +16,8 @@
 | --- | --- | --- | --- | --- |
 | G1 | Windows 真机验证流水线缺失（`scripts/winvm/verify.ps1` 不存在） | GUI/TUI 平台行为 | `.scratch/verification-environments/issues/03-windows-vm-pipeline.md` | **入口已建成**（`all` 腿待一次真机运行） |
 | G2 | Windows MSI 打包缺陷 + 发布链不含 `sbgui`/MSI | 发布 | `.scratch/gui-completion/issues/03-release-matrix-and-ci-gate.md` | **代码已修，runner 未验**；其中两条建议被撤回（见 R11） |
-| G3 | 订阅模板 `ClientTemplate::{Global,Split}` 是空壳 | 服务端订阅内容 | `.scratch/subscription-capability-20261002/issues/30-client-template-axis.md` | **已落地**（`standard` 字节未动、`minimal` 保留内联分流）；新模板**未过真核** |
-| G4 | 客户端"覆写配置文件内容"未实现 | TUI/GUI | `.scratch/client-config-override/spec.md`（+ `issues/01`、`02`） | ready-for-agent |
+| G3 | 订阅模板 `ClientTemplate::{Global,Split}` 是空壳 | 服务端订阅内容 | `.scratch/subscription-capability-20261002/issues/30-client-template-axis.md` | **已落地并过真核**（5 内核 × 3 模板 = 15 组合全过 `sing-box check`）；mihomo 门亦已扩到 3 模板 × 2 规则档 |
+| G4 | 客户端"覆写配置文件内容"未实现 | TUI/GUI | `.scratch/client-config-override/spec.md`（+ `issues/01`、`02`） | **引擎与 TUI 第 7 页已落地**（L1+L2+L3 全绿）；GUI 侧仍缺，已记进 G5 工单 01 第 6 条 |
 | G5 | GUI 与 TUI 功能对齐 / UI 一致性 / a11y | GUI | `.scratch/gui-completion/issues/01`、`02` | ready-for-agent |
 | G6 | `tray-icon` 死依赖，且 CI 无未用依赖门禁 | GUI 构建 | `.scratch/subscription-capability-20261002/issues/04-ci-unused-deps.md` | **依赖已删**；CI 未用依赖门禁仍开放 |
 | G7 | 英文界面仍残留中文（i18n 未收口） | GUI/TUI | `.scratch/sbgui-progressive-workspace/issues/03-engine-text-remaining-sites.md` | needs-implementation |
@@ -71,9 +71,14 @@
 - 设计约束：`deep_merge` 目前在服务端 crate `src/override_template.rs`，应抽成共享小 crate，**不要**在 `client-core` 复制一份实现；覆写边界需写入 `PRODUCT.md` 并立 ADR。
 - 建议：按 `issues/01-core-override-model.md` → `issues/02-tui-override-ui.md` 顺序实现。
 
+> **2026-09-24 更新**：引擎侧（`crates/client-core/src/config_override.rs` + `crates/json-merge`）、
+> `runtime_config` 的合并点与保留字段写回、TUI 第 7 页「覆写」（只读脱敏 outline + 片段开关 + `O` 清空）
+> 都已落地，过 Windows L1、Linux L2（456 测试）与 Docker L3 验收。工单 02 里 `$EDITOR` 那套编辑设计
+> 被 ADR-0023 否决并标注 superseded。剩下的只有 GUI 页与真机验收。过程与两处复核发现见 R21。
+
 ## G5 — GUI 与 TUI 功能对齐 / UI 一致性 / a11y
 
-- 证据：`.scratch/gui-completion/issues/01-tui-parity-actions.md`（GUI 缺 `ImportProfileFile`、`SetProfileUrl`、档案命名、连接排序、日志暂停、帮助浮层）、`02-ui-consistency-and-a11y.md`（9 条：自动滚动饱和、保存语义三套、TUN 置灰、空输入静默、单实例失败静默、对比度、键盘/IME、硬编码颜色、长列表虚拟化）。
+- 证据：`.scratch/gui-completion/issues/01-tui-parity-actions.md`（GUI 缺 `ImportProfileFile`、`SetProfileUrl`、档案命名、连接排序、日志暂停、帮助浮层，**以及 2026-09-24 新增的第 7 页「覆写」**）、`02-ui-consistency-and-a11y.md`（9 条：自动滚动饱和、保存语义三套、TUN 置灰、空输入静默、单实例失败静默、对比度、键盘/IME、硬编码颜色、长列表虚拟化）。
 - 建议：逐条按工单实现；一致性项优先于纯视觉项。
 
 ## G6 — `tray-icon` 死依赖 + CI 无未用依赖门禁
