@@ -525,6 +525,10 @@ const TUN_DEVICE: &str = "/dev/net/tun";
 /// writable path.
 #[cfg(unix)]
 pub(crate) fn tun_device_openable(path: &str) -> bool {
+    // `is_char_device` is a unix-only extension of FileType, which is why this
+    // function and its test are cfg(unix): a Windows build never compiles them
+    // and a green host gate says nothing about them.
+    use std::os::unix::fs::FileTypeExt;
     let Ok(meta) = std::fs::metadata(path) else {
         return false;
     };
