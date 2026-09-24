@@ -498,6 +498,57 @@ CGNAT/ULA 段，CN 常用后缀 + 粗粒度 /10–/11 网段。IPv6 走 `IP-CIDR
 - `chore(dev)`：R18 的 `SRC_REV` 模式与已知坑 #10
 - `docs(clients)`：ADR-0023、`PRODUCT.md` 的覆写边界、R18/R19 本文
 - `feat(server)`：R20（Clash `minimal` 去 GeoDB + 12 组真核门）
+- `feat(clients)`：R21（TUI 第 7 页「覆写」）
+- `fix(dev)`：R21 附带的 `wsl-gate.sh` cargo 环境修复
+
+---
+
+## R21 — TUI 覆写页落地，以及它暴露的两处"只读边界"漏洞
+
+写这一页的 subagent 在 150 轮上限处停住，最后一次动作是补 render test。它留下的树
+**能编译、36 个测试全绿**，所以本轮我做的是复核而不是重写。复核确认了几处设计确实是
+有效的：金标准与单读同一份 `view::fixtures`（两边不可能各说各话）、脱敏在**每一帧**上
+断言（outline / 片段列表 / 状态行是三条从快照到屏幕的独立路径）、"绝不打印本机数据目录"、
+片段路径与 outline **排序后**再画——`serde_json` 的 map 遍历顺序取决于 `preserve_order`
+是否被统一进构建，与 R17 #3 的键序问题是同一类坑。
+
+### 工单与 ADR 打架（这次是工单错）
+
+`.scratch/client-config-override/issues/02` 要求 `o` 调 `$VISUAL`/`$EDITOR`、失败降级为内置多行编辑器，
+与 ADR-0023 / `PRODUCT.md` 的边界（只读展示 + 片段开关，不提供任意 JSON 编辑器）直接冲突。
+agent 照 ADR 实现、没照工单实现。工单已标 `superseded` 并写明"别照做"。
+
+### 真正的缺口：只读页给了一条走不通的出口
+
+复核时发现的不是风格问题而是死路：覆写文件名是**档案名的 sha256**，页面写着
+"要改就在数据目录的 overrides/ 下改文件"，但用户既找不到也无法删掉那个文件；
+而 `ClientCommand::SetOverride` / `ClearOverride` 在**任何界面都没有调用方**
+（`git grep` 全仓只有 `ToggleOverrideFragment` 一处被 UI 发送）。
+
+本轮补了 `O`：两次确认删本档案覆写。三个细节值得写下来——
+1. 档案名取 `active_profile` 而不是 `override_summary`：最需要出口的状态恰好是**文件解析失败**，
+   那时只有 `override_error`、没有 summary，而内核正因那个文件起不来；
+2. 无文件可删时直接说明，不进入"确认删除"再报一个根本没发生的清除事件；
+3. 其他任何键撤回确认（`Enter` 开关片段不需要确认，因为再按一次就是 undo；删除没有 undo）。
+
+`SetOverride` 继续"只由文件与服务端 API 触达"是**决定**不是遗漏，理由记在工单 02 里。
+
+### 页脚会被终端宽度剪掉（金标准抓的，不是我眼睛抓的）
+
+第一版提示写成 `… · O 删除覆写文件`，golden diff 显示渲染结果是 `…  ·  O   `——
+提示被剪成半个键，比不写更像坏掉。改成 `↑↓/Enter 开关片段（下次启动生效） · O 删覆写`
+后四种覆写帧都完整显示；另加一条 `contains("O 删覆写")` 断言。
+**这条断言不是抓它的那道门**：变异检验时先失败的是同一测试里位置更前的 insta 断言，
+所以话说清楚——金标准负责发现，新断言负责解释原因。
+
+### 本轮 L2 的精确计数
+
+Windows：`cargo test -p sbtui --lib` 39/39、clippy `-D warnings`、`cargo fmt --check` 全绿。
+Linux：`scripts/dev/wsl-gate.sh` 全门（fmt + clippy + `cargo test --workspace` 排除 sbgui）
+exit=0，计数 client-core 114 / sbctl lib 203 / sbtui 39 / json-merge 等 92 / 其余 5，
+**合计 456 passed / 0 failed**；单独再跑 `-p sbtui` 亦 39/39。
+（前一条提交信息里"450 tests"是四舍五入的说法，以这里为准。）
+
 
 
 

@@ -137,7 +137,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         }
         Tab::Settings => "n 新增  ·  e 编辑  ·  Delete 删除  ·  d 下载内核  ·  a/P/U 选项",
         Tab::Rules => "入站与规则来自内核正在使用的配置  ·  r 返回日志",
-        Tab::Override => "只读  ·  ↑↓ 选片段  ·  Enter 开/关片段（下次启动生效）",
+        Tab::Override => "只读  ·  ↑↓/Enter 开关片段（下次启动生效）  ·  O 删覆写",
     };
     let line = Line::from(vec![
         Span::styled(" ", Style::default()),
@@ -217,7 +217,8 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         Tab::Settings => "n 新增 · e 编辑 · Delete 删除 · d 下载内核 · a/P/U/g/y 选项",
         Tab::Rules => "只读视图 · r 返回日志",
         Tab::Override => {
-            "只读视图 · ↑↓ 选片段 · Enter 开/关片段 · 改文件请在数据目录 overrides/ 下"
+            "只读视图 · ↑↓ 选片段 · Enter 开/关片段 · O 删除覆写文件（两次确认） · \
+             改文件请在数据目录 overrides/ 下"
         }
     };
     let pages = format!("Tab / 1–{}", Tab::COUNT);
@@ -619,6 +620,11 @@ mod render_tests {
         // shows both which row `Enter` would act on and that the list scrolls
         // the selected fragment into view.
         let fragments_frame = frame_at(Tab::Override, fragments, 2);
+        assert!(
+            fragments_frame.contains("O 删覆写"),
+            "the footer is clipped to the terminal width, so a key hint that \
+             does not fit is a key the user cannot discover: {fragments_frame}"
+        );
         assert!(
             fragments_frame.contains("+2 条规则") && fragments_frame.contains("停用"),
             "the rule count and the off state are both on screen:\n{fragments_frame}"

@@ -51,6 +51,9 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
     if key != KeyCode::Char('m') {
         app.confirm_mode = false;
     }
+    if key != KeyCode::Char('O') {
+        app.confirm_clear_override = false;
+    }
     match key {
         KeyCode::Char('?') => app.show_help = true,
         KeyCode::Tab => app.tab = app.tab.next(),
@@ -80,6 +83,7 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
         KeyCode::Char('t') if app.tab == Tab::Proxies => test_current_delay(app),
         KeyCode::Char('T') if app.tab == Tab::Proxies => test_group_delays(app),
         KeyCode::Char('u') => app.send(ClientCommand::UpdateSubscription),
+        KeyCode::Char('O') if app.tab == Tab::Override => clear_override_file(app),
         KeyCode::Char('x') if app.tab == Tab::Connections => close_selected_connection(app),
         KeyCode::Char('X') if app.tab == Tab::Connections => close_all_connections(app),
         KeyCode::Char('S') if app.tab == Tab::Connections => {
@@ -470,6 +474,41 @@ fn toggle_highlighted_fragment(app: &mut App) {
     });
 }
 
+/// The Override tab's `O`: delete the active profile's override file, on the
+/// second press.
+///
+/// The page reads "要覆写就在数据目录的 overrides/ 下改文件", and that is a dead end
+/// without this key: the file is named after the sha256 of the profile name, so
+/// the user cannot find it to edit or remove it. Clearing is the one override
+/// action that cannot be undone by pressing the key again, which is why it asks
+/// once while a fragment toggle does not.
+///
+/// The name comes from the active profile, not from `override_summary`, because
+/// the state that most needs an exit is a file that failed to parse: then there
+/// is no summary, only `override_error`, and the core will not start.
+fn clear_override_file(app: &mut App) {
+    let Some(profile) = app
+        .snapshot
+        .active_profile
+        .as_ref()
+        .map(|profile| profile.name.clone())
+    else {
+        app.status = "尚无档案，也没有覆写文件".to_owned();
+        return;
+    };
+    if app.snapshot.override_summary.is_none() && app.snapshot.override_error.is_none() {
+        app.status = format!("档案 {profile} 没有覆写文件");
+        return;
+    }
+    if !app.confirm_clear_override {
+        app.confirm_clear_override = true;
+        app.status = format!("再按 O 确认删除档案 {profile} 的覆写文件（不可撤销）");
+        return;
+    }
+    app.confirm_clear_override = false;
+    app.send(ClientCommand::ClearOverride(profile));
+}
+
 fn test_current_delay(app: &mut App) {
     if !app.snapshot.core_running {
         return;
@@ -669,6 +708,14 @@ mod tests {
     /// An [`App`] wired to a real engine over a seeded profile and a real
     /// override file: no mock sits between the key press and the file on disk.
     async fn engine_with_override(text: &str) -> (App, tempfile::TempDir, std::path::PathBuf) {
+        engine_with_override_file(Some(text)).await
+    }
+
+    /// The same, with `None` writing no override file at all — the state `O` has
+    /// to refuse rather than ask to delete.
+    async fn engine_with_override_file(
+        text: Option<&str>,
+    ) -> (App, tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("temporary data directory");
         std::fs::write(
             dir.path().join("profiles.toml"),
@@ -678,8 +725,11 @@ mod tests {
         )
         .expect("a seeded profile store");
         let path = client_core::settings::override_path(dir.path(), OVERRIDDEN_PROFILE);
-        std::fs::create_dir_all(path.parent().expect("an overrides directory")).expect("directory");
-        std::fs::write(&path, text).expect("an override file");
+        if let Some(text) = text {
+            std::fs::create_dir_all(path.parent().expect("an overrides directory"))
+                .expect("directory");
+            std::fs::write(&path, text).expect("an override file");
+        }
         let mut app = App::new(
             ClientController::start(dir.path().to_path_buf()),
             dir.path().to_path_buf(),
@@ -959,6 +1009,84 @@ mod tests {
             selected_connection_index(&app),
             0,
             "a vanished connection falls back to the first row"
+        );
+    }
+
+    /// The only way out of an override has to be a key, because the file is named
+    /// after the sha256 of the profile name and the page tells the user to edit
+    /// it by hand: without `O` the instruction is a dead end.
+    #[tokio::test]
+    async fn pressing_shift_o_asks_once_then_deletes_the_override_file() {
+        let (mut app, _dir, path) = engine_with_override(TWO_FRAGMENTS).await;
+        assert!(path.is_file(), "the fixture writes the file");
+
+        press(&mut app, KeyCode::Char('O'));
+        assert!(
+            app.confirm_clear_override && path.is_file(),
+            "the first press arms the confirmation and touches nothing: {}",
+            app.status
+        );
+        assert!(
+            app.status.contains("再按 O") && app.status.contains(OVERRIDDEN_PROFILE),
+            "the prompt names the key and the profile: {}",
+            app.status
+        );
+
+        // Any other key withdraws the offer, so a stray press cannot be the
+        // second half of an accident.
+        press(&mut app, KeyCode::Down);
+        assert!(
+            !app.confirm_clear_override,
+            "a different key must reset the confirmation"
+        );
+
+        press(&mut app, KeyCode::Char('O'));
+        press(&mut app, KeyCode::Char('O'));
+        let gone = wait_until(|| !path.exists()).await;
+        assert!(gone, "the second press deletes the file");
+        app.refresh_snapshot();
+        assert!(
+            app.snapshot.override_summary.is_none() && app.snapshot.override_error.is_none(),
+            "the page reads the deletion back from disk: {:?}",
+            app.snapshot.override_summary
+        );
+    }
+
+    /// A file that fails to parse leaves `override_summary` empty, so a guard
+    /// that only looks at the summary would refuse to clear the very file that
+    /// is keeping the core from starting.
+    #[tokio::test]
+    async fn shift_o_still_offers_the_exit_when_the_override_file_is_unparseable() {
+        let (mut app, _dir, path) = engine_with_override(r#"{ "route": }"#).await;
+        app.refresh_snapshot();
+        assert!(
+            app.snapshot.override_error.is_some() && app.snapshot.override_summary.is_none(),
+            "the fixture must land in the broken-file state: {:?}",
+            app.snapshot.override_error
+        );
+
+        press(&mut app, KeyCode::Char('O'));
+        assert!(
+            app.confirm_clear_override,
+            "an unusable file is still a file to delete: {}",
+            app.status
+        );
+        press(&mut app, KeyCode::Char('O'));
+        assert!(
+            wait_until(|| !path.exists()).await,
+            "the broken file can be removed from the UI"
+        );
+    }
+
+    #[tokio::test]
+    async fn shift_o_on_a_profile_without_an_override_says_so_instead_of_asking() {
+        let (mut app, _dir, path) = engine_with_override_file(None).await;
+        assert!(!path.exists(), "this profile has no override file");
+        press(&mut app, KeyCode::Char('O'));
+        assert!(
+            !app.confirm_clear_override && app.status.contains("没有覆写文件"),
+            "nothing to confirm, and the reason is said: {}",
+            app.status
         );
     }
 

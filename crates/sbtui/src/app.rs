@@ -219,6 +219,8 @@ pub(crate) struct App {
     /// like the proxy member highlight, and clamped against the fragment list
     /// the engine published (the file can change under us).
     pub(crate) selected_fragment: usize,
+    /// A pending `O` on the Override tab: the second press deletes the file.
+    pub(crate) confirm_clear_override: bool,
     // Input overlay.
     pub(crate) input: Option<InputGoal>,
     pub(crate) pending_profile_name: Option<String>,
@@ -274,6 +276,7 @@ impl App {
             profiles_list: ListState::default(),
             confirm_delete: None,
             selected_fragment: 0,
+            confirm_clear_override: false,
             input: None,
             pending_profile_name: None,
             input_text: String::new(),
