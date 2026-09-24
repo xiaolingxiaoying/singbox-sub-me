@@ -288,13 +288,21 @@ Shadowrocket 里会显示成巨额"上传"。
 暂存到 `C:\Users\ranly\tmp-sbcores`，由 `fetch-sing-box-cores.sh` 的 `STAGE_DIR` 分支拷进 `~/bin`。
 之后 `scripts/dev/wsl-real-cores.sh` 的 version_profiles 腿：**3 passed / 0 failed**，
 其中包含"5 个真实内核各自接受自己的工件"与"服务端配置过 1.14"。
-仍**未验**的是新模板：那两个测试**只测默认模板**，所以"Global/Split 过真核"这件事今天没有门覆盖，
-把它按模板参数化是下一批的第一项。mihomo 腿仍卡在下 `geoip.metadb`（同一网络原因，非工件问题）。
+当时仍**未验**的是新模板：那两个测试只测默认模板。同日参数化后的结果见下一段。
+mihomo 腿仍卡在下 `geoip.metadb`（同一网络原因，非工件问题）。
 
 
-**由此暴露的一个真缺口**：`tests/version_profiles.rs` 与 `tests/clash_mihomo.rs` **只测默认模板**，
-所以"新模板过真核"这件事今天没有任何门覆盖。需要把这两个测试按模板参数化——已在 R12 记为待办，
-并且必须等 GitHub 可达时才能验证。
+**补验完成（同日）**：把 `tests/version_profiles.rs` 与 `tests/clash_mihomo.rs` 按模板参数化之后，
+真核矩阵**跑满了 5 内核 × 3 模板 = 15 种组合，全部被各自内核接受**（`test result: ok. 3 passed`）。
+判据不是那些 `eprintln` 行（`--nocapture` 的输出在这个日志里被截断过），而是断言本身：
+把期望改成 `× 4` 后测试判红并打印 **"15 of 20 combinations were checked"**，
+说明计数是真实跑出来的、不是恒真断言。
+mihomo 腿仍只能算"未验"：它在第一种组合（`template=standard`，字节与金标准相同）就卡在
+下载 `geoip.metadb` 超时上，与模板内容无关，CI 有网时会真正跑满 6 种组合。
+
+**由此暴露的一个真缺口**（已闭合）：`tests/version_profiles.rs` 与 `tests/clash_mihomo.rs`
+此前**只测默认模板**，所以"新模板过真核"这件事没有任何门覆盖——金标准与单元测试都只会
+检查内容形状，不会发现某份工件在某个 minor 上根本起不来。
 
 ## R14 — 本轮环境事实（影响后续每一轮）
 

@@ -9,7 +9,7 @@ use std::path::Path;
 
 use sbctl::config::{DeploymentConfig, ManagedProtocol, SubscriptionMode};
 use sbctl::subscription::{
-    ClientVersion, SING_BOX_VERSION_PROFILES, SubscriptionFormat, band_warning_for,
+    ClientTemplate, ClientVersion, SING_BOX_VERSION_PROFILES, SubscriptionFormat, band_warning_for,
     generated_artifacts, installed_kernel_version, kernel_band_warning, parse_kernel_version,
 };
 
@@ -17,24 +17,48 @@ use sbctl::subscription::{
 #[ignore = "requires real sing-box cores; run by the CI sing-box-profiles job"]
 fn generated_profiles_pass_a_real_sing_box_check() {
     let root = tempfile::tempdir().expect("temporary root is created");
-    let config = DeploymentConfig::new(
-        SubscriptionMode::IpFallback,
-        "127.0.0.1".into(),
-        None,
-        Some(2080),
-        "ens3".into(),
-        vec![
-            ManagedProtocol::VlessReality,
-            ManagedProtocol::VmessWebsocket,
-            ManagedProtocol::Hysteria2,
-            ManagedProtocol::Tuic,
-            ManagedProtocol::Anytls,
-        ],
-        Some("www.cloudflare.com".into()),
-    )
-    .expect("a five-protocol IP fallback deployment is valid");
-    let artifacts = generated_artifacts(&config, root.path()).expect("artifacts generate");
+    // Every template on the axis has to survive its own core, not just the
+    // default one. Before the templates carried different content this test
+    // proved nothing about `global`/`split`: they rendered the same bytes as
+    // `standard`, so checking one checked all three.
+    let mut checked = 0;
+    for template in [
+        ClientTemplate::Standard,
+        ClientTemplate::Global,
+        ClientTemplate::Split,
+    ] {
+        let mut config = DeploymentConfig::new(
+            SubscriptionMode::IpFallback,
+            "127.0.0.1".into(),
+            None,
+            Some(2080),
+            "ens3".into(),
+            vec![
+                ManagedProtocol::VlessReality,
+                ManagedProtocol::VmessWebsocket,
+                ManagedProtocol::Hysteria2,
+                ManagedProtocol::Tuic,
+                ManagedProtocol::Anytls,
+            ],
+            Some("www.cloudflare.com".into()),
+        )
+        .expect("a five-protocol IP fallback deployment is valid");
+        config.client_template = template.clone();
+        let artifacts = generated_artifacts(&config, root.path()).expect("artifacts generate");
+        checked += check_against_cores(&template.to_string(), &artifacts);
+    }
+    let expected = SING_BOX_VERSION_PROFILES.len() * 3;
+    assert_eq!(
+        checked, expected,
+        "every template must be validated by every core: {checked} of {expected} \
+         combinations were checked, so a missing SING_BOX_BIN_<major>_<minor> \
+         would let a whole minor ship unverified"
+    );
+}
 
+/// Checks each per-minor artifact of one template against the core that owns it,
+/// returning how many combinations actually ran.
+fn check_against_cores(template: &str, artifacts: &[(String, String)]) -> usize {
     let mut checked = 0;
     for profile in SING_BOX_VERSION_PROFILES {
         let variable = format!(
@@ -43,8 +67,8 @@ fn generated_profiles_pass_a_real_sing_box_check() {
         );
         let Ok(binary) = std::env::var(&variable) else {
             eprintln!(
-                "skipping sing-box {}: {variable} is not set",
-                profile.version
+                "skipping sing-box {}/template={}: {variable} is not set",
+                profile.version, template
             );
             continue;
         };
@@ -55,21 +79,22 @@ fn generated_profiles_pass_a_real_sing_box_check() {
             .iter()
             .find(|(artifact, _)| *artifact == name)
             .map(|(_, contents)| contents)
-            .unwrap_or_else(|| panic!("missing profile artifact {name}"));
+            .unwrap_or_else(|| panic!("missing profile artifact {name} for {template}"));
         sbctl::subscription::check_sing_box_config(Path::new(&binary), contents).unwrap_or_else(
-            |error| panic!("sing-box {} rejected {name}: {error}", profile.version),
+            |error| {
+                panic!(
+                    "sing-box {} rejected {name} (template={template}): {error}",
+                    profile.version
+                )
+            },
         );
-        eprintln!("sing-box {} accepted {name}", profile.version);
+        eprintln!(
+            "sing-box {} accepted {name} (template={template})",
+            profile.version
+        );
         checked += 1;
     }
-    assert_eq!(
-        checked,
-        SING_BOX_VERSION_PROFILES.len(),
-        "every profile must be validated by its own core: {checked} of {}\n\
-         were checked, so a missing SING_BOX_BIN_<major>_<minor> would let a\n\
-         whole minor ship unverified",
-        SING_BOX_VERSION_PROFILES.len()
-    );
+    checked
 }
 
 /// The registry's newest minor has to be the newest *stable* upstream release.
