@@ -11,11 +11,14 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 
-use crate::parse::{ImportAttempt, classify_import, parse_count, parse_port};
+use crate::parse::{
+    ImportRequest, file_import_request, link_edit_request, parse_count, parse_port,
+    subscription_request, url_editor_target,
+};
 use crate::state::{
     ExitChoice, INPUT_FIELDS, InputField, LogLevelFilter, Page, Sbgui, TextField, Tone, env_locale,
     env_page, env_settings_section, env_show_clear_confirm, env_show_exit_confirm,
-    env_show_import_panel, env_show_stop_confirm, env_startup_notice,
+    env_show_import_panel, env_show_stop_confirm, env_show_url_editor, env_startup_notice,
 };
 use crate::theme::{
     BG, BORDER, CONTENT_MAX, CONTENT_PAD, DANGER, GAP_ITEM, GAP_SECTION, LABEL, TEXT, WINDOW_RADIUS,
@@ -61,6 +64,9 @@ impl Sbgui {
             settings_section: env_settings_section().unwrap_or_default(),
             show_subscription_import: env_show_import_panel(),
             subscription_error: None,
+            import_file_error: None,
+            editing_profile_url: None,
+            profile_url_error: None,
             show_rule_sets: false,
             show_all_rules: false,
             show_all_connections: false,
@@ -83,6 +89,15 @@ impl Sbgui {
         // path a user takes. A frame that shows no panel is the old bug returning.
         if env_show_import_panel() {
             view.submit_sub_url(cx);
+        }
+        // Same seam, same replay: 「编辑链接」 is a click the harness cannot make,
+        // and arming through the handler is what makes the frame the real one —
+        // including the link the field is prefilled from.
+        if env_show_url_editor()
+            && let Some(profile) = view.snapshot.profiles.first()
+        {
+            let name = profile.name.clone();
+            view.arm_url_editor(&name, cx);
         }
         view
     }
@@ -173,6 +188,9 @@ impl Sbgui {
                         | InputField::ProxySearch
                         | InputField::RuleSearch
                         | InputField::SubUrl
+                        | InputField::SubName
+                        | InputField::SubFile
+                        | InputField::SubEditUrl
                 ) =>
             {
                 self.commit_field(field, cx)
@@ -194,8 +212,17 @@ impl Sbgui {
             | InputField::LogQuery
             | InputField::ProxySearch
             | InputField::RuleSearch => {}
-            InputField::SubUrl => {
+            InputField::SubUrl | InputField::SubName => {
+                // Enter in the name field submits the form, the same as in the
+                // link field: the name is optional, so it can never be the only
+                // thing a submission has.
                 self.submit_sub_url(cx);
+            }
+            InputField::SubFile => {
+                self.submit_sub_file(cx);
+            }
+            InputField::SubEditUrl => {
+                self.submit_profile_url(cx);
             }
             InputField::Mirror => self.send(ClientCommand::UpdateSettings(SettingsPatch {
                 mirror: Some(text),
@@ -233,19 +260,26 @@ impl Sbgui {
         }
     }
 
-    /// Submits the import panel's link and reports whether it was taken, which
-    /// is the only answer that lets the panel close. An empty field used to be a
-    /// silent early `return` while the click handler closed the panel anyway, so
-    /// the entry vanished without a word (issue 02 item 4).
+    /// Submits the import panel's link and its optional name, and reports
+    /// whether the click was taken, which is the only answer that lets the panel
+    /// close. An empty field used to be a silent early `return` while the click
+    /// handler closed the panel anyway, so the entry vanished without a word
+    /// (issue 02 item 4).
     ///
     /// Both branches repaint: `button()` and `send()` notify nobody, and the poll
     /// loop only notifies when the snapshot actually changed, so a branch that
     /// mutated view state without notifying could sit un-drawn for a minute.
     pub(crate) fn submit_sub_url(&mut self, cx: &mut Context<Self>) -> bool {
-        let taken = match classify_import(&self.field(InputField::SubUrl).text) {
-            ImportAttempt::Submit { url, keep_in_field } => {
+        let taken = match subscription_request(
+            &self.field(InputField::SubName).text,
+            &self.field(InputField::SubUrl).text,
+        ) {
+            ImportRequest::Send {
+                command,
+                keep_in_field,
+            } => {
                 self.subscription_error = None;
-                self.send(ClientCommand::ImportSubscription { name: None, url });
+                self.send(command);
                 // A non-HTTP line stays in the field so it can be fixed; the
                 // engine's rejection shows up in the header status line either way.
                 if !keep_in_field {
@@ -253,13 +287,98 @@ impl Sbgui {
                 }
                 true
             }
-            ImportAttempt::Reject(reason) => {
+            ImportRequest::Reject(reason) => {
                 self.subscription_error = Some(reason);
                 false
             }
         };
         cx.notify();
         taken
+    }
+
+    /// 「导入本地 JSON」: the path field's half of the same panel, committed as
+    /// [`ClientCommand::ImportProfileFile`]. The engine reads the file and either
+    /// makes a profile out of it or says why it could not, so the close rule is
+    /// the link's: the panel goes when the click was taken, and the path text
+    /// survives to be fixed after a refusal.
+    pub(crate) fn submit_sub_file(&mut self, cx: &mut Context<Self>) -> bool {
+        let taken = match file_import_request(&self.field(InputField::SubFile).text) {
+            ImportRequest::Send {
+                command,
+                keep_in_field,
+            } => {
+                self.import_file_error = None;
+                self.send(command);
+                if !keep_in_field {
+                    self.field_mut(InputField::SubFile).text.clear();
+                }
+                true
+            }
+            ImportRequest::Reject(reason) => {
+                self.import_file_error = Some(reason);
+                false
+            }
+        };
+        cx.notify();
+        taken
+    }
+
+    /// 「保存链接」 on one row: the same command rule as an import, but rewriting
+    /// the profile the editor was opened on. Reported as taken so the caller can
+    /// close the editor; a refusal leaves it open with its reason and its text.
+    pub(crate) fn submit_profile_url(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(profile) = self.editing_profile_url.clone() else {
+            return false;
+        };
+        let taken = match link_edit_request(&profile, &self.field(InputField::SubEditUrl).text) {
+            ImportRequest::Send {
+                command,
+                keep_in_field,
+            } => {
+                self.profile_url_error = None;
+                self.send(command);
+                if !keep_in_field {
+                    self.field_mut(InputField::SubEditUrl).text.clear();
+                }
+                true
+            }
+            ImportRequest::Reject(reason) => {
+                self.profile_url_error = Some(reason);
+                false
+            }
+        };
+        cx.notify();
+        taken
+    }
+
+    /// Closes the link editor and drops what was typed into it: 「取消」, Esc and
+    /// the open row's own button all leave the editor in this state.
+    pub(crate) fn close_url_editor(&mut self) {
+        self.editing_profile_url = None;
+        self.profile_url_error = None;
+        self.field_mut(InputField::SubEditUrl).text.clear();
+    }
+
+    /// The row's 「编辑链接」 button, and the review seam: one editor at a time,
+    /// prefilled with the link that profile holds — a file-only profile has no
+    /// link, so its editor opens empty. Clicking the open row's button again
+    /// closes it, so the button never offers an action it will not do.
+    pub(crate) fn arm_url_editor(&mut self, profile: &str, cx: &mut Context<Self>) {
+        let next = url_editor_target(self.editing_profile_url.as_deref(), profile);
+        let text = next
+            .as_deref()
+            .and_then(|name| {
+                self.snapshot
+                    .profiles
+                    .iter()
+                    .find(|item| item.name == name)
+                    .map(|item| item.url.clone())
+            })
+            .unwrap_or_default();
+        self.field_mut(InputField::SubEditUrl).text = text;
+        self.profile_url_error = None;
+        self.editing_profile_url = next;
+        cx.notify();
     }
 
     pub(crate) fn save_settings(&mut self, cx: &mut Context<Self>) {
@@ -275,7 +394,7 @@ impl Sbgui {
         cx.notify();
     }
 
-    /// Esc: filters and the import field clear; settings fields restore the
+    /// Esc: filters and the subscription fields clear; settings fields restore the
     /// persisted value, so a half-typed edit never pretends to be saved.
     fn reset_field(&mut self, field: InputField) {
         let value = match field {
@@ -283,7 +402,10 @@ impl Sbgui {
             | InputField::LogQuery
             | InputField::ProxySearch
             | InputField::RuleSearch
-            | InputField::SubUrl => String::new(),
+            | InputField::SubUrl
+            | InputField::SubName
+            | InputField::SubFile
+            | InputField::SubEditUrl => String::new(),
             InputField::Mirror => self.snapshot.settings.mirror.clone(),
             InputField::MixedPort => self.snapshot.settings.mixed_port.to_string(),
             InputField::TestUrl => self.snapshot.settings.test_url.clone(),
@@ -293,8 +415,13 @@ impl Sbgui {
         self.field_mut(field).text = value;
         // Disowning the link also disowns the complaint about it: the error
         // speaks about the text that was there, which Esc has just removed.
-        if field == InputField::SubUrl {
-            self.subscription_error = None;
+        match field {
+            InputField::SubUrl => self.subscription_error = None,
+            InputField::SubFile => self.import_file_error = None,
+            // Nothing to edit with no link left in the field, and an editor that
+            // outlived its own Esc would then save an empty one.
+            InputField::SubEditUrl => self.close_url_editor(),
+            _ => {}
         }
     }
 

@@ -98,6 +98,12 @@ pub(crate) enum InputField {
     ProxySearch,
     RuleSearch,
     SubUrl,
+    /// The optional name the 「添加」 click gives the new profile.
+    SubName,
+    /// A local sing-box JSON file the 「导入本地 JSON」 click imports.
+    SubFile,
+    /// One profile's link, opened by that row's 「编辑链接」.
+    SubEditUrl,
     Mirror,
     MixedPort,
     TestUrl,
@@ -105,12 +111,15 @@ pub(crate) enum InputField {
     CoreVersion,
 }
 
-pub(crate) const INPUT_FIELDS: [InputField; 10] = [
+pub(crate) const INPUT_FIELDS: [InputField; 13] = [
     InputField::ConnFilter,
     InputField::LogQuery,
     InputField::ProxySearch,
     InputField::RuleSearch,
     InputField::SubUrl,
+    InputField::SubName,
+    InputField::SubFile,
+    InputField::SubEditUrl,
     InputField::Mirror,
     InputField::MixedPort,
     InputField::TestUrl,
@@ -274,6 +283,14 @@ pub(crate) struct Sbgui {
     /// say it in the language it is rendering. It is what stops an empty link
     /// from being a silent no-op; issue 02 item 4.
     pub(crate) subscription_error: Option<crate::parse::ImportReject>,
+    /// The same refusal for the path field of the same panel, kept apart because
+    /// the two lines sit apart and each names its own blank field.
+    pub(crate) import_file_error: Option<crate::parse::ImportReject>,
+    /// The profile whose link editor is open, by name: one at a time, since the
+    /// editor holds the link it was prefilled from.
+    pub(crate) editing_profile_url: Option<String>,
+    /// Why the open editor refused to save.
+    pub(crate) profile_url_error: Option<crate::parse::ImportReject>,
     /// What the launch path had to work around, told once inside the window it
     /// still managed to open (issue 02 item 5). It cannot ride on
     /// `snapshot.status`, which the engine republishes four times a second and
@@ -325,6 +342,11 @@ pub(crate) struct Sbgui {
 /// - `SBGUI_SHOW_EXIT_CONFIRM=1` renders the exit-confirmation overlay
 ///   without enabling the OS proxy.
 /// - `SBGUI_SHOW_STOP_CONFIRM=1` renders the stop-the-core confirmation.
+/// - `SBGUI_SHOW_IMPORT_PANEL=1` opens the subscription import panel without a
+///   click, and presses 「添加」 on the empty link field so the frame carries its
+///   refusal too.
+/// - `SBGUI_SHOW_URL_EDITOR=1` arms the link editor on the first profile the
+///   snapshot holds, the same way the import seam replays its click.
 /// - `SBGUI_SHOW_CLEAR_CONFIRM=1` renders the override page's armed
 ///   delete-the-override bar, which otherwise needs the click the harness
 ///   cannot make.
@@ -402,6 +424,14 @@ pub(crate) fn env_show_import_panel() -> bool {
     std::env::var("SBGUI_SHOW_IMPORT_PANEL").is_ok_and(|value| value == "1")
 }
 
+/// Review seam for one profile row's link editor, which only opens on a click.
+/// With it set the window arms the editor on its first profile through the same
+/// handler the button calls, so the frame shows the prefilled field rather than
+/// a hand-drawn mock of it.
+pub(crate) fn env_show_url_editor() -> bool {
+    std::env::var("SBGUI_SHOW_URL_EDITOR").is_ok_and(|value| value == "1")
+}
+
 /// Review seam for the launch notice band (issue 02 item 5), which the real
 /// launch path only fills when a persisted file cannot be read. See `crate::app`
 /// for what it renders: the same sentence the real outcome produces.
@@ -418,7 +448,25 @@ pub(crate) fn env_show_clear_confirm() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Locale, Page, switch_language};
+    use super::{INPUT_FIELDS, InputField, Locale, Page, switch_language};
+
+    /// `Sbgui::field` indexes `inputs` by `field as usize`, so the enum order and
+    /// this array are one list written twice. Getting them out of step would not
+    /// fail to compile: it would type a subscription link into the name field.
+    #[test]
+    fn every_input_field_indexes_the_array_at_its_own_slot() {
+        for (index, field) in INPUT_FIELDS.iter().enumerate() {
+            assert_eq!(
+                *field as usize, index,
+                "{field:?} sits at slot {index}, which is another field's text"
+            );
+        }
+        assert_eq!(
+            InputField::CoreVersion as usize + 1,
+            INPUT_FIELDS.len(),
+            "`CoreVersion` is the last variant, so a new one needs a new array slot too"
+        );
+    }
 
     /// The title-bar control goes through [`switch_language`], so this covers
     /// the rule it exists to keep: whatever page you are on, asking for the

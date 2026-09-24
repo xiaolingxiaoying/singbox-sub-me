@@ -1,6 +1,6 @@
 # GUI 功能对齐 TUI 的六项缺口
 
-Status: ready-for-agent（第 6 条覆写页已于 2026-09-24 落地，见 `feat(clients)` fbecb86；1–5 项仍开放）
+Status: ready-for-agent（第 6 条覆写页已落地 fbecb86；第 1、2 条 2026-09-24 落地，见 R27 与本轮 `feat(gui)` 提交；3、4、5、7 仍开放）
 Type: task
 Blocked by: sbctl-v0.2/issues/01
 

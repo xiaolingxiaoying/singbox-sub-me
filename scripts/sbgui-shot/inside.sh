@@ -158,7 +158,7 @@ for size in $SIZES; do
     # leak into the ordinary page frames: a subscriptions frame with the panel
     # pushed down is no longer a frame of the subscriptions table.
     SBGUI_PAGE=$page SBGUI_SIZE=$size SBGUI_SETTINGS_SECTION="${SBGUI_SETTINGS_SECTION:-}" \
-    SBGUI_SHOW_IMPORT_PANEL= \
+    SBGUI_SHOW_IMPORT_PANEL= SBGUI_SHOW_URL_EDITOR= \
       xvfb-run -a -s "-screen 0 ${size}x24" \
       bash "$HERE/inside.sh" --capture "$page" "$size" "$OUT" "$BIN"
   done
@@ -187,9 +187,20 @@ done
 # by the operator because it opens the panel on every subscriptions frame.
 if [ -n "${SBGUI_SHOW_IMPORT_PANEL:-}" ]; then
   for size in $SIZES; do
-    SBGUI_PAGE=subscriptions SBGUI_SIZE=$size \
+    SBGUI_PAGE=subscriptions SBGUI_SIZE=$size SBGUI_SHOW_URL_EDITOR= \
       xvfb-run -a -s "-screen 0 ${size}x24" \
       bash "$HERE/inside.sh" --capture subscriptions-import-panel "$size" "$OUT" "$BIN"
+  done
+fi
+
+# One profile row's link editor, armed through its own handler so the frame shows
+# the prefilled link rather than a hand-drawn mock of it. Needs a seeded profile
+# to arm on, which is what DEMO_CORE provides.
+if [ -n "${SBGUI_SHOW_URL_EDITOR:-}" ]; then
+  for size in $SIZES; do
+    SBGUI_PAGE=subscriptions SBGUI_SIZE=$size SBGUI_SHOW_IMPORT_PANEL= \
+      xvfb-run -a -s "-screen 0 ${size}x24" \
+      bash "$HERE/inside.sh" --capture subscriptions-url-editor "$size" "$OUT" "$BIN"
   done
 fi
 

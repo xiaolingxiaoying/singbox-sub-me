@@ -11,7 +11,8 @@ use gpui::{
 use crate::components::{
     empty_state, icon, page_head, pill, table_col, table_head_row, work_surface,
 };
-use crate::lang::age_label;
+use crate::lang::{Locale, age_label};
+use crate::parse::ImportReject;
 use crate::state::{FieldSpec, InputField, Sbgui, Tone};
 use crate::theme::{
     BODY, BORDER, BORDER_STRONG, CYAN, DANGER, FAINT, LABEL, META, MINT, MUTED, RADIUS_CONTROL,
@@ -45,6 +46,17 @@ fn usage_bar(used: u64, total: u64) -> impl IntoElement {
         .child(div().h_full().flex_grow(total.saturating_sub(used) as f32))
 }
 
+/// One refusal line under the field it refuses. The panel stays open with it,
+/// which is what an empty field answers with since issue 02 item 4.
+fn rejection(locale: Locale, reject: ImportReject) -> gpui::Div {
+    div()
+        .mt(px(10.0))
+        .text_size(px(LABEL))
+        .line_height(px(19.0))
+        .text_color(rgb(DANGER))
+        .child(reject.label(locale))
+}
+
 impl Sbgui {
     // --------------------------------------------------------- subscriptions
 
@@ -59,8 +71,9 @@ impl Sbgui {
         let narrow = window.viewport_size().width < px(940.0);
         // The action cell is fixed so the header lines up with the rows: its
         // content is wider than the "Actions" label, and an auto width would
-        // shift the grow columns per row.
-        let action_width = if narrow { 150.0 } else { 170.0 };
+        // shift the grow columns per row. Three buttons now, and the cell wraps
+        // rather than clips when one language's labels do not fit the track.
+        let action_width = if narrow { 168.0 } else { 250.0 };
         let usage = self.snapshot.subscription_usage;
         let node_count = self
             .snapshot
@@ -173,8 +186,8 @@ impl Sbgui {
                             .text_color(rgb(MUTED))
                             .child(tr!(
                                 locale,
-                                "粘贴 HTTP/HTTPS 订阅地址或 sing-box JSON 地址。",
-                                "Paste an HTTP/HTTPS subscription or sing-box JSON URL.",
+                                "粘贴 HTTP/HTTPS 订阅地址，或写一个本地 sing-box JSON 文件的路径。",
+                                "Paste an HTTP/HTTPS subscription or sing-box JSON URL, or write the path of a local sing-box JSON file.",
                             )),
                     )
                     .child(
@@ -189,7 +202,17 @@ impl Sbgui {
                                     field: InputField::SubUrl,
                                     id: "sub-url",
                                     placeholder: "https://…",
-                                    width: 520.0,
+                                    width: 460.0,
+                                },
+                                window,
+                                cx,
+                            ))
+                            .child(self.text_field(
+                                FieldSpec {
+                                    field: InputField::SubName,
+                                    id: "sub-name",
+                                    placeholder: tr!(locale, "档案名称（可选）", "Profile name (optional)"),
+                                    width: 200.0,
                                 },
                                 window,
                                 cx,
@@ -211,16 +234,50 @@ impl Sbgui {
                                 },
                             )),
                     )
-                    .children(self.subscription_error.map(|reject| {
+                    .children(self.subscription_error.map(|reject| rejection(locale, reject)))
+                    .child(
                         div()
                             .mt(px(10.0))
-                            .text_size(px(LABEL))
-                            .line_height(px(19.0))
-                            .text_color(rgb(DANGER))
-                            .child(reject.label(locale))
-                    })),
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(10.0))
+                            .child(self.text_field(
+                                FieldSpec {
+                                    field: InputField::SubFile,
+                                    id: "sub-file",
+                                    placeholder: tr!(
+                                        locale,
+                                        "本地 JSON 文件路径，如 C:\\sbctl\\local.json",
+                                        "Local JSON path, e.g. C:\\sbctl\\local.json"
+                                    ),
+                                    width: 460.0,
+                                },
+                                window,
+                                cx,
+                            ))
+                            .child(self.button(
+                                "import-local-file",
+                                tr!(locale, "导入本地 JSON", "Import local JSON"),
+                                Tone::Neutral,
+                                None,
+                                cx,
+                                |view, cx| {
+                                    // Taken-or-not is the same rule as the link's:
+                                    // a blank path keeps the panel open and says so.
+                                    if view.submit_sub_file(cx) {
+                                        view.show_subscription_import = false;
+                                    }
+                                },
+                            )),
+                    )
+                    .children(self.import_file_error.map(|reject| rejection(locale, reject))),
             );
         }
+
+        // The link editor belongs above the table it came out of, so the row that
+        // opened it and the field that edits it stay in one glance.
+        surface = surface.children(self.profile_url_editor(window, cx));
 
         if profiles.is_empty() {
             return surface.child(empty_state(
@@ -242,6 +299,7 @@ impl Sbgui {
                 let active = profile.active;
                 let name_for_activate = profile.name.clone();
                 let name_for_remove = profile.name.clone();
+                let name_for_edit = profile.name.clone();
                 let armed = self
                     .confirm_delete_profile
                     .as_deref()
@@ -389,6 +447,7 @@ impl Sbgui {
                             .w(px(action_width))
                             .flex()
                             .flex_shrink_0()
+                            .flex_wrap()
                             .items_center()
                             .gap(px(9.0))
                             .children((!active).then(|| {
@@ -409,6 +468,19 @@ impl Sbgui {
                                 )
                                 .into_any_element()
                             }))
+                            .child(self.button(
+                                "edit-profile-url",
+                                tr!(locale, "编辑链接", "Edit link"),
+                                Tone::Neutral,
+                                None,
+                                cx,
+                                move |view, cx| {
+                                    // Arming is the whole click: the editor panel
+                                    // above the table holds the link, and the same
+                                    // button on the open row closes it again.
+                                    view.arm_url_editor(&name_for_edit, cx);
+                                },
+                            ))
                             .child(self.button(
                                 if armed {
                                     "confirm-remove-profile"
@@ -490,6 +562,103 @@ impl Sbgui {
                                 )
                                 .children(rows),
                         ),
+                ),
+        )
+    }
+
+    /// The panel one row's 「编辑链接」 opens: that profile's subscription link,
+    /// prefilled with what is stored, committed through
+    /// [`ClientCommand::SetProfileUrl`] instead of importing a second profile.
+    /// It renders only while the profile it was armed on still exists, so a
+    /// profile deleted elsewhere takes its own editor with it.
+    fn profile_url_editor(&self, window: &Window, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let name = self.editing_profile_url.as_deref()?;
+        if !self
+            .snapshot
+            .profiles
+            .iter()
+            .any(|profile| profile.name == name)
+        {
+            return None;
+        }
+        let locale = self.locale;
+        Some(
+            div()
+                .mt(px(18.0))
+                .p(px(14.0))
+                .rounded(px(RADIUS_CONTROL + 2.0))
+                .bg(rgb(SURFACE_2))
+                .border_1()
+                .border_color(rgb(BORDER_STRONG))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(10.0))
+                        .child(
+                            div()
+                                .w_full()
+                                .text_size(px(BODY))
+                                .font_weight(WEIGHT_MEDIUM)
+                                .text_color(rgb(TEXT))
+                                .child(tr!(
+                                    locale,
+                                    format!("编辑订阅链接：{name}"),
+                                    format!("Edit subscription link: {name}")
+                                )),
+                        )
+                        .child(self.text_field(
+                            FieldSpec {
+                                field: InputField::SubEditUrl,
+                                id: "sub-edit-url",
+                                placeholder: tr!(locale, "新的订阅链接", "New subscription link"),
+                                width: 460.0,
+                            },
+                            window,
+                            cx,
+                        ))
+                        .child(self.button(
+                            "save-profile-url",
+                            tr!(locale, "保存链接", "Save link"),
+                            Tone::Accent,
+                            None,
+                            cx,
+                            |view, cx| {
+                                // Taken-or-not is the import panel's rule again: a
+                                // refused link keeps the editor open with its
+                                // reason, so nothing the user typed disappears.
+                                if view.submit_profile_url(cx) {
+                                    view.close_url_editor();
+                                }
+                            },
+                        ))
+                        .child(self.button(
+                            "cancel-profile-url",
+                            tr!(locale, "取消", "Cancel"),
+                            Tone::Neutral,
+                            None,
+                            cx,
+                            |view, cx| {
+                                view.close_url_editor();
+                                cx.notify();
+                            },
+                        )),
+                )
+                .child(
+                    div()
+                        .mt(px(8.0))
+                        .text_size(px(LABEL))
+                        .text_color(rgb(MUTED))
+                        .child(tr!(
+                            locale,
+                            "只改这一个档案的链接；要清空请删除该档案。",
+                            "This rewrites only this profile's link; delete the profile to drop it."
+                        )),
+                )
+                .children(
+                    self.profile_url_error
+                        .map(|reject| rejection(locale, reject)),
                 ),
         )
     }

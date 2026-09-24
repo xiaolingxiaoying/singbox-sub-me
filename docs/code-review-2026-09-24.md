@@ -795,3 +795,44 @@ M18 追加改成覆写 → `startup.rs` 五道红。
 徽标只数那 5 个字段、不含开关、还滞后一个 400ms 轮询。
 它的验收是"引擎到底收到了什么"——既不是纯函数也不是截图能证的，而且要一次删掉五条路径，
 **属于语义决策，不适合派给并发的 writer**（它正在改的正是 `app.rs`/`state.rs`）。已单独记进工单。
+
+## R27 — GUI 订阅页补齐：`ImportProfileFile` / 档案名 / `SetProfileUrl` 三条命令接上
+
+工单 01 第 1、2 项由一位 writer agent 实现（+599/−29，四个文件），我逐行读完 diff 后接管取证。
+形状是对的：**判断留在纯函数里，handler 只负责应用**——
+
+- `parse.rs` 新增 `ImportRequest{Send{command,keep_in_field}|Reject}` 与四个纯函数：
+  `subscription_request(name,url)`（名字 trim 后为空要变成 `None`，否则引擎会以为用户真的起了个名）、
+  `import_name`、`file_import_request(path)`（路径**永远留在字段里**，因为"文件在不在、能不能解析"是引擎的答复）、
+  `link_edit_request(profile,url)`（走 `SetProfileUrl`，不是再来一次导入）。
+- `state.rs`：`InputField` 从 10 个变 13 个（`SubName`/`SubFile`/`SubEditUrl`），
+  并新增一道我很想要的门：`every_input_field_indexes_the_array_at_its_own_slot`。
+  这条值得单独说一句——`Sbgui::field()` 是拿 `field as usize` 去索引 `inputs` 数组的，
+  **枚举顺序与数组顺序是同一份列表写了两遍**，写歪不会编译失败，只会"把订阅链接打到档案名框里"。
+  以前这个不变量没人钉，加字段恰好是它最容易破的时刻。
+- `app.rs`：三个 submit 各自 notify（上一批的教训已经在约定里了），Esc 语义分字段处理，
+  其中 `SubEditUrl` 的 Esc 直接 `close_url_editor()`——编辑器不能在自己字段被清空后继续活着，
+  否则下一次保存就是"存一个空链接"。
+- 行内「编辑链接」的开关规则：同一时刻只有一个编辑器；再点已开的那一行是**关**，
+  点别的行是**搬过去**，所以按钮永远不会提供一个它不做的动作（`url_editor_target`）。
+- 命令接的确实是引擎里在跑的路径，不是新造的接口：`ImportProfileFile` →
+  `controller.rs:554` → `import_profile_file`（`:1020`，测试调用点 `:1945/:1971/:1990/:2056/:2255`）；
+  `SetProfileUrl` → `controller.rs:555` → `set_profile_url`。
+
+**一处我自己引入的改动**：harness 的 seam 会互相污染。`SBGUI_SHOW_URL_EDITOR` 与
+`SBGUI_SHOW_IMPORT_PANEL` 都是进程级环境变量，`Sbgui::new` 每次都读，所以页面循环里
+两个都要显式清空，只让各自的专用帧带着——否则"订阅页"这张基线帧会变成面板帧或编辑器帧。
+
+**留给画面的问题（截图才能答）**：操作列从 150/170 加宽到 168/250 并改成 `flex_wrap`，
+窄屏 860 下"更新 / 编辑链接 / 删除"三个按钮会不会折成两行、把行高顶开、或压到表头错位；
+导入面板多了一整行路径字段后在 860×640 会不会把表格挤出可视区。
+
+**本轮提交时的取证状态（不装作已完成）**：
+`cargo test -p sbgui` 53 passed、clippy `-D warnings`、fmt 三项退出码都是 0；
+新测试的变异检验 **N1–N7 全部咬住**（路径会被清空、空路径被接受、空白名当成名字、
+名字被丢掉、编辑链接变成第二次导入、空链接交给引擎、再点已开行不关闭）。
+**N8 是无效检验，不是门通过**：那条 perl 要求逗号后紧跟 `\n`，仓库文件是 CRLF，
+所以互换数组两项的改动根本没落进文件，测试当然还绿——`every_input_field_indexes_the_array_at_its_own_slot`
+这道门**尚未被变异检验证明会咬**，留待重跑。
+两张窄屏帧（import-panel / url-editor @860×640）在本次提交之后才出来，
+上面那两个布局问题由它们回答；帧没看过之前，不要把这批改动当成"UI 已验证"。
