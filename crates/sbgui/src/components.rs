@@ -152,6 +152,40 @@ pub(crate) fn tun_toggle(
     })
 }
 
+/// What the settings page's 「切换并重启内核」 button does with this click.
+///
+/// The engine can switch the traffic mode of a live core, but only by restarting
+/// it — `SetTrafficMode { restart: true }`, which is what the terminal client's
+/// `m` has always sent. The GUI had no way to ask for that, so switching TUN
+/// meant stopping the core first (issue 01 item 7). A restart drops every
+/// connection, so the first click arms and the second one acts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TrafficRestart {
+    /// First click: remember the target and say what the second click costs.
+    Arm(TrafficMode),
+    /// Second click: the command itself.
+    Send(ClientCommand),
+}
+
+pub(crate) fn traffic_restart_request(tun_on: bool, armed: Option<TrafficMode>) -> TrafficRestart {
+    let target = if tun_on {
+        TrafficMode::SystemProxy
+    } else {
+        TrafficMode::Tun
+    };
+    // The arm carries the target on purpose: a stale `true` left over from a
+    // previous core run would otherwise turn the *first* click on a different
+    // target into an immediate restart.
+    if armed == Some(target) {
+        TrafficRestart::Send(ClientCommand::SetTrafficMode {
+            mode: target,
+            restart: true,
+        })
+    } else {
+        TrafficRestart::Arm(target)
+    }
+}
+
 /// The kit's switch: a 46 x 26 track with a 20 px knob, inside a hitbox that
 /// keeps the whole control at the 34 px minimum a pointer target needs.
 /// `command` is `None` while the setting cannot change (a running core will
@@ -1067,6 +1101,36 @@ mod tests {
             "nor the two off tracks"
         );
         assert_ne!(switch_track(true, false), CYAN);
+    }
+
+    /// Issue 01 item 7: the GUI could not switch a live core's traffic mode at
+    /// all, because it only ever sent `UpdateSettings`, which the engine refuses
+    /// while the core runs. The command that *can* do it is
+    /// `SetTrafficMode { restart: true }` — the one the terminal client's `m`
+    /// sends — and because a restart drops every connection it takes two clicks.
+    #[test]
+    fn a_live_core_switch_uses_the_restart_command_and_needs_two_clicks() {
+        assert_eq!(
+            traffic_restart_request(false, None),
+            TrafficRestart::Arm(TrafficMode::Tun),
+            "the first click arms and names where it is going"
+        );
+        assert!(
+            matches!(
+                traffic_restart_request(false, Some(TrafficMode::Tun)),
+                TrafficRestart::Send(ClientCommand::SetTrafficMode {
+                    mode: TrafficMode::Tun,
+                    restart: true,
+                })
+            ),
+            "the second click sends the command the engine accepts for a live core"
+        );
+        // A stale arm must not become consent: the target moved, so arm again.
+        assert_eq!(
+            traffic_restart_request(true, Some(TrafficMode::Tun)),
+            TrafficRestart::Arm(TrafficMode::SystemProxy),
+            "an arm for the other mode can never be the confirming click for this one"
+        );
     }
 
     /// Issue 02 item 8: the rules header inset its labels by 14 while its rows

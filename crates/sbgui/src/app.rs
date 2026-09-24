@@ -83,6 +83,7 @@ impl Sbgui {
             confirm_close_all: false,
             confirm_delete_profile: None,
             confirm_clear_override: env_show_clear_confirm(),
+            confirm_traffic_restart: None,
         };
         // The seam replays the click instead of painting its result: the panel is
         // open, so pressing 「添加」 on the still-empty field goes through the very

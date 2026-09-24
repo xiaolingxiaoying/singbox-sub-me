@@ -330,6 +330,11 @@ pub(crate) struct Sbgui {
     /// Arming belongs to that page alone: clearing an override has no undo, so
     /// the click that asks must never also be the click that deletes.
     pub(crate) confirm_clear_override: bool,
+    /// Set while the settings page's 「切换并重启内核」 button waits for its second
+    /// click. It carries the target rather than a flag because the arm must be
+    /// consent for *this* switch: a leftover arm from an earlier core run would
+    /// otherwise restart the core on the first click of a different change.
+    pub(crate) confirm_traffic_restart: Option<client_core::system_proxy::TrafficMode>,
 }
 
 /// Visual-review seams read once at startup. Ordinary launches never set

@@ -10,7 +10,8 @@ use gpui::{
 };
 
 use crate::components::{
-    icon, page_head, setting_line, setting_row_intro, toggle_line, tun_toggle, work_surface,
+    TrafficRestart, icon, page_head, setting_line, setting_row_intro, toggle_line,
+    traffic_restart_request, tun_toggle, work_surface,
 };
 use crate::lang::{age_label, outbound_mode, traffic_mode};
 use crate::state::{FieldSpec, InputField, Sbgui, SettingsSection, Tone};
@@ -353,18 +354,69 @@ impl Sbgui {
                     tun_toggle(tun_on, snapshot.core_running, snapshot.starting),
                 ))
                 .children((snapshot.core_running || snapshot.starting).then(|| {
-                    // The greyed track needs its sentence: the engine refuses the
-                    // patch outright while the core is up, so the control is not
-                    // queued, it is denied. Same reason the overview gives.
+                    // Two things belong here: why the switch above is inert, and
+                    // the way out that does not make the user stop the core by
+                    // hand. The engine can switch a live core's traffic mode, but
+                    // only by restarting it — the terminal client's `m` has always
+                    // sent that command and the GUI had no path to it
+                    // (issue 01 item 7). A restart drops every connection, so the
+                    // first click arms and carries the target; the second acts.
+                    let armed = self.confirm_traffic_restart;
+                    let target = if tun_on {
+                        tr!(locale, "系统代理", "System proxy")
+                    } else {
+                        "TUN"
+                    };
                     div()
                         .py(px(10.0))
-                        .text_size(px(LABEL))
-                        .line_height(px(19.0))
-                        .text_color(rgb(MUTED))
-                        .child(tr!(
-                            locale,
-                            "内核正在运行；切换流量模式需要重启内核，请先停止内核。",
-                            "The core is running; switching the traffic mode needs a core restart, so stop the core first.",
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(10.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(240.0))
+                                .text_size(px(LABEL))
+                                .line_height(px(19.0))
+                                .text_color(rgb(MUTED))
+                                .child(tr!(
+                                    locale,
+                                    format!(
+                                        "内核正在运行；切换到 {target} 需要重启内核，当前连接会断开。"
+                                    ),
+                                    format!(
+                                        "The core is running; switching to {target} restarts it and drops current connections."
+                                    ),
+                                )),
+                        )
+                        .child(self.button(
+                            if armed.is_some() {
+                                "confirm-traffic-restart"
+                            } else {
+                                "arm-traffic-restart"
+                            },
+                            tr!(locale, "切换并重启内核", "Switch and restart the core"),
+                            if armed.is_some() {
+                                Tone::Danger
+                            } else {
+                                Tone::Neutral
+                            },
+                            None,
+                            cx,
+                            |view, cx| {
+                                let live = view.snapshot.traffic_mode == TrafficMode::Tun;
+                                match traffic_restart_request(live, view.confirm_traffic_restart) {
+                                    TrafficRestart::Arm(mode) => {
+                                        view.confirm_traffic_restart = Some(mode);
+                                    }
+                                    TrafficRestart::Send(command) => {
+                                        view.confirm_traffic_restart = None;
+                                        view.send(command);
+                                    }
+                                }
+                                cx.notify();
+                            },
                         ))
                 }))
                 .child(setting_row_intro(
