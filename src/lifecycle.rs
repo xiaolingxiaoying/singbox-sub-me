@@ -475,6 +475,17 @@ fn unit_has_marker(root: &Path, relative: &str, marker: &str) -> Result<bool, St
 }
 
 pub fn restart_services(root: &Path) -> Result<(), String> {
+    // Isolated deployment roots used by CLI tests and image builders do not
+    // control the host's systemd units or sockets. Keep their historical
+    // service-command behavior; socket reconciliation is for the live host.
+    if root != Path::new("/") {
+        systemctl(root, &["restart", "sing-box.service", "sbctl.service"])?;
+        for unit in ["sing-box.service", "sbctl.service"] {
+            wait_for_stable_activation(root, unit)?;
+        }
+        return Ok(());
+    }
+
     let direct = DeploymentStore::new(root)
         .load()
         .map(|config| config.subscription_mode == crate::config::SubscriptionMode::Direct)
