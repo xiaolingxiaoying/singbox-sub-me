@@ -259,9 +259,9 @@ contains "$("$sbctl" --root "$root" traffic)" 'received: 500 bytes'
 contains "$("$sbctl" --root "$root" traffic)" 'transmitted: 300 bytes'
 test "$(cat "$root/sys/class/net/ens3/statistics/rx_bytes")" = 134 || fail 'direction correction modified the sysfs counter'
 test "$(cat "$root/sys/class/net/ens3/statistics/tx_bytes")" = 265 || fail 'direction correction modified the sysfs counter'
-if "$sbctl" --root "$root" traffic set-used --bytes 100 >/dev/null 2>&1; then
-  fail 'total correction below the current total was accepted'
-fi
+summary=$("$sbctl" --root "$root" traffic set-used --bytes 0)
+contains "$summary" 'target total: 0 bytes'
+contains "$("$sbctl" --root "$root" traffic)" 'total: 0 bytes'
 if "$sbctl" --root "$root" traffic set-used --bytes 100 --rx 5 >/dev/null 2>&1; then
   fail 'conflicting traffic correction arguments were accepted'
 fi

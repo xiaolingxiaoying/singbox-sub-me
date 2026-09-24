@@ -65,9 +65,10 @@ pub struct TrafficState {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum CorrectionRecord {
-    /// A total-only adjustment applied to reported VPS traffic without
-    /// fabricating RX/TX direction values.
-    TotalAdjustment { bytes: u64, at: DateTime<Utc> },
+    /// A signed total-only adjustment applied to reported VPS traffic without
+    /// fabricating RX/TX direction values. Existing nonnegative byte values
+    /// remain compatible with this representation.
+    TotalAdjustment { bytes: i128, at: DateTime<Utc> },
     /// A direction-aware correction setting the reported RX and TX totals.
     SetDirection { rx: u64, tx: u64, at: DateTime<Utc> },
 }
@@ -145,16 +146,16 @@ impl TrafficState {
         )
     }
 
-    /// The total-only adjustments that add to reported traffic without
-    /// changing the measured RX/TX direction values.
-    pub fn total_adjustment(&self) -> u64 {
+    /// The signed total-only adjustments applied without changing RX/TX.
+    /// Legacy positive-only records remain readable and contribute unchanged.
+    pub fn total_adjustment(&self) -> i128 {
         self.corrections
             .iter()
             .map(|correction| match correction {
                 CorrectionRecord::TotalAdjustment { bytes, .. } => *bytes,
                 CorrectionRecord::SetDirection { .. } => 0,
             })
-            .fold(0u64, u64::saturating_add)
+            .fold(0i128, i128::saturating_add)
     }
 }
 
@@ -163,7 +164,7 @@ pub struct TrafficReport {
     pub interface: String,
     pub received: u64,
     pub transmitted: u64,
-    pub total_adjustment: u64,
+    pub total_adjustment: i128,
     pub monthly_traffic_limit: u64,
     pub accounting_period: String,
     pub next_reset: DateTime<Utc>,
@@ -171,12 +172,7 @@ pub struct TrafficReport {
 
 impl TrafficReport {
     pub fn total(&self) -> u64 {
-        // An administrator-supplied correction is arbitrary, and this runs
-        // inside the subscription request path: saturating keeps a wild value
-        // from panicking the daemon instead of just reporting nonsense.
-        self.received
-            .saturating_add(self.transmitted)
-            .saturating_add(self.total_adjustment)
+        corrected_total(self.received, self.transmitted, self.total_adjustment)
     }
 
     pub fn summary(&self) -> String {
@@ -258,10 +254,6 @@ pub enum TrafficError {
         "accounting state belongs to a previous period; the reset task has not run for the current period"
     )]
     StateStale,
-    #[error(
-        "total correction target {target} bytes is below the currently reported total {current} bytes"
-    )]
-    TotalTooLow { target: u64, current: u64 },
     #[error("reported traffic would overflow a byte count: {0}")]
     Overflow(&'static str),
 }
@@ -424,28 +416,27 @@ fn plan_correction(
 ) -> Result<CorrectionPlan, TrafficError> {
     let (current_received, current_transmitted) =
         state.live_reported(&measurements.boot_id, measurements.rx, measurements.tx);
-    let current_total = current_received
-        .checked_add(current_transmitted)
-        .and_then(|total| total.checked_add(state.total_adjustment()))
-        .ok_or(TrafficError::Overflow("current reported total"))?;
+    let current_adjustment = state.total_adjustment();
+    let current_total = corrected_total(current_received, current_transmitted, current_adjustment);
     let mut corrected = state.clone();
     let (target_received, target_transmitted, target_total) = match target {
         CorrectionTarget::Total(total) => {
-            if total < current_total {
-                return Err(TrafficError::TotalTooLow {
-                    target: total,
-                    current: current_total,
-                });
-            }
+            let direction_total = i128::from(current_received) + i128::from(current_transmitted);
+            let target_adjustment = i128::from(total) - direction_total;
+            let offset = target_adjustment
+                .checked_sub(current_adjustment)
+                .ok_or(TrafficError::Overflow("total correction adjustment"))?;
             corrected
                 .corrections
                 .push(CorrectionRecord::TotalAdjustment {
-                    bytes: total - current_total,
+                    bytes: offset,
                     at: now,
                 });
             (current_received, current_transmitted, total)
         }
         CorrectionTarget::Directions { rx, tx } => {
+            rx.checked_add(tx)
+                .ok_or(TrafficError::Overflow("target directional total"))?;
             corrected.accumulated_rx = rx;
             corrected.accumulated_tx = tx;
             corrected.baseline_rx = measurements.rx;
@@ -454,10 +445,7 @@ fn plan_correction(
             corrected
                 .corrections
                 .push(CorrectionRecord::SetDirection { rx, tx, at: now });
-            let target_total = rx
-                .checked_add(tx)
-                .and_then(|total| total.checked_add(corrected.total_adjustment()))
-                .ok_or(TrafficError::Overflow("target reported total"))?;
+            let target_total = corrected_total(rx, tx, corrected.total_adjustment());
             (rx, tx, target_total)
         }
     };
@@ -474,6 +462,16 @@ fn plan_correction(
             target_total,
         },
     })
+}
+
+fn corrected_total(received: u64, transmitted: u64, adjustment: i128) -> u64 {
+    let directions = u128::from(received) + u128::from(transmitted);
+    let adjusted = if adjustment >= 0 {
+        directions.saturating_add(adjustment as u128)
+    } else {
+        directions.saturating_sub(adjustment.unsigned_abs())
+    };
+    adjusted.min(u128::from(u64::MAX)) as u64
 }
 
 fn report_from_state(
@@ -1269,7 +1267,7 @@ mod tests {
     }
 
     #[test]
-    fn total_correction_below_the_current_total_is_rejected_without_writing() {
+    fn total_correction_can_reset_reported_total_to_zero_without_changing_directions() {
         let fixture = TempDir::new().unwrap();
         let store = DeploymentStore::new(fixture.path());
         let config = config();
@@ -1278,15 +1276,16 @@ mod tests {
         reset_at(&store, &config, now).unwrap();
         write_interface_fixture(&fixture, 130, 260, "boot-a");
         reset_at(&store, &config, now).unwrap();
-        let before = fs::read(fixture.path().join("var/lib/sbctl/state.json")).unwrap();
+        let preview = set_used_at(&store, &config, now, CorrectionTarget::Total(0)).unwrap();
+        assert_eq!(preview.current_total, 90);
+        assert_eq!(preview.target_total, 0);
 
-        let error = set_used_at(&store, &config, now, CorrectionTarget::Total(50)).unwrap_err();
+        let report = report_at(&store, &config, now).unwrap();
+        assert_eq!((report.received, report.transmitted), (30, 60));
+        assert_eq!(report.total(), 0);
 
-        assert!(matches!(error, super::TrafficError::TotalTooLow { .. }));
-        assert_eq!(
-            fs::read(fixture.path().join("var/lib/sbctl/state.json")).unwrap(),
-            before
-        );
+        write_interface_fixture(&fixture, 134, 265, "boot-a");
+        assert_eq!(report_at(&store, &config, now).unwrap().total(), 9);
     }
 
     #[test]

@@ -61,7 +61,7 @@ An administrator-authored adjustment to the current Accounting period's reported
 _Avoid_: Data-plane limit, per-user traffic
 
 **Total traffic adjustment**:
-A correction applied only to the reported total VPS traffic without changing the measured RX or TX direction values. It is distinct from a direction-aware Traffic correction.
+A signed correction applied only to the reported total VPS traffic without changing the measured RX or TX direction values. It may lower the reported total to zero; later measured traffic deltas accumulate from the corrected total. It is distinct from a direction-aware Traffic correction.
 _Avoid_: Fake RX/TX, bandwidth limit
 
 **Accounting state writer**:

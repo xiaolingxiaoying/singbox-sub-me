@@ -334,7 +334,7 @@ fn traffic_set_used_rejects_corrupted_state_without_overwriting_it() {
 }
 
 #[test]
-fn traffic_set_used_rejects_a_target_below_the_current_total() {
+fn traffic_set_used_accepts_zero_below_the_current_total() {
     let fixture = TempDir::new().expect("temporary root is created");
     initialize_traffic_fixture(&fixture);
     let root = fixture.path().to_str().expect("fixture path is UTF-8");
@@ -349,20 +349,16 @@ fn traffic_set_used_rejects_a_target_below_the_current_total() {
         .args(["--root", root, "accounting-reset"])
         .assert()
         .success();
-    let state_path = fixture.path().join("var/lib/sbctl/state.json");
-    let before = fs::read(&state_path).expect("state is established");
+    run_traffic_set_used(&fixture, &["--bytes", "0"])
+        .success()
+        .stdout(predicate::str::contains("target total: 0 bytes"));
 
-    run_traffic_set_used(&fixture, &["--bytes", "50"])
-        .code(2)
-        .stderr(predicate::str::contains(
-            "below the currently reported total",
-        ));
-
-    assert_eq!(
-        fs::read(&state_path).expect("state remains readable"),
-        before,
-        "a rejected correction must not change accounting state"
-    );
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(["--root", root, "traffic"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("total: 0 bytes"));
 }
 
 #[test]
