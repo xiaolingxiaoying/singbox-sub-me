@@ -870,3 +870,34 @@ M18 追加改成覆写 → `startup.rs` 五道红。
   帧若干净，还要补第 8 项要求的静态门（操作列宽度不得写成裸字面量）才闭环。
 - 同时留一笔诚实账：`every_input_field_indexes_the_array_at_its_own_slot` 这道门**仍未被变异证明**
   （N8 的 perl 因 CRLF 没匹配上，等于没做变异）。
+
+## R29 — R28 的修复被英文帧推翻，真正的根因是"列宽之和 > 内容区"
+
+`699522f` 把轨道加到 250/268 之后，我按承诺去看了两张 860×640 帧：
+**中文过了，英文没过**——`Delete` 仍被切在卡片右缘（`.scratch/shots-item8b-en/` 之前那一轮）。
+所以那笔改动只是把缺陷从一种语言修到另一种语言，不算修复。
+
+重算之后根因不在轨道：表格写死 `min_w(600)`，而 860 窗口去掉侧栏 188 与左右内缩 2×20 再扣卡片自身
+28，只剩约 604 px 可画。列之和一旦超过它，`overflow_x_scroll` 就生效，而**被裁的永远是最后画的那个**
+——正好是操作列最右边的按钮。轨道 250 没错，错在"四列 + 600 最小宽"这套账本来就不成立。
+
+修法（`396bcc8` + 本轮）：
+- 窄屏隐藏「流量与节点」（配额在概览页有），把 170 px 还给操作列；
+- 窄屏的 `min_w` 不再写 440，而是**由三个列 token 相加得出**，两者不可能再各说各话；
+- 三个列宽进 `theme.rs` 成 token（`SUB_NAME_NARROW` / `SUB_STATUS_NARROW` / `SUB_ACTION_NARROW`）。
+
+新增一道会咬的算术门：`theme::tests::the_narrow_subscriptions_columns_fit_the_narrow_window`
+——断言窄屏列之和 ≤ 内容区，且**余量 ≥ 60px**（因为英文标签更长、按钮有内缩，"刚好等于"就是没刚好）。
+变异检验：把 `SUB_ACTION_NARROW` 从 250 改成 420 → 门红，报
+`the narrow subscriptions columns need 628px but the card has 604px at 860 wide`。
+这道门比"扫源码找裸字面量"有用：它钉的是**不等式**，不是某个数写在哪儿。
+
+复核帧（同一轮抓的，中英各一）：
+`shots-item8b/860x640-subscriptions.png`、`shots-item8b-en/860x640-subscriptions.png` ——
+三列、三个按钮一行内、全在卡片里，中英都不裁；
+`860x640-subscriptions-import-panel.png` 里面板在窄屏纵向堆叠，字段与红色提示都不裁。
+**顺带记下的一处可改进**（不是 Bug）：窄屏下「添加」按钮跟着"档案名称"那一行走，
+链接框被挤到上一行满宽，视觉上像"添加只提交名字"。要么把按钮并回链接行，要么改成整宽主按钮。
+
+工单 01 第 8 项就此闭环。`every_input_field_indexes_the_array_at_its_own_slot` 那道门
+仍欠一次有效变异（第一次的 perl 因 CRLF 没落进文件），本轮补上。

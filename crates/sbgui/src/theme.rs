@@ -134,6 +134,24 @@ pub(crate) const CONTENT_MAX: f32 = 1440.0;
 /// How many rows the rules and connections lists draw before asking.
 pub(crate) const LIST_PAGE: usize = 120;
 
+// The subscriptions table at narrow width, as numbers that have to add up.
+// They were literals until issue 01 item 8: the columns summed past what an
+// 860-wide window can show, the `overflow_x_scroll` wrapper engaged, and the
+// overflow was taken off the *last* button of the widest triple — 「删除」 in
+// Chinese, "Delete" in English. The test at the bottom of this file is the
+// reason they will not be re-guessed.
+
+/// The name column's floor at narrow. It is a grow column, so it gives way
+/// before the fixed ones do.
+pub(crate) const SUB_NAME_NARROW: f32 = 120.0;
+
+/// The status column at narrow: a pill, a dot and two or three words.
+pub(crate) const SUB_STATUS_NARROW: f32 = 64.0;
+
+/// The action track at narrow. Sized for the widest *triple* in the longer of
+/// the two languages — "Use this" + "Edit link" + "Delete".
+pub(crate) const SUB_ACTION_NARROW: f32 = 250.0;
+
 pub(crate) const DATA_DIR: &str = "sbgui";
 
 /// The window's own artwork, served to GPUI by [`SereinAssets`] and drawn in
@@ -258,6 +276,46 @@ mod tests {
             offenders.is_empty(),
             "decoration-only tokens painted as text:\n{}",
             offenders.join("\n")
+        );
+    }
+
+    // The gate's own arithmetic. These three are test-only on purpose: the page
+    // reads the column tokens above, and only the fit check needs to know what a
+    // card costs in padding.
+    /// The card's own padding and border, measured off the 860×640 frame.
+    const CARD_INSET: f32 = 28.0;
+    /// The gap between two table columns.
+    const SUB_COL_GAP: f32 = 12.0;
+
+    /// The width a page's content actually gets: the window minus the sidebar
+    /// and the content padding on both sides.
+    fn content_width(window: f32) -> f32 {
+        window - SIDEBAR_W - 2.0 * CONTENT_PAD
+    }
+
+    /// The arithmetic that issue 01 item 8 got wrong: a table whose columns sum
+    /// past the content box does not shrink — its `overflow_x_scroll` wrapper
+    /// scrolls, and what disappears off the card is whatever is painted last.
+    ///
+    /// The assertion is deliberately about the *narrow* window the harness
+    /// shoots at, so widening a track, adding a column, or dropping one of the
+    /// narrow hides fails here instead of in a screenshot someone has to notice.
+    #[test]
+    fn the_narrow_subscriptions_columns_fit_the_narrow_window() {
+        let narrow_window = 860.0;
+        let available = content_width(narrow_window) - CARD_INSET;
+        let columns = SUB_NAME_NARROW + SUB_STATUS_NARROW + SUB_ACTION_NARROW + 2.0 * SUB_COL_GAP;
+        assert!(
+            columns <= available,
+            "the narrow subscriptions columns need {columns}px but the card has {available}px \
+             at {narrow_window} wide — the overflow would be taken off the last action button"
+        );
+        // Slack, not just fitting: the English labels are the long ones and the
+        // buttons are padded, so a track that fits to the pixel does not fit.
+        assert!(
+            available - columns >= 60.0,
+            "only {:.0}px of slack at narrow; the widest triple has nowhere to grow",
+            available - columns
         );
     }
 }

@@ -16,7 +16,8 @@ use crate::parse::ImportReject;
 use crate::state::{FieldSpec, InputField, Sbgui, Tone};
 use crate::theme::{
     BODY, BORDER, BORDER_STRONG, CYAN, DANGER, FAINT, LABEL, META, MINT, MUTED, RADIUS_CONTROL,
-    ROW_HOVER, ROW_SELECTED, SURFACE, SURFACE_2, TEXT, WEIGHT_MEDIUM,
+    ROW_HOVER, ROW_SELECTED, SUB_ACTION_NARROW, SUB_NAME_NARROW, SUB_STATUS_NARROW, SURFACE,
+    SURFACE_2, TEXT, WEIGHT_MEDIUM,
 };
 use crate::tr;
 
@@ -75,7 +76,7 @@ impl Sbgui {
         // either language — English is the long one ("Use this" + "Edit link" +
         // "Delete") — and the table's min width has to stay under the window's
         // content width for that to be possible at all. See the min_w below.
-        let action_width = if narrow { 250.0 } else { 268.0 };
+        let action_width = if narrow { SUB_ACTION_NARROW } else { 268.0 };
         let usage = self.snapshot.subscription_usage;
         let node_count = self
             .snapshot
@@ -382,7 +383,7 @@ impl Sbgui {
                     // subscription stops updating, and it never fits in one
                     // line, so it truncates rather than wrapping.
                     .child(
-                        grow_col(1.4, if narrow { 120.0 } else { 200.0 })
+                        grow_col(1.4, if narrow { SUB_NAME_NARROW } else { 200.0 })
                             .child(
                                 div()
                                     .flex()
@@ -413,7 +414,7 @@ impl Sbgui {
                     )
                     .child(
                         div()
-                            .w(px(if narrow { 64.0 } else { 72.0 }))
+                            .w(px(if narrow { SUB_STATUS_NARROW } else { 72.0 }))
                             .flex_shrink_0()
                             .flex()
                             .items_center()
@@ -540,16 +541,23 @@ impl Sbgui {
                                 // scroller engages and cuts the last button off the card — which
                                 // is what issue 01 item 8 was: 600 of columns inside ~574 of
                                 // window, with the overflow landing on 「删除」 / "Delete".
-                                .min_w(px(if narrow { 440.0 } else { 600.0 }))
+                                .min_w(px(if narrow {
+                                    SUB_NAME_NARROW + SUB_STATUS_NARROW + SUB_ACTION_NARROW
+                                } else {
+                                    600.0
+                                }))
                                 .child(
                                     table_head_row()
                                         .child(
-                                            grow_col(1.4, if narrow { 120.0 } else { 200.0 })
-                                                .child(tr!(locale, "名称", "Name")),
+                                            grow_col(
+                                                1.4,
+                                                if narrow { SUB_NAME_NARROW } else { 200.0 },
+                                            )
+                                            .child(tr!(locale, "名称", "Name")),
                                         )
                                         .child(table_col(
                                             tr!(locale, "状态", "Status"),
-                                            Some(if narrow { 64.0 } else { 72.0 }),
+                                            Some(if narrow { SUB_STATUS_NARROW } else { 72.0 }),
                                         ))
                                         .when(!narrow, |head| {
                                             head.child(grow_col(1.2, 170.0).child(tr!(
