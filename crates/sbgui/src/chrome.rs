@@ -207,6 +207,13 @@ impl Sbgui {
                             Page::Subscriptions => ("subscription", Some(snapshot.profiles.len())),
                             Page::Proxies => ("nodes", Some(snapshot.proxy_groups.len())),
                             Page::Rules => ("rules", Some(snapshot.rules.len())),
+                            Page::Overrides => (
+                                "stack",
+                                snapshot
+                                    .override_summary
+                                    .as_ref()
+                                    .map(|summary| summary.fragments.len()),
+                            ),
                             Page::Connections => ("network", Some(snapshot.active_connections)),
                             Page::Logs => ("logs", None),
                             Page::Settings => ("settings", None),
@@ -245,6 +252,7 @@ impl Sbgui {
                                 // armed it on this page.
                                 view.confirm_close_all = false;
                                 view.confirm_delete_profile = None;
+                                view.confirm_clear_override = false;
                                 cx.notify();
                             }))
                             .child(
@@ -662,6 +670,7 @@ impl Sbgui {
             Page::Subscriptions => self.subscriptions(window, cx),
             Page::Proxies => self.proxies(window, cx),
             Page::Rules => self.rules(window, cx),
+            Page::Overrides => self.overrides(cx),
             Page::Connections => self.connections(window, cx),
             Page::Logs => self.logs(window, cx),
             Page::Settings => self.settings(window, cx),

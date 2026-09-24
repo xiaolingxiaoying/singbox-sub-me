@@ -69,5 +69,49 @@ if [ -n "${1:-}" ]; then
   "$DIR/core/sing-box" version | head -1
 fi
 
-echo "seeded $DIR (core: ${1:-none})"
+# The override page reads a real file, and its name is the sha256 of the profile
+# name, so the harness cannot point at it by hand. Gated behind
+# SBGUI_SEED_OVERRIDE so every earlier screenshot run stays byte-identical.
+# Same three fragments the terminal client's fixtures use: one that wins the rule
+# order, one switched off, one that reaches for the client's own fields.
+case "${SBGUI_SEED_OVERRIDE:-}" in
+  "") ;;
+  fragments)
+    oid=$(printf '%s' "家庭实验室" | sha256sum | cut -d' ' -f1)
+    mkdir -p "$DIR/overrides"
+    cat >"$DIR/overrides/$oid.json" <<'JSON'
+{"fragments":[
+  {"id":"private-direct","label":"内网直连","enabled":true,
+   "overlay":{"route":{"rules":[{"action":"direct","ip_cidr":["10.0.0.0/8"]},
+                                {"action":"direct","domain_suffix":["internal.example"]}]}}},
+  {"id":"custom-dns","label":"自建 DNS","enabled":false,
+   "overlay":{"dns":{"servers":["223.5.5.5"],"final":"local"}}},
+  {"id":"take-over","label":"接管控制通道","enabled":true,
+   "overlay":{"experimental":{"clash_api":{"secret":"OVERRIDE-MUST-NOT-PRINT-77aa"}},
+              "inbounds":[{"type":"mixed","listen_port":1080}],
+              "route":{"auto_detect_interface":false}}}
+]}
+JSON
+    ;;
+  broken)
+    oid=$(printf '%s' "家庭实验室" | sha256sum | cut -d' ' -f1)
+    mkdir -p "$DIR/overrides"
+    printf '{ "route": {"rules": }\n' >"$DIR/overrides/$oid.json"
+    ;;
+  bare)
+    # A bare object that `sing-box check` accepts: `dns.servers` wants objects
+    # with an address, so the shape the unit fixtures use would make the demo
+    # core refuse to start and the frame would show a failure nobody seeded on
+    # purpose.
+    oid=$(printf '%s' "家庭实验室" | sha256sum | cut -d' ' -f1)
+    mkdir -p "$DIR/overrides"
+    printf '{"log":{"level":"debug","timestamp":false}}\n' >"$DIR/overrides/$oid.json"
+    ;;
+  *)
+    echo "unknown SBGUI_SEED_OVERRIDE=${SBGUI_SEED_OVERRIDE}"
+    exit 1
+    ;;
+esac
+
+echo "seeded $DIR (core: ${1:-none}, override: ${SBGUI_SEED_OVERRIDE:-none})"
 find "$DIR" -maxdepth 3 -type f | sed "s|$DIR/|  |"

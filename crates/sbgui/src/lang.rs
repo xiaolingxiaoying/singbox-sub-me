@@ -68,6 +68,30 @@ pub(crate) fn traffic_mode(mode: TrafficMode, locale: Locale) -> &'static str {
     }
 }
 
+/// Why one field is reserved from an override. The engine has the Chinese half
+/// (`client_core::config_override::reserved_reason`), so Chinese stays its
+/// wording verbatim — the two clients print the same sentence — and only the
+/// English half is written here. An unknown path falls back to the generic
+/// reason rather than to an empty string, because the page still has to say why
+/// that line is there.
+pub(crate) fn reserved_reason(path: &str, locale: Locale) -> String {
+    if locale == Locale::Zh {
+        return client_core::config_override::reserved_reason(path).to_owned();
+    }
+    match path {
+        "/experimental/clash_api/external_controller" => {
+            "the client assigns the control-channel address"
+        }
+        "/experimental/clash_api/secret" => "the client generates the control-channel secret",
+        "/route/auto_detect_interface" => {
+            "running locally has to auto-detect the outbound interface"
+        }
+        "/inbounds" => "the traffic mode owns the inbound list (system proxy or TUN)",
+        _ => "reserved by the client",
+    }
+    .to_owned()
+}
+
 /// The two relative-time strings the engine formats for itself. They live in
 /// `client-core` because the terminal client renders them too, so the Chinese
 /// half stays the shared helper's output — delegating keeps the two clients
@@ -137,7 +161,8 @@ pub(crate) fn usage_label(
 #[cfg(test)]
 mod tests {
     use super::{
-        Locale, age_label, core_age_label, core_usage_label, established_label, usage_label,
+        Locale, age_label, core_age_label, core_usage_label, established_label, reserved_reason,
+        usage_label,
     };
 
     #[test]
@@ -195,6 +220,41 @@ mod tests {
             assert_eq!(age_label(epoch, Locale::Zh), core_age_label(epoch));
         }
         assert_eq!(usage_label(None, Locale::Zh), core_usage_label(None));
+    }
+
+    /// The Chinese half is the engine's sentence verbatim, so the two clients
+    /// cannot drift by one character; the English half is written arm for arm.
+    #[test]
+    fn a_reserved_field_explains_itself_in_both_languages() {
+        for path in [
+            "/experimental/clash_api/external_controller",
+            "/experimental/clash_api/secret",
+            "/route/auto_detect_interface",
+            "/inbounds",
+            "/something/new",
+        ] {
+            assert_eq!(
+                reserved_reason(path, Locale::Zh),
+                client_core::config_override::reserved_reason(path),
+                "the Chinese reason stays the engine's own wording"
+            );
+            assert!(
+                !reserved_reason(path, Locale::En).is_empty(),
+                "the English half has to answer for every path too"
+            );
+        }
+        assert_eq!(
+            reserved_reason("/inbounds", Locale::En),
+            "the traffic mode owns the inbound list (system proxy or TUN)"
+        );
+        assert_eq!(
+            reserved_reason("/route/auto_detect_interface", Locale::En),
+            "running locally has to auto-detect the outbound interface"
+        );
+        assert_eq!(
+            reserved_reason("/something/new", Locale::En),
+            "reserved by the client"
+        );
     }
 
     #[test]

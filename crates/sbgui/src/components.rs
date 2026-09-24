@@ -10,7 +10,7 @@ use client_core::format::{DelayLevel, delay_level, human_bytes};
 use client_core::state::{LogLevel, RouteRuleSnapshot};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    ClickEvent, Context, InteractiveElement, IntoElement, ParentElement,
+    ClickEvent, Context, ElementId, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, div, px, rgb, svg,
 };
 
@@ -117,7 +117,7 @@ pub(crate) fn health_dot(on: bool) -> impl IntoElement {
 /// `command` is `None` while the setting cannot change (a running core will
 /// not pick up a new traffic mode), and the track says so by staying grey.
 pub(crate) fn switch(
-    id: &'static str,
+    id: impl Into<ElementId>,
     on: bool,
     command: Option<ClientCommand>,
     cx: &mut Context<Sbgui>,

@@ -20,6 +20,10 @@ pub(crate) enum Page {
     Subscriptions,
     Proxies,
     Rules,
+    /// 覆写配置文件内容: the active profile's override file, its switchable rule
+    /// fragments, and the redacted outline of the merged configuration. This is
+    /// the terminal client's seventh tab; both read the same snapshot fields.
+    Overrides,
     Connections,
     Logs,
     Settings,
@@ -35,6 +39,7 @@ impl Page {
             Self::Subscriptions => tr!(locale, "订阅", "Subscriptions"),
             Self::Proxies => tr!(locale, "节点", "Nodes"),
             Self::Rules => tr!(locale, "规则", "Rules"),
+            Self::Overrides => tr!(locale, "覆写", "Overrides"),
             Self::Connections => tr!(locale, "连接", "Connections"),
             Self::Logs => tr!(locale, "日志", "Logs"),
             Self::Settings => tr!(locale, "设置", "Settings"),
@@ -42,12 +47,13 @@ impl Page {
         }
     }
 
-    pub(crate) fn all() -> [Self; 8] {
+    pub(crate) fn all() -> [Self; 9] {
         [
             Self::Dashboard,
             Self::Subscriptions,
             Self::Proxies,
             Self::Rules,
+            Self::Overrides,
             Self::Connections,
             Self::Logs,
             Self::Settings,
@@ -291,17 +297,25 @@ pub(crate) struct Sbgui {
     pub(crate) confirm_close_all: bool,
     /// A profile name whose delete button is armed waiting for a second click.
     pub(crate) confirm_delete_profile: Option<String>,
+    /// Set while the override page shows its delete-the-override confirmation.
+    /// Arming belongs to that page alone: clearing an override has no undo, so
+    /// the click that asks must never also be the click that deletes.
+    pub(crate) confirm_clear_override: bool,
 }
 
 /// Visual-review seams read once at startup. Ordinary launches never set
 /// them; automated screenshot review uses them instead of synthesized mouse
 /// input, which cannot reach the window on a locked desktop session.
 ///
-/// - `SBGUI_PAGE=<dashboard|subscriptions|proxies|rules|connections|logs|settings>`
+/// - `SBGUI_PAGE=<dashboard|subscriptions|proxies|rules|overrides|connections|logs|settings>`
 ///   opens the window directly on that page.
 /// - `SBGUI_SIZE=<width>x<height>` overrides the window size in logical px.
 /// - `SBGUI_SHOW_EXIT_CONFIRM=1` renders the exit-confirmation overlay
 ///   without enabling the OS proxy.
+/// - `SBGUI_SHOW_STOP_CONFIRM=1` renders the stop-the-core confirmation.
+/// - `SBGUI_SHOW_CLEAR_CONFIRM=1` renders the override page's armed
+///   delete-the-override bar, which otherwise needs the click the harness
+///   cannot make.
 /// - `SBGUI_LANG=en` starts the interface in English, so a translation can be
 ///   screenshotted without a pointer reaching the title-bar control.
 pub(crate) fn env_locale() -> crate::lang::Locale {
@@ -318,6 +332,7 @@ pub(crate) fn env_page() -> Option<Page> {
         "subscriptions" | "订阅" => Page::Subscriptions,
         "proxies" | "节点" => Page::Proxies,
         "rules" | "规则" => Page::Rules,
+        "overrides" | "覆写" => Page::Overrides,
         "connections" | "连接" => Page::Connections,
         "logs" | "日志" => Page::Logs,
         "settings" | "设置" => Page::Settings,
@@ -365,6 +380,13 @@ pub(crate) fn env_show_exit_confirm() -> bool {
 /// click the screenshot harness cannot make.
 pub(crate) fn env_show_stop_confirm() -> bool {
     std::env::var("SBGUI_SHOW_STOP_CONFIRM").is_ok_and(|value| value == "1")
+}
+
+/// Review seam for the override page's armed delete bar, same reason. It arms
+/// only the confirmation: the seam cannot delete anything, because the send
+/// lives on the bar's own second click.
+pub(crate) fn env_show_clear_confirm() -> bool {
+    std::env::var("SBGUI_SHOW_CLEAR_CONFIRM").is_ok_and(|value| value == "1")
 }
 
 #[cfg(test)]

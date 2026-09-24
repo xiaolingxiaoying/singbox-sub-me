@@ -549,6 +549,46 @@ exit=0，计数 client-core 114 / sbctl lib 203 / sbtui 39 / json-merge 等 92 /
 **合计 456 passed / 0 failed**；单独再跑 `-p sbtui` 亦 39/39。
 （前一条提交信息里"450 tests"是四舍五入的说法，以这里为准。）
 
+## R22 — GUI 的「覆写」页落地，以及它的截图能证明什么、不能证明什么
+
+第二个 writer agent（GUI 页）同样在 150 轮上限停住，停在了重抓截图的中途。它留下的树是
+`cargo test -p sbgui` 30/30、clippy `-D warnings`、fmt 全绿，所以我按复核处理而不是重写。
+
+复核确认的设计：`Page` 枚举加了 `Overrides`，`Page::all()` 是 `[Self; 9]` 类型数组（漏注册编译不过）；
+导航徽章显示片段数；`components.rs` 的 `switch()` 把 id 从 `&'static str` 放宽到 `impl Into<ElementId>`，
+只为片段级 id；15 个新测试里，开关测试断言的是**命令值**
+（`ToggleOverrideFragment { profile, id: "private-direct", enabled: None }`）而不是文案，
+清空测试断言"一次点击只装填、无文件时连确认条都不出现"；脱敏断言走 `all_text()`，
+覆盖 4 种快照 × 2 语言 × 装填/未装填 = 16 个页面组合，三种植入密钥
+（clash_api secret、订阅凭据、覆写片段里那条 `OVERRIDE-MUST-NOT-PRINT-77aa`）都不许出现在页面上。
+
+### 看图看出的两件事
+
+1. **1440×900 的帧里看不到"生效配置"面板**，一开始我以为它没渲染。用 860×1200 竖帧复核：面板在，
+   `生效配置 · 已脱敏 · 只读` + `来源 运行中内核的配置（active-config.json）` + 逐条指针都在，
+   只是 900px 下位于折叠线以下。不是 bug，但**取证必须包含一张竖帧**，
+   否则"这一屏看不到"会被后人误读成"这个功能没有"。提交时手上的竖帧是改动前二进制抓的
+   （`.scratch/sbgui-override-shots/860x1200-overrides.png`），所以这条结论的强度只到
+   "面板确实会渲染"，最终源的竖帧与英文帧仍待补（`.scratch/reshoot-override.sh` 加尺寸即可）。
+2. **一处会被误读的证据**：竖帧里禁用着的 `自建 DNS` 片段声明改动 `/dns/final、/dns/servers(1 项)`，
+   而下方 outline 恰好显示 `/dns/final: local`、`/dns/servers: 1 项`。查
+   `scripts/sbgui-shot/fixture/active-config.json` 确认夹具本身就是 `final=local` + 1 个 server +
+   `prefer_ipv4`，所以 outline 反映的是基线而不是被禁用的片段——**没有 bug**，但这张图也**证明不了
+   "禁用真的没生效"**，因为夹具与片段用了同一组值。待办：改 seed 夹具让两者可区分。
+
+### 这批截图不能证明的那件事
+
+演示内核是 harness 直接播种的，不是客户端拉起的，所以 `active-config.json` 里没有覆写合并的痕迹。
+也就是说：**截图能证明版式、标签、脱敏与开关控件；不能证明"覆写进入了内核真正使用的配置"**。
+后者只能来自（a）client-core 的合并单测与 `sing-box check` 门，或（b）任务 #6 的真机腿——
+由客户端启动内核，outline 才会显示合并结果。提交信息按这个口径写，不拿截图冒充端到端。
+
+### 操作事故（自己制造、已修）
+
+追第一个截图失败时我并发跑了两个抓取任务（共用 docker target 卷与同一输出目录，画面归属不可知），
+随后 `rm -rf .scratch/reshoot-*` 的 glob 又把抓取脚本本身删了。现在脚本输出前缀改成 `shots-*`、
+带 `mkdir` 锁拒绝重叠；`shot.sh` 的逗号归一化见 `717c2f7`——文档教的写法本来就不可能工作。
+
 
 
 

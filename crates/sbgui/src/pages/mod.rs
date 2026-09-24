@@ -7,6 +7,7 @@ pub(crate) mod about;
 pub(crate) mod connections;
 pub(crate) mod dashboard;
 pub(crate) mod logs;
+pub(crate) mod overrides;
 pub(crate) mod proxies;
 pub(crate) mod rules;
 pub(crate) mod settings;
