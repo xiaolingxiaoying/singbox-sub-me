@@ -1,6 +1,6 @@
 # GUI 三条实测缺陷：IME 被解绑、导出无视筛选、表头与行差 1px
 
-Status: needs-implementation（A 未开工；B/C 未开工）
+Status: partially-done（B、C 已于 2026-09-24 修复并过门；A（IME）已测量、按步骤待真机验收）
 Type: bug
 Found: 2026-09-24（R26），行号以当日 HEAD 为准
 
@@ -32,7 +32,14 @@ Found: 2026-09-24（R26），行号以当日 HEAD 为准
   → 与 G8 的 VM 清单合并做（工单 `04-real-windows-run.md`）。
 - 在真机跑通之前，`docs/client-description.md` 里不要出现"支持中文输入"这类说法。
 
-## B. 日志页「导出」与「复制」不是同一批内容
+## B. 日志页「导出」与「复制」不是同一批内容 ✅（2026-09-24，`fix(gui)` 7ab6f8a + 4cd7cf3）
+
+落地形状：`filtered_logs(snapshot, level, query, locale)` 与 `log_text(kernel, events, source)`
+两个纯函数，paint / 复制 / 导出**三处共用**；顺带把每次绘制都重建一遍再 clone 的浪费去掉
+（改成点击时才算），这就是工单 02 第 9 条的"日志复制文本按需构建"。
+新增 3 道测试；变异检验 B1（去掉级别判据）/ B2（去掉关键字判据）/ B4（丢掉 `[sing-box]` 前缀）都判红。
+**残余风险如实写**：如果以后有人让某个调用点绕过这两个函数，没有测试会看见——
+门钉的是函数的语义，不是调用点的忠诚。
 
 `pages/logs.rs:123-136` 先按级别与关键字过滤出 `kernel` / `events`，画面行与
 `copy_text`（`:161-170`）都来自这两个向量；`:272-290` 的导出闭包却从
@@ -48,7 +55,13 @@ Found: 2026-09-24（R26），行号以当日 HEAD 为准
 - 明确决定"导出是否受 180/60 行画面截断影响"：屏幕是窗口，文件应当是**过滤后的全部**，
   这个取舍写进代码注释与 `docs/client-description.md`，别留给下一个人猜。
 
-## C. 规则表头与数据行差 1px
+## C. 规则表头与数据行差 1px ✅（2026-09-24，`fix(gui)` 35b9417）
+
+`theme::TABLE_X` 成为表头与行共用的内缩 token，两处不再各写一个数；
+新增 `a_table_header_and_its_rows_take_their_inset_from_one_token` 扫自己的源码，
+把行内缩改回 `13` 即判红（已做变异检验）。测试里**先把 CRLF 归一成 LF** 再匹配——
+本仓库文件是 CRLF，按裸 `
+` 写的模式会静默不命中，这个坑今天踩过一次。
 
 `components.rs:440` `table_head_row` 用 `px(14.0)`，`:532` `rule_row` 用 `px(13.0)`；
 列宽（40/124/170）一致，但表头没有 `border_b_1`、首行没有 `border_t_1`。

@@ -24,9 +24,9 @@
 | G8 | Windows 真机验证覆盖不足 | GUI/TUI | `.scratch/sbgui-progressive-workspace/issues/04-real-windows-run.md` | ready-for-human（现可用 `verify.ps1 all` 驱动） |
 | G9 | sing-box 版本窗口不自动滑动 | 服务端订阅 | target-spec-gap plan §Phase 3 | 部分关闭 |
 | G10 | `subscription-userinfo` 无 `refresh` 键 | 服务端订阅 | target-spec-gap plan §2/§3 | 产品决策，非缺陷 |
-| G11 | **非正常退出把系统代理留在开启态**（无任何信号处理，清理只在 `q` 路径上） | TUI（GUI 待查） | `.scratch/client-config-override/issues/03-unclean-exit-leaves-system-proxy-on.md` | needs-implementation（R25 新发现，用户可见的断网级后果） |
-| G12 | 两个客户端都**无法创建**覆写文件：`SetOverride` 在引擎有实现、无人发送 | TUI/GUI | `.scratch/client-config-override/issues/04-clients-cannot-create-an-override-file.md` | needs-implementation（做"装载"，不做编辑器——边界见 ADR-0023） |
-| G13 | **GUI 在 Windows 上没有输入法**（未实现 `InputHandler`，gpui 因此解绑 IME）；另有导出无视筛选、表头差 1px | GUI | `.scratch/gui-completion/issues/05-gui-input-and-export-defects.md` | needs-implementation（R26；IME 那条必须真机验收，与 G8 合并做） |
+| G11 | **非正常退出把系统代理留在开启态**（无任何信号处理，清理只在 `q` 路径上） | TUI（GUI 待查） | `.scratch/client-config-override/issues/03-unclean-exit-leaves-system-proxy-on.md` | **TUI 已修**（`fix(tui)` 4bf4764）：SIGTERM/SIGHUP 走与 `q` 同一出口；L2 门 `scripts/dev/wsl-signal-exit.sh` 三例全过（含 SIGKILL 控制组）。**GUI 侧未查**（GPUI 事件循环是否有同类漏口） |
+| G12 | 两个客户端都**无法创建**覆写文件：`SetOverride` 在引擎有实现、无人发送 | TUI/GUI | `.scratch/client-config-override/issues/04-clients-cannot-create-an-override-file.md` | **半闭**：TUI 的 `f` 装载已落地（`feat(tui)` 01cefff，7 次变异 6 咬 + 补断言后 P4 也咬）；GUI 未做，设计留在 `.scratch/g12-gui-partial.patch` |
+| G13 | **GUI 在 Windows 上没有输入法**（未实现 `InputHandler`，gpui 因此解绑 IME）；另有导出无视筛选、表头差 1px | GUI | `.scratch/gui-completion/issues/05-gui-input-and-export-defects.md` | B/C **已修**（导出与复制同源、表头行共用 `TABLE_X`）；A（IME）已测量：pinned gpui 无 `Input` 元素、`InputHandler` 要 10+ 方法且区间是 UTF-16，而 `TextField` 连光标下标都没有——属控件重写，验收需真机拼音，故按五步拆开待做 |
 | **R8** | `subscription-userinfo` 的 `upload`/`download` 与服务端 rx/tx 的对应关系 | 服务端订阅 | 本轮审查新增 | **已按客户端视角翻转，待维护者确认**（曾被 `implementation-plan.md:301` 有意记录为反向） |
 
 
