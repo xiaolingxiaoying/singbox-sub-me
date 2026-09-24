@@ -84,15 +84,32 @@ if (-not $VmPath) {
     $VmPath = $env:WINVM_VMX
   } else {
     $running = & $Vmrun -T ws list | Select-Object -Skip 1
-    $VmPath = ($running | Where-Object { $_ -match 'Win11' -and $_ -match '\.vmx$' } | Select-Object -First 1)
+    $VmPath = ($running | Where-Object { $_ -match '(?i)win(11|dows 11)' -and $_ -match '\.vmx$' } | Select-Object -First 1)
     if (-not $VmPath) {
       $roots = @((Join-Path $env:USERPROFILE 'Virtual Machines'),
                  (Join-Path $env:USERPROFILE 'Virtual Machines VMs'),
+                 (Join-Path $env:USERPROFILE 'Documents\Virtual Machines'),
                  'D:\Virtual Machines', 'E:\Virtual Machines')
+      $found = @()
       foreach ($r in $roots) {
         if (-not (Test-Path $r)) { continue }
-        $hit = Get-ChildItem -Path $r -Recurse -Filter '*Win11*.vmx' -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($hit) { $VmPath = $hit.FullName; break }
+        # `-Filter '*.vmx'` also returns `.vmxf` teaming sidecars, and the real
+        # VM on this box is named `Windows 11 x64`, which a `Win11` pattern never
+        # matched — so the old search found the wrong files and missed the right
+        # one. Filter on the actual extension and accept both naming styles.
+        $found += @(Get-ChildItem -Path $r -Recurse -Filter '*.vmx*' -ErrorAction SilentlyContinue |
+          Where-Object { $_.Extension -eq '.vmx' -and $_.BaseName -match '(?i)win(11|dows 11)' } |
+          ForEach-Object { $_.FullName })
+      }
+      # Refuse to guess when more than one matches. This box holds both the
+      # interactive `Windows 11 x64` VM the pipeline is built for and a
+      # `Win11-sbtui-test` VM that is only reachable over VNC; picking whichever
+      # line Get-ChildItem returned first would turn the leg into a timeout that
+      # reads like a broken guest rather than the wrong machine.
+      if ($found.Count -eq 1) {
+        $VmPath = $found[0]
+      } elseif ($found.Count -gt 1) {
+        Fail ("multiple Windows 11 .vmx candidates found: {0} - pass -VmPath <file.vmx> or set WINVM_VMX" -f ($found -join '; '))
       }
     }
   }

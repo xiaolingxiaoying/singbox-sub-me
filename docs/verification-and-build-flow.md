@@ -154,7 +154,13 @@ powershell -File scripts/winvm/verify.ps1 snapshot      # 一次性建立 clean-
 powershell -File scripts/winvm/verify.ps1 all           # revert -> 8 页 GUI -> TUI/注册表 -> 取证据 -> revert
 ```
 
-- VM 定位三级回退：`-VmPath` → `$env:WINVM_VMX` → `vmrun list` 匹配 `Win11*.vmx` → 常见目录搜索。
+- VM 定位四级回退：`-VmPath` → `$env:WINVM_VMX` → `vmrun list` → 常见目录搜索；**搜到多个候选时直接报错**，不猜。
+  2026-09-24 实测修正了这条链上的两个真 bug：旧搜索根漏了 `%USERPROFILE%\Documents\Virtual Machines`
+  （本机 VM 全在这里，于是自动发现永远找不到），而 `-Filter '*Win11*.vmx'` 既漏掉名字叫
+  `Windows 11 x64` 的那台（模式里没有 `Win11` 子串）、又把 `*.vmxf` 组队侧车当成交互机。
+  所以本机跑任何一条腿都得先指认：
+  `$env:WINVM_VMX = "$env:USERPROFILE\Documents\Virtual Machines\Windows 11 x64\Windows 11 x64.vmx"`；
+  同目录另一台 `Win11-sbtui-test` 只能走 VNC，交给这条流水线只会得到"超时"式的假红。
 - `Finalize` 对比运行前后的**宿主指纹**（HKCU 代理三键、`netsh winhttp show proxy`、
   `sbctl/sing-box/sbgui/sbtui` 服务状态、PATH 条目数），有漂移就写 `host-drift.txt`。
 - 证据落在 `.scratch/winvm/<时间戳>/`（已 gitignore）：`gui/*.png`、`gui-manifest.txt`、`tui.txt`、`verify.log`。
