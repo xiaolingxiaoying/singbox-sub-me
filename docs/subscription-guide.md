@@ -102,6 +102,10 @@ sbctl config override clear     # 删除并重新生成
 - `client_rule_profile`：standard（远程 rule-set，默认）/ minimal（全部内置规则，不访问规则 CDN）。
   `minimal` **只改获取方式，不改分流结果**：每个规则集支撑的规则都带一份编译期内联孪生，
   所以在 `minimal` 下 CN/私有目标仍然直连，而不是悄悄落到代理组。
+  Clash 侧也一样：`minimal` 不再输出 `GEOIP,LAN` / `GEOIP,CN`——那两个代码由 mihomo 自己的
+  geo 数据库回答，而这个数据库在文件缺失时同样是开机从 GitHub 下载的。代价要写清楚：内联的是
+  粗粒度的 /10–/11 CN 网段与一份常用 CN 域名后缀，覆盖率低于完整数据库；
+  能接受这个代价、又要零下载的客户端用 `minimal`，否则用默认 `standard`。
 - `client_rule_set_base_url`：默认 `https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat`（`@sing`/`@meta` 分支由 sbctl 附加；换镜像只改这一处）。
   注意 `geoip/lan` 在该镜像上解析不到，因此 LAN 一直是内置列表而不是规则集 URL。
 - `client_latency_probe_url`：默认 `http://aliyun.com/generate_204`（选择组含 DIRECT，探测必须国内可达）

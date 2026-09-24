@@ -171,6 +171,13 @@ impl RuleMatcher {
     /// together with [`RuleMatcher::CN_DOMAINS`] as *two* rules, because
     /// sing-box refuses a rule that mixes domain and IP matchers.
     pub const CN_ADDRESSES: &'static [&'static str] = CN_IP_CIDRS;
+
+    /// The compiled-in private names, for a clash client under `minimal`.
+    /// Read together with [`RuleMatcher::PRIVATE_ADDRESS_LIST`] as two rules.
+    pub const PRIVATE_DOMAINS: &'static [&'static str] = PRIVATE_DOMAIN_SUFFIXES;
+
+    /// The special-purpose address blocks `GEOIP,LAN` answers from its database.
+    pub const PRIVATE_ADDRESS_LIST: &'static [&'static str] = PRIVATE_IP_CIDRS;
 }
 
 /// One routing decision the template contributes, in first-match order.
@@ -799,6 +806,27 @@ const CN_IP_CIDRS: &[&str] = &[
     "222.64.0.0/11",
     "222.192.0.0/11",
     "223.64.0.0/11",
+];
+
+/// The blocks `GEOIP,LAN` covers without a database: the RFC1918 ranges, the
+/// loopback and link-local ranges a captive portal lives in, carrier-grade NAT
+/// (a phone on mobile data reaches its own network through this), and the
+/// IPv6 equivalents. Written out for the `minimal` clash artifact, whose
+/// alternative is mihomo downloading `geoip.metadb` from GitHub on first use.
+const PRIVATE_IP_CIDRS: &[&str] = &[
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.0.0.0/24",
+    "192.168.0.0/16",
+    "198.18.0.0/15",
+    "224.0.0.0/4",
+    "::1/128",
+    "fc00::/7",
+    "fe80::/10",
+    "ff00::/8",
 ];
 
 #[cfg(test)]

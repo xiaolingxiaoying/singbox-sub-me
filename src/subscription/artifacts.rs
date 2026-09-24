@@ -1127,8 +1127,14 @@ mod tests {
                     "{name} under {template}/minimal must keep the ads verdict inline"
                 );
                 assert!(
-                    clash.contains("GEOIP,CN,DIRECT") || template == ClientTemplate::Global,
-                    "{name} under {template}/minimal must keep the CN verdict inline"
+                    !clash.contains("GEOIP,") && !clash.contains("GEOSITE,"),
+                    "{name} under {template}/minimal must not ask mihomo for its geo \
+                     database: that file is downloaded from GitHub on first use"
+                );
+                assert!(
+                    clash.contains("IP-CIDR,27.192.0.0/11,") || template == ClientTemplate::Global,
+                    "{name} under {template}/minimal must still carry the coarse CN \
+                     addresses inline, as the sing-box artifact does"
                 );
                 assert!(
                     clash.contains("DOMAIN-SUFFIX,baidu.com") || template != ClientTemplate::Global,
@@ -1337,11 +1343,12 @@ mod tests {
                         let rule = rule.as_str().expect("a clash rule is a string");
                         // `IP-CIDR,<cidr>,<target>,no-resolve` carries a trailing
                         // option, so its target is not the last field.
-                        let target = if rule.starts_with("IP-CIDR,") {
-                            rule.split(',').nth(2)
-                        } else {
-                            rule.split(',').next_back()
-                        };
+                        let target =
+                            if rule.starts_with("IP-CIDR,") || rule.starts_with("IP-CIDR6,") {
+                                rule.split(',').nth(2)
+                            } else {
+                                rule.split(',').next_back()
+                            };
                         let Some(target) = target else { continue };
                         assert!(
                             known.contains(&target.to_owned())

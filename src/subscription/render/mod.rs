@@ -279,23 +279,29 @@ mod tests {
             clash.contains("enhanced-mode: fake-ip\n"),
             "clash subscription defaults to fake-ip DNS"
         );
-        // The legacy mihomo variant keeps the built-in GEOIP rules the 1.18
-        // line shipped, so old cores never need the remote rule-providers.
+        // The legacy mihomo variant references no remote rule-sets — 1.18 cannot
+        // parse `.mrs` — and no `GEOIP,*` either: that code word is answered from
+        // a database mihomo downloads from GitHub on first use, so this artifact
+        // spells the same verdicts out as compiled-in lists instead.
         for rule in [
             "  - RULE-SET,geosite-cn,🎯全球直连\n",
             "  - GEOIP,LAN,DIRECT\n",
             "  - GEOIP,CN,DIRECT\n",
+            "  - DOMAIN-SUFFIX,baidu.com,DIRECT\n",
+            "  - IP-CIDR,27.192.0.0/11,DIRECT,no-resolve\n",
+            "  - IP-CIDR6,fc00::/7,DIRECT,no-resolve\n",
             "  - MATCH,🌍选择代理节点\n",
         ] {
             assert_eq!(
                 clash_legacy.contains(rule),
                 matches!(
                     rule,
-                    "  - GEOIP,LAN,DIRECT\n"
-                        | "  - GEOIP,CN,DIRECT\n"
+                    "  - DOMAIN-SUFFIX,baidu.com,DIRECT\n"
+                        | "  - IP-CIDR,27.192.0.0/11,DIRECT,no-resolve\n"
+                        | "  - IP-CIDR6,fc00::/7,DIRECT,no-resolve\n"
                         | "  - MATCH,🌍选择代理节点\n"
                 ),
-                "legacy clash keeps GEOIP rules and skips rule-sets: {rule}"
+                "legacy clash inlines its verdicts and asks for no external data: {rule}"
             );
         }
 

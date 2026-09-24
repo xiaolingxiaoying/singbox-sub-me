@@ -7,7 +7,7 @@
 use std::fs;
 use std::process::Command;
 
-use sbctl::config::{DeploymentConfig, ManagedProtocol, SubscriptionMode};
+use sbctl::config::{ClientRuleProfile, DeploymentConfig, ManagedProtocol, SubscriptionMode};
 use sbctl::subscription::{
     CLASH_LEGACY_VERSION, ClientTemplate, SubscriptionFormat, generated_artifacts,
 };
@@ -19,13 +19,20 @@ fn generated_clash_artifacts_load_in_a_real_mihomo() {
         panic!("MIHOMO_BIN must point at a mihomo binary");
     };
     let root = tempfile::tempdir().expect("temporary root is created");
-    // One run per template: 3 templates x 2 clash artifacts. Before the templates
-    // carried different content all three rendered the same bytes, so a single
-    // run appeared to prove the whole axis.
-    for template in [
-        ClientTemplate::Standard,
-        ClientTemplate::Global,
-        ClientTemplate::Split,
+    // One run per combination: 3 templates x 2 rule profiles x 2 clash
+    // artifacts. Before the templates carried different content all three
+    // rendered the same bytes, so a single run appeared to prove the whole axis.
+    for (template, rule_profile) in [
+        (ClientTemplate::Standard, ClientRuleProfile::Standard),
+        (ClientTemplate::Global, ClientRuleProfile::Standard),
+        (ClientTemplate::Split, ClientRuleProfile::Standard),
+        // `minimal` is the profile that promises no download at all, and its
+        // clash artifact now spells CN/LAN out as compiled-in lists instead of
+        // the `GEOIP,*` codes mihomo answers from a database it fetches on first
+        // use. Only a real core can say whether those lists parse.
+        (ClientTemplate::Standard, ClientRuleProfile::Minimal),
+        (ClientTemplate::Global, ClientRuleProfile::Minimal),
+        (ClientTemplate::Split, ClientRuleProfile::Minimal),
     ] {
         let mut config = DeploymentConfig::new(
             SubscriptionMode::IpFallback,
@@ -44,6 +51,7 @@ fn generated_clash_artifacts_load_in_a_real_mihomo() {
         )
         .expect("a five-protocol IP fallback deployment is valid");
         config.client_template = template.clone();
+        config.client_rule_profile = rule_profile.clone();
         let artifacts = generated_artifacts(&config, root.path()).expect("artifacts generate");
 
         for format in [
@@ -68,11 +76,11 @@ fn generated_clash_artifacts_load_in_a_real_mihomo() {
                 .expect("mihomo runs");
             assert!(
                 output.status.success(),
-                "mihomo rejected {name} (template={template}):\n{}\n{}",
+                "mihomo rejected {name} (template={template}, rules={rule_profile}):\n{}\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
-            eprintln!("mihomo accepted {name} (template={template})");
+            eprintln!("mihomo accepted {name} (template={template}, rules={rule_profile})");
         }
     }
 }

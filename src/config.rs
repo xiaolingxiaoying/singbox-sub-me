@@ -225,7 +225,10 @@ impl fmt::Display for ClientDnsMode {
 
 /// Client artifact routing profile. `standard` references remote rule-sets
 /// (geosite-cn / geoip-cn); `minimal` keeps every rule built-in so the client
-/// never contacts a rule CDN (ADR-0018 vendor neutrality).
+/// never contacts a rule CDN (ADR-0018 vendor neutrality). In the clash
+/// artifact that also means no `GEOIP,*`: mihomo answers those from a geo
+/// database it downloads on first use, so `minimal` spells the same verdicts out
+/// as compiled-in lists.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ClientRuleProfile {

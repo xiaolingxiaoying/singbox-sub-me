@@ -209,11 +209,29 @@ fn clash_rules(spec: &TemplateSpec, remote_rule_sets: bool) -> String {
             _ => clash_tag(rule.outbound),
         };
         match matcher {
-            // Both built-in geo codes, kept as the inline form they have always
-            // taken here: the pinned core answers them from its own database, so
-            // no CDN and no compiled-in list is involved.
-            RuleMatcher::Private => rules.push_str(&format!("  - GEOIP,LAN,{target}\n")),
-            RuleMatcher::Cn => rules.push_str(&format!("  - GEOIP,CN,{target}\n")),
+            // The two built-in geo codes. `GEOIP,*` is answered from mihomo's own
+            // geo database — which mihomo *downloads* from GitHub when the file is
+            // absent, so under `minimal` the same verdict is spelled out from the
+            // compiled-in lists instead. That is a real trade: the CN blocks are
+            // the coarse /10–/11 supernets and the private names are a curated
+            // list, not the full database. The alternative is a profile that
+            // promises no downloads and performs two of them on first start.
+            RuleMatcher::Private => {
+                if remote_rule_sets {
+                    rules.push_str(&format!("  - GEOIP,LAN,{target}\n"));
+                } else {
+                    push_inline_domains(&mut rules, RuleMatcher::PRIVATE_DOMAINS, target);
+                    push_inline_cidrs(&mut rules, RuleMatcher::PRIVATE_ADDRESS_LIST, target);
+                }
+            }
+            RuleMatcher::Cn => {
+                if remote_rule_sets {
+                    rules.push_str(&format!("  - GEOIP,CN,{target}\n"));
+                } else {
+                    push_inline_domains(&mut rules, RuleMatcher::CN_DOMAINS, target);
+                    push_inline_cidrs(&mut rules, RuleMatcher::CN_ADDRESSES, target);
+                }
+            }
             RuleMatcher::AiDomains => {
                 for suffix in AI_DOMAIN_SUFFIXES {
                     rules.push_str(&format!("  - DOMAIN-SUFFIX,{suffix},{target}\n"));
@@ -247,6 +265,28 @@ fn clash_rules(spec: &TemplateSpec, remote_rule_sets: bool) -> String {
         final_group = clash_tag(spec.final_group)
     ));
     rules
+}
+
+/// One compiled-in domain suffix list, in the same shape the inline rules
+/// already take.
+fn push_inline_domains(rules: &mut String, suffixes: &[&str], target: &str) {
+    for suffix in suffixes {
+        rules.push_str(&format!("  - DOMAIN-SUFFIX,{suffix},{target}\n"));
+    }
+}
+
+/// One compiled-in CIDR list. IPv6 needs its own code word: mihomo parses
+/// `IP-CIDR,::1/128` but Shadowrocket does not, and a rule that never matches
+/// is worse than one that is missing.
+fn push_inline_cidrs(rules: &mut String, cidrs: &[&str], target: &str) {
+    for cidr in cidrs {
+        let code = if cidr.contains(':') {
+            "IP-CIDR6"
+        } else {
+            "IP-CIDR"
+        };
+        rules.push_str(&format!("  - {code},{cidr},{target},no-resolve\n"));
+    }
 }
 
 /// The `rule-providers:` block for the rule-sets this template references.
