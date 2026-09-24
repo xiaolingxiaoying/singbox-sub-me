@@ -22,6 +22,7 @@ pub use client_core::{
 
 mod app;
 mod input;
+mod signals;
 mod style;
 mod view;
 
@@ -80,6 +81,9 @@ async fn run_app(
     let mut app = App::new(controller, dir);
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
+    // Subscribed once, before the loop: a handler installed per iteration would
+    // miss whatever arrives between iterations.
+    let mut shutdown = std::pin::pin!(signals::shutdown_signal());
     // Every exit path (including a failed read or draw) has to reach the
     // teardown below, so the loop records the error and breaks instead.
     let mut loop_error: Option<anyhow::Error> = None;
@@ -121,6 +125,13 @@ async fn run_app(
             _ = tick.tick() => {
                 app.refresh_snapshot();
             }
+            // The OS is taking the process away — a closed terminal, `kill`, a
+            // service stop, a logout. Leave through the same bottom of this
+            // function that `q` reaches, because the teardown below is what puts
+            // the machine-wide proxy back; breaking out here is the whole fix.
+            () = &mut shutdown => {
+                break;
+            }
         }
         if let Err(error) = terminal.draw(|frame| draw(frame, &mut app)) {
             loop_error = Some(error.into());
@@ -132,7 +143,7 @@ async fn run_app(
     // `kill_on_drop` only fires if that task is scheduled again, and returning
     // from here ends the process.
     app.refresh_snapshot();
-    if app.snapshot.system_proxy_enabled && !app.confirm_quit {
+    if signals::should_clear_proxy(app.snapshot.system_proxy_enabled, app.confirm_quit) {
         let _ = system_proxy::disable(&app.dir);
     }
     app.controller.shutdown();

@@ -13,7 +13,7 @@ clap = { version = "4.5.48", features = ["derive"] }
 crossterm = { version = "0.28.1", features = ["event-stream"] }
 futures-util = "0.3.31"
 ratatui = "0.29.0"
-tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "time"] }
+tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "time", "signal"] }
 
 
 [dev-dependencies]
