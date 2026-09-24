@@ -230,12 +230,77 @@ Shadowrocket 里会显示成巨额"上传"。
 | 无头截图腿只断言"PNG 存在且非空" | `inside.sh:172-186`；`api_probe` 只 echo 不断言，0 行照样 OK；未传 `DEMO_CORE` 时全拍空态 | 需要在 `inside.sh` 里把 `api rows:` 变成判据 |
 | 订阅 `refresh` 字面键 | 见 known-gaps G10，`expire=` 承担该语义 | 产品决策，待确认 |
 
+## R13（G3）— 订阅模板轴落地：`Global`/`Split` 不再是空壳
+
+**证据**：`src/subscription/template.rs:162` 的 `let _ = template;` 让三个模板渲染出逐字节相同的工件；
+`GroupSpec` 只带 `role`、`RuleMatcher` 只有 `Private`/`AiDomains`（审查 B4：**模板词汇表达不了**目标文档要的
+策略组/分流内容，光把 `template` 用起来是不够的）。
+
+**做法**（写入 subagent 完成，我独立复验）：先扩词汇（`GroupSpec` 带 tag/type/members、新增
+`RuleMatcher`、rule-set 条目自带 URL 与内联孪生），再落三份目录：
+- `standard` **一字未动**——`src/subscription/snapshots/` 的 13 份金标准在 `git status` 里**完全没出现**，
+  `the_generated_artifact_set_matches_the_pinned_goldens` 仍绿；默认值保持 `standard`（翻默认会让每台升级的 VPS 中途重启内核）。
+- `global`：除私有目标外全部走代理，广告阻断。
+- `split`：CN 与私有直连、广告阻断、AI/流媒体/Telegram 各自成组。
+- 新增组标签 `🔰代理分组/🤖AI服务/🎬流媒体/📲Telegram/⚠️故障转移`，**两种格式同名**（历史三个仍各叫各的，
+  因为它们被冻结）；`client-core` 现在按 `route.final` 发现选择组，所以新增组不会让客户端"当前节点"失效。
+- `geoip/lan` **故意不做成 URL**——配置的镜像解析不到它，宁可用编译期内联列表，也不留一个必然 404 的引用。
+- **B5 收口**：`client_rule_profile = minimal` 过去会把整类 rule_set 删干净，CN 目标因此落到代理组；
+  现在每条 rule-set 支撑的规则都带编译期内联孪生，`minimal` 在任何模板下都不出现 CDN 地址。
+- **B7 收口**：向导的 client-template 选项真正推动该轴（此前问遍其它字段独独不问它），配置摘要打印模板与 rule profile。
+  **未做**：`sbctl config init` 没有 `--client-template`——`client_rule_profile` 同样没有 CLI 开关，
+  向导才是本仓约定，给一个字段单开一个旗标是不一致的表面。
+
+**新增测试**：`each_template_resolves_to_its_own_catalog`、
+`the_richer_templates_add_groups_rule_sets_and_their_own_cn_verdict`、
+`minimal_rule_profile_names_no_rule_cdn_under_any_template`、
+`every_rule_set_backed_rule_carries_a_minimal_twin`、
+`the_cn_twin_carries_both_the_domain_and_address_lists_it_needs`、
+`the_fallback_group_is_declared_for_clash_only`、
+`every_template_and_minor_renders_a_referentially_sound_profile`、
+`the_node_list_artifacts_are_byte_identical_across_templates`、向导专题测试。
+
+**验证（宿主 L1，退出码各自取）**：fmt 0、clippy `-D warnings` 0、
+`cargo test -p sbctl --lib` **196 绿**、`cargo test --workspace --features sbctl/test-signing` **404 行 ok / 0 失败**。
+**变异检验**：把 `for_template` 改回"`let _ = template;` + 只返回 standard" →
+`each_template_resolves_to_its_own_catalog` 与 `the_fallback_group_is_declared_for_clash_only` **判红**，
+还原后 9 条全绿。这条特别重要：**金标准门抓不到空壳模板**（空壳恰恰保持字节相同），
+只有按"模板之间必须不同"断言的测试能抓。
+
+**尚未验证（不是"已验证"）**：Global/Split 的工件**没有过真核 `sing-box check`**。原因是环境：
+`version_profiles --ignored` 报 `subscription artifact is unavailable: No such file or directory`，
+查下去是 **WSL `~/bin` 里根本没有那 5 个内核**（只有 `mihomo`）——该测试自 Phase 0.5 起断言
+`checked == 5`，缺二进制就长成"产品缺陷"的样子。补救脚本已入库
+`scripts/dev/fetch-sing-box-cores.sh`，但此刻 **GitHub 从 WSL 不可达**（curl 20s 连接超时 ×4，
+与既知的宿主代理假 IP DNS 污染一致），所以本轮跑不了。
+另：真 `mihomo` 接受了 `subscription-clash.yaml`，`subscription-clash-1.18.yaml` 因 `mihomo -t` 要
+从 GitHub 下 `geoip.metadb` 而超时——那份工件的字节与 HEAD 完全一致（金标准未动），
+所以这条是宿主状态，不是本改动。
+
+**由此暴露的一个真缺口**：`tests/version_profiles.rs` 与 `tests/clash_mihomo.rs` **只测默认模板**，
+所以"新模板过真核"这件事今天没有任何门覆盖。需要把这两个测试按模板参数化——已在 R12 记为待办，
+并且必须等 GitHub 可达时才能验证。
+
+## R14 — 本轮环境事实（影响后续每一轮）
+
+1. `wsl -d ... -- bash /mnt/c/...` 直接传路径会被 MSYS 改写成 `C:/Program Files/Git/mnt/c/...`；
+   要么 `MSYS_NO_PATHCONV=1`，要么包在 `bash -c '...'` 里（本仓 `run.sh` 已用该旗标）。
+2. 同样经 `bash -c` 传进去的 `$var` 会被外层 Git Bash 先展开成空串（我第一次抓内核就下成了
+   `sing-box--linux-amd64.tar.gz`）。复杂命令**写成脚本文件**再调用，别拼字符串。
+3. 本轮 `version_profiles` 的两个失败**不是代码回归**；判定依据是"金标准未动 ⇒ 送检字节与 HEAD 相同"，
+   而不是"我觉得是网络问题"。
+
+
+
 ## 提交对应关系
 
 - `feat(winvm)`：R1
-- `fix(packaging)`：R2
-- `fix(client-core)`：R3–R7
+- `fix(client-core)`：R3–R7；`fix(client-core)` 第二笔：L2 抓到的 unix 编译错误
 - `fix(server)`：R8、R9
-- `fix(deploy)`：R10
-- 本文件与 `docs/known-gaps-after-merge.md` 的状态回写：随各批提交
+- `fix(packaging)`：R2
+- `fix(release)`：R10
+- `feat(subscription)`：R13（G3 模板轴）
+- `docs`：本文件与 `docs/known-gaps-after-merge.md` 的状态回写，随各批提交
+- `chore(dev)`：`scripts/dev/fetch-sing-box-cores.sh`（R13/R14 暴露的 L2 真核前置）
+
 

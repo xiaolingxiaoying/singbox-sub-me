@@ -1,8 +1,22 @@
 # VMware Windows 11 客户机流水线
 
-Status: ready-for-agent
+Status: ready-for-human
 Type: task
 Blocked by: sbctl-v0.2/issues/01
+
+## 2026-09-24 进展（commit `feat(winvm)`）
+
+入口已建成：`scripts/winvm/verify.ps1`（`parse-check | snapshot | revert | gui | tui | collect | all`）
++ 正式化的 `scripts/winvm/shot-guest.ps1`（默认 8 页，含 `about`）+ 新增 `scripts/winvm/tui-guest.ps1`
+（TUI 冒烟、权限探测、**真实 HKCU 代理写入-校验-恢复往返**、DPI、wintun 位置、孤儿与残留监听口）。
+口令只从 `$env:WINVM_PASS` 读；`Finalize` 会比对宿主代理/winhttp/服务/PATH 指纹，
+把"运行前后宿主环境无变化"变成可读结论；两份客户机报告都写 `stray-processes=`，由 `Assert-NoStrays` 判定。
+
+`parse-check` 子命令自身做过变异检验（塞进一个语法错的文件 → 退出 1，真实三脚本仍 OK）。
+
+**本工单仍未结案的部分**：`all` 这条腿**尚未真跑一次**——需要先有 `clean-base` 快照、
+`target/release/sbgui.exe` 与 `sbtui.exe`，以及 issue 04 清单里那几项（CJK 回退、按监视器 DPI、
+DWM、真实注册表、wintun 提权、Job Object 回收）的逐项存档。在那之前，Windows 平台行为只能说"未失败"。
 
 ## 事实
 

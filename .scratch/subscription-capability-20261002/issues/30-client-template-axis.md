@@ -1,9 +1,24 @@
 # 落地 `ClientTemplate` 模板轴（Phase 2 PR(b)，G1/G3 的第一步）
 
-Status: needs-implementation
+Status: needs-verification
 Type: task
 Found: 2026-09-23，由一次只读定位得出。行号是当时的 HEAD，动手前先复核——
 计划正文里的 `singbox.rs:159` / `clash.rs:138` 已经漂移，下面给的是当前锚点。
+
+## 2026-09-24 进展（commit `feat(subscription): give Global and Split real content`）
+
+已落地：`for_template` 不再忽略参数；`standard` 逐字节未动（13 份金标准未改）；
+`global`/`split` 有各自的组、rule-set 与内联孪生；`minimal` 在任何模板下都不出 CDN 地址；
+向导的 client-template 选项真正推动该轴。模板词汇也扩了（`GroupSpec` 带 tag/type/members、
+`RuleMatcher` 新增变体），因为原词汇**表达不了**这些内容（审查 B4）。
+
+仍欠两件事，都不在本工单原始动作之内：
+1. **真核未验**：`version_profiles`/`clash_mihomo` 只测默认模板，所以"新模板过 `sing-box check`
+   与 `mihomo -t`"今天没有任何门覆盖。需要把两个测试按模板参数化。
+   本轮连默认的 5 内核矩阵也没跑成——WSL `~/bin` 缺那 5 个二进制，而 GitHub 当时不可达
+   （`scripts/dev/fetch-sing-box-cores.sh` 是为此新增的前置脚本）。
+2. **CLI 表面未决**：`sbctl config init` 仍无 `--client-template`（`client_rule_profile` 也没有），
+   是否给这一类"仅影响客户端工件"的字段开旗标，应与 init 参数面一起决定。
 
 ## 今天的结构内容长在哪（要搬进 `TemplateSpec` 的东西）
 
