@@ -351,6 +351,161 @@ fn rule_matcher(rule: &serde_json::Value) -> (RuleKind, Option<String>) {
     (RuleKind::Other, None)
 }
 
+/// One override fragment as the UIs list it. Interface copy: `id` is what a
+/// toggle command addresses, `label` is what the user reads.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverrideFragmentSummary {
+    pub id: String,
+    pub label: String,
+    pub enabled: bool,
+    /// Routing rules this fragment prepends when enabled.
+    pub rules: usize,
+    /// Field paths it changes, capped for one line.
+    pub changes: Vec<String>,
+    /// Reserved fields it tries to change; the client writes those back, so the
+    /// fragment is reported rather than silently ignored.
+    pub reserved: Vec<String>,
+}
+
+/// The active profile's override file, as the UIs show it. `None` in the
+/// snapshot means "no override file", which is a state, not an error.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverrideSummary {
+    /// The profile whose file this is — always the active profile, because that
+    /// is the only override a start can apply.
+    pub profile: String,
+    /// File name inside `<data dir>/overrides/`, the profile's sha256 identity.
+    pub file_name: String,
+    pub bytes: u64,
+    pub fragments: Vec<OverrideFragmentSummary>,
+    /// A hand-written bare object: one fragment, nothing to toggle.
+    pub implicit: bool,
+}
+
+impl OverrideSummary {
+    pub fn enabled_count(&self) -> usize {
+        self.fragments
+            .iter()
+            .filter(|fragment| fragment.enabled)
+            .count()
+    }
+
+    /// The one line the panel header and the status bar print.
+    pub fn overview(&self) -> String {
+        format!(
+            "{}（{}/{} 个片段启用，{} 字节）",
+            self.file_name,
+            self.enabled_count(),
+            self.fragments.len(),
+            self.bytes
+        )
+    }
+
+    /// Every reserved field any enabled fragment tried to change.
+    pub fn reserved(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self
+            .fragments
+            .iter()
+            .filter(|fragment| fragment.enabled)
+            .flat_map(|fragment| fragment.reserved.clone())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+}
+
+/// How many lines of a configuration one outline shows before summarizing.
+const OUTLINE_CAP: usize = 18;
+
+/// A redacted, read-only outline of the configuration the core actually starts
+/// from — the merged result, not the subscription text.
+///
+/// The whole file cannot be shown on a 32-row terminal page and must not be
+/// dumped anywhere in any case: this carries the same discipline as ADR-0013,
+/// so the clash_api secret and any subscription credential in a URL are
+/// replaced before the text reaches a UI. Structure and sizes survive;
+/// secrets do not.
+pub fn config_outline(config_text: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(config_text) else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    outline_value(&value, String::new(), 0, &mut lines);
+    if lines.len() > OUTLINE_CAP {
+        let total = lines.len();
+        lines.truncate(OUTLINE_CAP);
+        lines.push(format!("…（共 {total} 处）"));
+    }
+    lines
+}
+
+fn outline_value(value: &serde_json::Value, path: String, depth: usize, out: &mut Vec<String>) {
+    let shown = if path.is_empty() {
+        "/".to_owned()
+    } else {
+        path
+    };
+    match value {
+        serde_json::Value::Object(object) => {
+            if object.is_empty() {
+                return;
+            }
+            // Deep enough to show `experimental/clash_api/secret: [已脱敏]` and
+            // no deeper, or the outline of a subscription becomes the file.
+            if depth >= 3 {
+                out.push(format!("{shown}: {} 项", object.len()));
+                return;
+            }
+            for (key, child) in object {
+                let child_path = if shown == "/" {
+                    format!("/{key}")
+                } else {
+                    format!("{shown}/{key}")
+                };
+                outline_value(child, child_path, depth + 1, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            let unit = if shown.ends_with("/rules") {
+                "条"
+            } else {
+                "项"
+            };
+            out.push(format!("{shown}: {} {unit}", items.len()));
+        }
+        other => out.push(format!("{shown}: {}", outline_scalar(&shown, other))),
+    }
+}
+
+/// One scalar, with credentials removed: named secrets by field, and URLs
+/// through [`crate::subscription::printable_url`], which is the same redaction
+/// the subscription layer reports failures with.
+fn outline_scalar(path: &str, value: &serde_json::Value) -> String {
+    let field = path.rsplit('/').next().unwrap_or_default();
+    if matches!(
+        field,
+        "secret" | "password" | "psk" | "private_key" | "uuid"
+    ) {
+        return "[已脱敏]".to_owned();
+    }
+    match value {
+        serde_json::Value::String(text) => {
+            if text.starts_with("http://") || text.starts_with("https://") {
+                return crate::subscription::printable_url(text);
+            }
+            let trimmed = text.trim();
+            if trimmed.chars().count() > 48 {
+                let kept: String = trimmed.chars().take(48).collect();
+                return format!("{kept}…");
+            }
+            trimmed.to_owned()
+        }
+        serde_json::Value::Null => "null".to_owned(),
+        other => other.to_string(),
+    }
+}
+
 /// The UI-facing view of the persistent preferences that clients can change.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingsSnapshot {
@@ -420,6 +575,16 @@ pub struct ClientSnapshot {
     /// published by the engine so both UIs render the same rules view.
     pub rules: Vec<RouteRuleSnapshot>,
     pub rule_sets: Vec<RuleSetSummary>,
+    /// The active profile's config override file, or `None` when there is no
+    /// such file. This is the "覆写配置文件内容" state the UIs show.
+    pub override_summary: Option<OverrideSummary>,
+    /// Why the override file was refused (malformed, unreadable). An override
+    /// that cannot be parsed is never applied, so the start fails and this line
+    /// carries the field path to blame.
+    pub override_error: Option<String>,
+    /// A redacted outline of the configuration the core starts from: the
+    /// subscription plus the override plus what the client re-asserts.
+    pub effective_outline: Vec<String>,
     pub subscription_usage: Option<SubscriptionUserinfo>,
     pub settings: SettingsSnapshot,
     pub status: String,
@@ -463,6 +628,9 @@ impl Default for ClientSnapshot {
             rules: Vec::new(),
             rule_sets: Vec::new(),
             inbounds: Vec::new(),
+            override_summary: None,
+            override_error: None,
+            effective_outline: Vec::new(),
             subscription_usage: None,
             settings: SettingsSnapshot::default(),
             status: "就绪。先导入订阅，再启动内核。".to_owned(),

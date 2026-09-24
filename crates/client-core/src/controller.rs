@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 
 use crate::clash_api::{ClashApi, OutboundMode};
 use crate::command::SettingsPatch;
+use crate::config_override::{self, ProfileOverride};
 use crate::event_code::{EventCode, EventRecord};
 use crate::format::now_epoch;
 use crate::settings::{self, Profiles, Settings};
@@ -42,6 +43,10 @@ const STABLE_RUN: Duration = Duration::from_secs(60);
 /// core child. Stopping is local (kill plus a registry write); sing-box's own
 /// graceful window is 10s and we never wait for a signal it cannot receive.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+/// How long [`Engine::reap_child`] waits for a killed core to be reaped. Kept
+/// strictly below [`SHUTDOWN_GRACE`] so the exit path cannot time out while the
+/// engine is still waiting; the invariant test below enforces that.
+const REAP_GRACE: Duration = Duration::from_secs(2);
 /// Cap on how much of the core log one poll consumes, so a chatty core that is
 /// never restarted cannot grow the read buffer without limit.
 const CORE_LOG_READ_LIMIT: u64 = 256 * 1024;
@@ -243,6 +248,7 @@ impl Engine {
             snapshot.rules = rules;
             snapshot.rule_sets = rule_sets;
             snapshot.inbounds = crate::state::parse_inbounds(&text);
+            snapshot.effective_outline = crate::state::config_outline(&text);
         }
         let mut engine = Self {
             dir,
@@ -268,6 +274,10 @@ impl Engine {
             store_unreadable,
         };
         engine.note_event(status_code, status_args);
+        // The active profile's override file is part of the state a UI has to
+        // show before the first start: the rules page answers "is there an
+        // override, and is it usable?" from this, not from a core round trip.
+        engine.refresh_override();
         engine
     }
 
@@ -352,12 +362,14 @@ impl Engine {
     /// `kill()` only delivers the signal. Until the child is reaped its process
     /// object is still alive, and a restart that probes the mixed port can run
     /// before the OS has released the listener. The timeout keeps a wedged
-    /// handle from stalling the engine's single task forever.
+    /// handle from stalling the engine's single task forever, and must stay
+    /// inside [`SHUTDOWN_GRACE`]: `shutdown()` stops listening after the grace
+    /// period, so a longer wait would let the UI walk away while the core still
+    /// holds the port - the exact thing this reap exists to prevent.
     async fn reap_child(&mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.child.kill().await;
-            let _ =
-                tokio::time::timeout(std::time::Duration::from_secs(5), child.child.wait()).await;
+            let _ = tokio::time::timeout(REAP_GRACE, child.child.wait()).await;
         }
     }
 
@@ -527,6 +539,15 @@ impl Engine {
             }
             ClientCommand::CloseAllConnections => self.close_all_connections(),
             ClientCommand::UpdateSubscription => self.update_subscription().await,
+            ClientCommand::SetOverride { profile, contents } => {
+                self.set_override(profile, contents).await
+            }
+            ClientCommand::ClearOverride(profile) => self.clear_override(profile).await,
+            ClientCommand::ToggleOverrideFragment {
+                profile,
+                id,
+                enabled,
+            } => self.toggle_override_fragment(profile, id, enabled).await,
             ClientCommand::ImportSubscription { name, url } => {
                 self.import_subscription(name, url).await
             }
@@ -634,6 +655,7 @@ impl Engine {
             .active_profile()
             .map(|profile| ProfileSummary::from_profile(profile, true));
         self.snapshot.profiles = profile_summaries(&self.profiles);
+        self.refresh_override();
         self.note_event(EventCode::ProfileActivated, vec![name.to_string()]);
         Ok(())
     }
@@ -731,12 +753,16 @@ impl Engine {
         let cache = settings::profile_cache_path(&self.dir, &profile.name);
         let dir = self.dir.clone();
         let port = self.settings.mixed_port;
+        // Read and validated here, before anything is spawned: an override the
+        // core cannot be started under must refuse this start, not be skipped.
+        let override_file = self.active_override()?;
         self.snapshot.starting = true;
         self.spawn_operation(async move {
             let raw = tokio::fs::read_to_string(cache).await.context(
                 "读取订阅缓存失败；请更新或重新导入订阅（旧缓存名称冲突时不会自动迁移）",
             )?;
-            let started = core::start_managed(&dir, &raw, mode, port).await?;
+            let started =
+                core::start_managed(&dir, &raw, mode, port, override_file.as_ref()).await?;
             Ok(Box::new(move |engine: &mut Engine| {
                 if !started.handle.orphan_guard {
                     engine.note(
@@ -749,6 +775,17 @@ impl Engine {
                 (engine.snapshot.rules, engine.snapshot.rule_sets) =
                     crate::state::parse_route_rules(&started.config);
                 engine.snapshot.inbounds = crate::state::parse_inbounds(&started.config);
+                engine.snapshot.effective_outline = crate::state::config_outline(&started.config);
+                engine.refresh_override();
+                if !started.reserved_conflicts.is_empty() {
+                    // The override asked for a field the client owns. It was
+                    // written back; say so, because a fragment that appears to
+                    // do nothing is the report's problem to carry.
+                    engine.note_event(
+                        EventCode::OverrideReservedIgnored,
+                        vec![started.reserved_conflicts.join("、")],
+                    );
+                }
                 engine.snapshot.core_running = true;
                 engine.healthy_since = Some(Instant::now());
                 engine.restart_at = None;
@@ -893,6 +930,13 @@ impl Engine {
                 engine.save_profiles()?;
                 engine.snapshot.subscription_usage = fetched.userinfo;
                 engine.snapshot.profiles = profile_summaries(&engine.profiles);
+                // A new subscription body means a new base for the merge; the
+                // override file itself is untouched and applies at the next
+                // start, and the panel has to say which file is in force.
+                engine.refresh_override();
+                // The cache the next start merges onto just changed, so the
+                // override panel re-reads what that start will actually show.
+                engine.refresh_override();
                 engine.snapshot.active_profile = engine
                     .profiles
                     .active_profile()
@@ -1004,6 +1048,7 @@ impl Engine {
             .profiles
             .active_profile()
             .map(|profile| ProfileSummary::from_profile(profile, true));
+        self.refresh_override();
         self.note(format!(
             "已从文件导入并激活：{name}（{} 个节点）",
             parsed.nodes.len()
@@ -1057,14 +1102,139 @@ impl Engine {
         if tokio::fs::try_exists(&cache).await.unwrap_or(false) {
             tokio::fs::remove_file(cache).await?;
         }
+        // The override is addressed by the same profile identity as the cache,
+        // so it goes with the profile: a deleted profile whose override
+        // survives could be resurrected by a later profile of the same name.
+        config_override::delete_file(&settings::override_path(&self.dir, name))?;
         self.snapshot.profiles = profile_summaries(&self.profiles);
         self.snapshot.active_profile = self
             .profiles
             .active_profile()
             .map(|profile| ProfileSummary::from_profile(profile, true));
         self.snapshot.subscription_usage = None;
+        self.refresh_override();
         self.note_event(EventCode::ProfileDeleted, vec![name.to_string()]);
         Ok(())
+    }
+
+    /// The override the next start must apply, or the reason it cannot.
+    ///
+    /// A malformed file is an error rather than "no override": starting without
+    /// it would be the silent half-application the spec forbids, so the caller
+    /// refuses the start and the reason reaches the status line.
+    fn active_override(&self) -> Result<Option<ProfileOverride>> {
+        let Some(profile) = self.profiles.active_profile() else {
+            return Ok(None);
+        };
+        let path = settings::override_path(&self.dir, &profile.name);
+        // One line with the reason inside it: a status bar prints `Display`, and
+        // an anyhow context would push the actual cause out of view.
+        ProfileOverride::load(&path).map_err(|error| {
+            anyhow::anyhow!(
+                "档案 {} 的配置覆写无法应用，内核未启动：{error}",
+                profile.name
+            )
+        })
+    }
+
+    /// Publishes the override file's state for the active profile: which file is
+    /// in force, what it changes, and why it might not be. Deliberately silent,
+    /// because it runs on the engine's startup path and after a subscription
+    /// update, where replacing the status line would bury the real news.
+    fn refresh_override(&mut self) {
+        let profile = self
+            .profiles
+            .active_profile()
+            .map(|profile| profile.name.clone());
+        match (profile, self.active_override()) {
+            (Some(profile), Ok(Some(file))) => {
+                self.snapshot.override_error = None;
+                self.snapshot.override_summary = Some(file.summary(&profile));
+            }
+            (Some(_), Err(error)) => {
+                self.snapshot.override_summary = None;
+                self.snapshot.override_error = Some(error.to_string());
+            }
+            _ => {
+                self.snapshot.override_summary = None;
+                self.snapshot.override_error = None;
+            }
+        }
+    }
+
+    /// Writes (or, with empty text, clears) one profile's override file.
+    ///
+    /// The text is validated before anything touches the disk and written
+    /// verbatim after that: re-serializing a hand-written file would turn "the
+    /// client normalized my config" into a surprise the user cannot diff
+    /// against what they wrote.
+    async fn set_override(&mut self, profile: String, contents: String) -> Result<()> {
+        self.store_writable()?;
+        self.require_profile(&profile)?;
+        if contents.trim().is_empty() {
+            return self.clear_override(profile).await;
+        }
+        let path = settings::override_path(&self.dir, &profile);
+        ProfileOverride::parse(&contents, &path)?;
+        config_override::write_file(&path, &contents)?;
+        self.refresh_override();
+        self.note_event(EventCode::OverrideSaved, vec![profile]);
+        Ok(())
+    }
+
+    /// Deletes one profile's override file. Absent is the same state as deleted,
+    /// so this is safe to repeat.
+    async fn clear_override(&mut self, profile: String) -> Result<()> {
+        self.store_writable()?;
+        self.require_profile(&profile)?;
+        config_override::delete_file(&settings::override_path(&self.dir, &profile))?;
+        self.refresh_override();
+        self.note_event(EventCode::OverrideCleared, vec![profile]);
+        Ok(())
+    }
+
+    /// Enables or disables one rule fragment, rewriting the file in the
+    /// documented fragment shape. A hand-written bare object has no fragments
+    /// and says so instead of being restructured behind the user's back.
+    async fn toggle_override_fragment(
+        &mut self,
+        profile: String,
+        id: String,
+        enabled: Option<bool>,
+    ) -> Result<()> {
+        self.store_writable()?;
+        self.require_profile(&profile)?;
+        let path = settings::override_path(&self.dir, &profile);
+        let Some(mut file) = ProfileOverride::load(&path)? else {
+            anyhow::bail!(
+                "档案 {profile} 没有配置覆写文件（{}）；先写入覆写再开关片段",
+                path.display()
+            );
+        };
+        let now = file.toggle(&id, enabled)?;
+        config_override::write_file(&path, &file.to_text()?)?;
+        self.refresh_override();
+        self.note_event(
+            if now {
+                EventCode::OverrideFragmentEnabled
+            } else {
+                EventCode::OverrideFragmentDisabled
+            },
+            vec![id],
+        );
+        Ok(())
+    }
+
+    fn require_profile(&self, name: &str) -> Result<()> {
+        if self
+            .profiles
+            .profiles
+            .iter()
+            .any(|profile| profile.name == name)
+        {
+            return Ok(());
+        }
+        anyhow::bail!("订阅档案不存在: {name}");
     }
 
     /// Refreshes telemetry and publishes after each stage.
@@ -1709,6 +1879,18 @@ mod tests {
         assert!(engine.pending.is_none());
     }
 
+    /// The reap has to finish inside the shutdown grace. If it does not,
+    /// `shutdown()` gives up and reports a clean exit while the engine is still
+    /// waiting on a core that holds the mixed port - the exact failure the reap
+    /// exists to prevent, so raising one bound without the other breaks it.
+    #[test]
+    fn the_reap_deadline_fits_inside_the_shutdown_grace() {
+        assert!(
+            REAP_GRACE < SHUTDOWN_GRACE,
+            "reap {REAP_GRACE:?} must be shorter than the {SHUTDOWN_GRACE:?} the UI waits"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_waits_for_the_engine_to_acknowledge_instead_of_timing_out() {
         let dir = tempfile::tempdir().unwrap();
@@ -1766,6 +1948,305 @@ mod tests {
         }
         engine.remove_profile("a b").await.unwrap();
         assert!(settings::profile_cache_path(dir.path(), "a_b").is_file());
+    }
+
+    const ONE_FRAGMENT: &str = r#"{"fragments":[{"id":"dns","label":"公共 DNS","enabled":true,
+        "overlay":{"dns":{"servers":[{"tag":"public","address":"223.5.5.5"}]}}}]}"#;
+
+    /// Imports one local profile and makes it active, the way the TUI does.
+    async fn engine_with_profile(dir: &std::path::Path, name: &str) -> Engine {
+        let mut engine = test_engine(dir).await;
+        let path = dir.join(format!("{name}.json"));
+        std::fs::write(&path, NODE_CONFIG).unwrap();
+        engine
+            .import_profile_file(path.to_string_lossy().into())
+            .await
+            .unwrap();
+        engine
+    }
+
+    /// The storage contract, end to end: a command writes the file the *next*
+    /// engine reads. Nothing is kept only in memory, because the client is
+    /// routinely quit and started again.
+    #[tokio::test]
+    async fn setting_an_override_is_published_and_read_back_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = engine_with_profile(dir.path(), "mine").await;
+        assert!(
+            engine.snapshot.override_summary.is_none(),
+            "a fresh profile has no override, which is a state and not an error"
+        );
+        engine
+            .set_override("mine".to_owned(), ONE_FRAGMENT.to_owned())
+            .await
+            .unwrap();
+        let path = settings::override_path(dir.path(), "mine");
+        assert!(path.is_file(), "the override lives at {}", path.display());
+        let summary = engine
+            .snapshot
+            .override_summary
+            .as_ref()
+            .expect("the snapshot publishes what is on disk");
+        assert_eq!(summary.profile, "mine");
+        assert_eq!(
+            summary.file_name,
+            path.file_name().unwrap().to_string_lossy()
+        );
+        assert_eq!(summary.fragments.len(), 1);
+        assert_eq!(summary.fragments[0].id, "dns");
+        assert_eq!(summary.fragments[0].label, "公共 DNS");
+        assert!(summary.fragments[0].enabled);
+        assert_eq!(summary.bytes, std::fs::metadata(&path).unwrap().len());
+        let overview = summary.overview();
+        assert!(
+            overview.contains(&summary.file_name) && overview.contains("1/1 个片段启用"),
+            "the one-line view says which file is in force and how much of it applies: {overview}"
+        );
+
+        drop(engine);
+        let reopened = test_engine(dir.path()).await;
+        assert_eq!(
+            reopened
+                .snapshot
+                .override_summary
+                .as_ref()
+                .map(|s| s.file_name.clone()),
+            Some(path.file_name().unwrap().to_string_lossy().into_owned()),
+            "a restart reads the same override the next start will apply"
+        );
+    }
+
+    /// The override is per profile, addressed by the profile's own identity:
+    /// switching profiles has to switch what the panel claims is in force.
+    #[tokio::test]
+    async fn two_profiles_keep_their_own_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = engine_with_profile(dir.path(), "first").await;
+        let path = dir.path().join("second.json");
+        std::fs::write(&path, NODE_CONFIG).unwrap();
+        engine
+            .import_profile_file(path.to_string_lossy().into())
+            .await
+            .unwrap();
+        engine
+            .set_override("second".to_owned(), ONE_FRAGMENT.to_owned())
+            .await
+            .unwrap();
+        assert_eq!(
+            engine
+                .snapshot
+                .override_summary
+                .as_ref()
+                .map(|s| s.profile.as_str()),
+            Some("second"),
+            "the newly imported profile is the active one"
+        );
+        engine.switch_profile("first".to_owned()).unwrap();
+        assert!(
+            engine.snapshot.override_summary.is_none(),
+            "the other profile has no override; showing the previous one would lie"
+        );
+        assert!(
+            settings::override_path(dir.path(), "second").is_file(),
+            "switching away must not delete anything"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_override_document_clears_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = engine_with_profile(dir.path(), "mine").await;
+        engine
+            .set_override("mine".to_owned(), ONE_FRAGMENT.to_owned())
+            .await
+            .unwrap();
+        engine
+            .set_override("mine".to_owned(), "   \n".to_owned())
+            .await
+            .unwrap();
+        assert!(
+            !settings::override_path(dir.path(), "mine").exists(),
+            "whitespace means clear, not an empty document that silently changes nothing"
+        );
+        assert!(engine.snapshot.override_summary.is_none());
+    }
+
+    /// A document that will not parse must never reach the disk: the engine's
+    /// own start reads the file, so a rejected write is the last chance to keep
+    /// a typo from disabling the core.
+    #[tokio::test]
+    async fn a_malformed_override_is_refused_and_the_previous_file_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = engine_with_profile(dir.path(), "mine").await;
+        engine
+            .set_override("mine".to_owned(), ONE_FRAGMENT.to_owned())
+            .await
+            .unwrap();
+        let path = settings::override_path(dir.path(), "mine");
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let error = engine
+            .set_override(
+                "mine".to_owned(),
+                r#"{"fragments": [{"id": "broken", "overlay": 7}]}"#.to_owned(),
+            )
+            .await
+            .expect_err("an overlay must be an object");
+        let message = error.to_string();
+        assert!(
+            message.contains("/fragments/0/overlay"),
+            "the refusal names the field path: {message}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "a refused write leaves the working override in place"
+        );
+        assert!(engine.snapshot.override_summary.is_some());
+        assert!(engine.snapshot.override_error.is_none());
+    }
+
+    /// A file the user hand-edited into nonsense is the case that cannot be
+    /// refused at write time. It has to be visible *and* stop the start: the
+    /// alternative is a client that silently runs without the override.
+    #[tokio::test]
+    async fn a_malformed_override_on_disk_is_reported_and_blocks_the_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = engine_with_profile(dir.path(), "mine").await;
+        let path = settings::override_path(dir.path(), "mine");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{ this is not json").unwrap();
+        // A file standing in for the core binary: the start has to get past the
+        // "no core installed" check to reach the override check.
+        std::fs::create_dir_all(dir.path().join("core")).unwrap();
+        std::fs::write(settings::core_path(dir.path()), b"placeholder").unwrap();
+
+        engine.refresh_override();
+        assert!(engine.snapshot.override_summary.is_none());
+        let stored = engine
+            .snapshot
+            .override_error
+            .clone()
+            .expect("an unreadable override is a state the UI must show");
+        assert!(stored.contains("不是有效的 JSON"), "{stored}");
+
+        let error = engine
+            .start_core()
+            .await
+            .expect_err("a broken override must refuse the start");
+        assert!(
+            error.to_string().contains("覆写"),
+            "the refusal must say the override is why: {error}"
+        );
+        assert!(
+            !dir.path().join("cache/active-config.json").exists(),
+            "a refused start must not write a runtime configuration without the override"
+        );
+    }
+
+    #[tokio::test]
+    async fn toggling_a_fragment_rewrites_the_file_and_says_which_way_it_went() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = engine_with_profile(dir.path(), "mine").await;
+        engine
+            .set_override(
+                "mine".to_owned(),
+                r#"{"fragments":[{"id":"a","overlay":{"dns":{"tag":"one"}}},{"id":"b","overlay":{"log":{"level":"debug"}}}]}"#
+                    .to_owned(),
+            )
+            .await
+            .unwrap();
+        engine
+            .toggle_override_fragment("mine".to_owned(), "a".to_owned(), None)
+            .await
+            .unwrap();
+        let summary = engine.snapshot.override_summary.as_ref().expect("summary");
+        assert_eq!(
+            summary
+                .fragments
+                .iter()
+                .map(|f| (f.id.as_str(), f.enabled))
+                .collect::<Vec<_>>(),
+            vec![("a", false), ("b", true)],
+            "the toggle flips only the named fragment"
+        );
+        assert_eq!(summary.enabled_count(), 1);
+        assert!(
+            engine.snapshot.status.contains("已停用覆写片段 a"),
+            "the status line reports the result: {}",
+            engine.snapshot.status
+        );
+        // And the file on disk agrees with the published state, because that is
+        // what the next start reads.
+        let reread = ProfileOverride::load(&settings::override_path(dir.path(), "mine"))
+            .unwrap()
+            .expect("still there");
+        assert!(!reread.fragments[0].enabled);
+        assert_eq!(reread.fragments[1].id, "b");
+    }
+
+    #[tokio::test]
+    async fn a_hand_written_override_says_it_has_nothing_to_toggle() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = engine_with_profile(dir.path(), "mine").await;
+        engine
+            .set_override(
+                "mine".to_owned(),
+                r#"{"dns":{"tag":"hand-written"}}"#.to_owned(),
+            )
+            .await
+            .unwrap();
+        let summary = engine
+            .snapshot
+            .override_summary
+            .as_ref()
+            .expect("the bare form is an override");
+        assert!(summary.implicit);
+        let error = engine
+            .toggle_override_fragment("mine".to_owned(), "override".to_owned(), Some(false))
+            .await
+            .expect_err("there is no fragment list to rewrite");
+        assert!(error.to_string().contains("手写整份覆写"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(settings::override_path(dir.path(), "mine")).unwrap(),
+            r#"{"dns":{"tag":"hand-written"}}"#,
+            "a refused toggle must not restructure the user's own file"
+        );
+    }
+
+    /// The deletion half of the storage contract: an override outliving its
+    /// profile would be picked up by the next profile that happens to share the
+    /// name, which is how a stale rule ends up in someone's runtime config.
+    #[tokio::test]
+    async fn deleting_a_profile_deletes_its_override_and_nobody_elses() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = engine_with_profile(dir.path(), "doomed").await;
+        let keeper = dir.path().join("keeper.json");
+        std::fs::write(&keeper, NODE_CONFIG).unwrap();
+        engine
+            .import_profile_file(keeper.to_string_lossy().into())
+            .await
+            .unwrap();
+        engine
+            .set_override("doomed".to_owned(), ONE_FRAGMENT.to_owned())
+            .await
+            .unwrap();
+        engine
+            .set_override("keeper".to_owned(), ONE_FRAGMENT.to_owned())
+            .await
+            .unwrap();
+        engine.switch_profile("doomed".to_owned()).unwrap();
+
+        engine.remove_profile("doomed").await.unwrap();
+        assert!(
+            !settings::override_path(dir.path(), "doomed").exists(),
+            "the deleted profile's override goes with it"
+        );
+        assert!(
+            settings::override_path(dir.path(), "keeper").is_file(),
+            "and only its own"
+        );
+        assert!(engine.active_override().unwrap().is_some());
     }
 
     #[tokio::test]

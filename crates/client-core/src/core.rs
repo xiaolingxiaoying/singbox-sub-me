@@ -26,6 +26,9 @@ pub struct StartedCore {
     pub api: crate::clash_api::ClashApi,
     pub version: String,
     pub config: String,
+    /// Reserved fields the profile's override tried to change, which this
+    /// function wrote back. Reported, never silently honoured.
+    pub reserved_conflicts: Vec<String>,
 }
 
 /// How long a freshly spawned core may take to expose its control API before
@@ -41,6 +44,7 @@ pub async fn start_managed(
     raw: &str,
     mode: crate::system_proxy::TrafficMode,
     mixed_port: u16,
+    override_file: Option<&crate::config_override::ProfileOverride>,
 ) -> Result<StartedCore> {
     let reservation = std::net::TcpListener::bind("127.0.0.1:0")?;
     let address = reservation.local_addr()?;
@@ -62,7 +66,14 @@ pub async fn start_managed(
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    let config = runtime_config(raw, mode, mixed_port, &address.to_string(), &secret)?;
+    let (config, reserved_conflicts) = runtime_config(
+        raw,
+        mode,
+        mixed_port,
+        &address.to_string(),
+        &secret,
+        override_file,
+    )?;
     let api = crate::clash_api::ClashApi::authenticated(&format!("http://{address}"), &secret);
     let core = crate::settings::core_path(dir);
     let active = dir.join("cache/active-config.json");
@@ -90,8 +101,18 @@ pub async fn start_managed(
         .await
         .context("sing-box check timed out")??;
     if !output.status.success() {
+        // The core's own message rarely names the field, and the one place a
+        // user can have broken this file is the override. Saying which pointers
+        // it changed turns "sing-box check rejected the configuration" into
+        // something they can act on.
+        let touched = override_file.map_or_else(Vec::new, |file| file.changed_pointers());
+        let hint = if touched.is_empty() {
+            String::new()
+        } else {
+            format!("（覆写改动的字段：{}）", touched.join("、"))
+        };
         bail!(
-            "sing-box check rejected the configuration: {}",
+            "sing-box check rejected the configuration{hint}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -105,6 +126,7 @@ pub async fn start_managed(
             api,
             version,
             config,
+            reserved_conflicts,
         }),
         Ok(Err(error)) => {
             let _ = handle.child.kill().await;
@@ -163,9 +185,25 @@ fn runtime_config(
     mixed_port: u16,
     address: &str,
     secret: &str,
-) -> Result<String> {
+    override_file: Option<&crate::config_override::ProfileOverride>,
+) -> Result<(String, Vec<String>)> {
+    // The subscription is the base, the user's override merges onto it, and
+    // only then does this function write back what it depends on. Every start
+    // goes through here, so there is no path from cache to core that skips the
+    // override and no second place that could apply it differently.
     let mut config: serde_json::Value =
-        serde_json::from_str(&adapt_inbounds(raw, mode, mixed_port)?)?;
+        serde_json::from_str(raw).context("订阅配置不是 JSON（根对象 `/`）")?;
+    if !config.is_object() {
+        anyhow::bail!("订阅配置的顶层（`/`）必须是 JSON 对象");
+    }
+    let conflicts = override_file.map_or_else(Vec::new, |file| file.apply(&mut config));
+    // `adapt_inbounds` runs on the merged document and owns the `inbounds`
+    // list: the traffic mode decides it, so an override's inbound must not
+    // survive it. That is why `/inbounds` is a reserved pointer rather than a
+    // field the merge can win — see `config_override::RESERVED_POINTERS`.
+    let merged = serde_json::to_string(&config)?;
+    let mut config: serde_json::Value =
+        serde_json::from_str(&adapt_inbounds(&merged, mode, mixed_port)?)?;
     if !config
         .get("experimental")
         .is_some_and(serde_json::Value::is_object)
@@ -180,7 +218,16 @@ fn runtime_config(
     }
     config["experimental"]["clash_api"]["external_controller"] = address.into();
     config["experimental"]["clash_api"]["secret"] = secret.into();
-    Ok(serde_json::to_string_pretty(&config)?)
+    // A subscription with no `route` object used to leave this unset, which
+    // only shows up as traffic that never reaches the core.
+    if !config
+        .get("route")
+        .is_some_and(serde_json::Value::is_object)
+    {
+        config["route"] = serde_json::json!({});
+    }
+    config["route"]["auto_detect_interface"] = serde_json::Value::Bool(true);
+    Ok((serde_json::to_string_pretty(&config)?, conflicts))
 }
 
 /// The result of a core download: where the binary was installed and the
@@ -677,6 +724,7 @@ mod tests {
             VALID_RAW,
             crate::system_proxy::TrafficMode::SystemProxy,
             port,
+            None,
         )
         .await
         {
@@ -715,6 +763,7 @@ mod tests {
             VALID_RAW,
             crate::system_proxy::TrafficMode::SystemProxy,
             port,
+            None,
         )
         .await;
         // Whether startup then fails depends on whether a core binary sits in the
@@ -731,6 +780,184 @@ mod tests {
     }
 
     const VALID_RAW: &str = r#"{"log":{"level":"info"},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}],"experimental":{"clash_api":{"external_controller":"127.0.0.1:9090"}}}"#;
+
+    /// Parses an override the way the engine would, from text and the file it
+    /// came from, so the tests exercise the same entry point a start does.
+    fn override_from(text: &str) -> crate::config_override::ProfileOverride {
+        crate::config_override::ProfileOverride::parse(
+            text,
+            &PathBuf::from("/data/overrides/x.json"),
+        )
+        .expect("the test override parses")
+    }
+
+    /// The runtime configuration is the only place a start reads an override
+    /// from, and the bytes it returns are the bytes that go to `sing-box check`
+    /// and then to the core. A merge that happened in some parallel world would
+    /// pass a unit test and change nothing, so this asserts the whole chain:
+    /// override file → `runtime_config` → the written `active-config.json`.
+    #[tokio::test]
+    async fn an_override_is_applied_to_the_file_that_sing_box_checks() {
+        let dir = tempfile::tempdir().expect("a data directory");
+        std::fs::create_dir_all(dir.path().join("cache")).expect("the cache directory");
+        let free = std::net::TcpListener::bind("127.0.0.1:0").expect("an ephemeral port");
+        let port = free.local_addr().expect("an address").port();
+        drop(free);
+        let override_file = override_from(
+            r#"{"fragments":[{"id":"dns","label":"改用公共 DNS","enabled":true,
+                "overlay":{"dns":{"servers":[{"tag":"public","address":"223.5.5.5"}]},
+                "route":{"rules":[{"action":"direct","domain":["internal.example"]}]}}}]}"#,
+        );
+
+        // No core binary is installed, so the start fails after the write; the
+        // file is what this test is about.
+        let error = match super::start_managed(
+            dir.path(),
+            VALID_RAW,
+            crate::system_proxy::TrafficMode::SystemProxy,
+            port,
+            Some(&override_file),
+        )
+        .await
+        {
+            Ok(_) => panic!("there is no sing-box binary in the data directory"),
+            Err(error) => error,
+        };
+        // The failure is the absent core binary (an OS "file not found"), which
+        // is the point: the override was accepted and the start walked past it.
+        // A refused override would have said so in the message instead.
+        assert!(
+            !error.to_string().contains("覆写"),
+            "the override must not be what stopped this start: {error}"
+        );
+
+        let written: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("cache/active-config.json"))
+                .expect("the runtime configuration was written"),
+        )
+        .expect("the runtime configuration is JSON");
+        assert_eq!(
+            written["dns"]["servers"][0]["address"], "223.5.5.5",
+            "the override's DNS is in the file the core is checked against"
+        );
+        assert_eq!(
+            written["route"]["rules"][0]["domain"][0], "internal.example",
+            "and its rule is prepended, not appended"
+        );
+        assert_eq!(
+            written["outbounds"][0]["tag"], "direct",
+            "the subscription's own content survives"
+        );
+        assert_eq!(
+            written["inbounds"][0]["type"], "mixed",
+            "the client still owns the inbound list: {written:#?}"
+        );
+        assert_ne!(
+            written["experimental"]["clash_api"]["secret"],
+            serde_json::Value::Null,
+            "the control channel still has its secret"
+        );
+    }
+
+    /// The other half of the same path: an override that reaches for the
+    /// control channel, the interface autodetect or the inbound list is
+    /// reverted, and the attempt is reported instead of quietly winning.
+    #[tokio::test]
+    async fn an_override_cannot_break_the_channel_the_client_runs_on() {
+        let dir = tempfile::tempdir().expect("a data directory");
+        std::fs::create_dir_all(dir.path().join("cache")).expect("the cache directory");
+        let free = std::net::TcpListener::bind("127.0.0.1:0").expect("an ephemeral port");
+        let port = free.local_addr().expect("an address").port();
+        drop(free);
+        let override_file = override_from(
+            r#"{"fragments":[{"id":"take-over","enabled":true,"overlay":{
+                "experimental":{"clash_api":{"external_controller":"0.0.0.0:9090","secret":"attacker"}},
+                "route":{"auto_detect_interface":false},
+                "inbounds":[{"type":"mixed","tag":"evil","listen":"0.0.0.0","listen_port":1080}]
+            }}]}"#,
+        );
+
+        let _ = match super::start_managed(
+            dir.path(),
+            VALID_RAW,
+            crate::system_proxy::TrafficMode::SystemProxy,
+            port,
+            Some(&override_file),
+        )
+        .await
+        {
+            Ok(_) => panic!("there is no sing-box binary in the data directory"),
+            Err(error) => error,
+        };
+
+        let written: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("cache/active-config.json"))
+                .expect("the runtime configuration was written"),
+        )
+        .expect("the runtime configuration is JSON");
+        let controller = written["experimental"]["clash_api"]["external_controller"]
+            .as_str()
+            .expect("a controller address");
+        assert!(
+            controller.starts_with("127.0.0.1:"),
+            "the endpoint must be the freshly reserved loopback one, not the override's: {controller}"
+        );
+        assert!(
+            !controller.ends_with(":9090"),
+            "the override's port must not survive: {controller}"
+        );
+        let secret = written["experimental"]["clash_api"]["secret"]
+            .as_str()
+            .expect("a controller secret");
+        assert!(
+            !secret.is_empty() && secret != "attacker",
+            "the secret is the client's own random value, never the override's"
+        );
+        assert_eq!(
+            written["route"]["auto_detect_interface"], true,
+            "an override cannot turn the interface autodetect off"
+        );
+        assert_eq!(
+            written["inbounds"][0]["tag"], "mixed-in",
+            "the inbound list is the client's: {written:#?}"
+        );
+        assert_eq!(written["inbounds"][0]["listen_port"], port as u64);
+        assert_eq!(written["inbounds"][0]["listen"], "127.0.0.1");
+    }
+
+    /// The ordering choice, stated as a test: the merge runs on the
+    /// subscription and `adapt_inbounds` runs on the merged result, so an
+    /// override can adjust the fields of the TUN inbound the profile already
+    /// declares but cannot replace the inbound list.
+    #[test]
+    fn an_override_reaches_the_tun_inbound_the_mode_still_selects() {
+        let raw = r#"{"inbounds":[{"type":"tun","tag":"profile-tun","stack":"system"}],"route":{"final":"direct"}}"#;
+        let override_file =
+            override_from(r#"{"dns":{"tag":"override"},"route":{"rules":[{"action":"direct"}]}}"#);
+        let (config, conflicts) = runtime_config(
+            raw,
+            crate::system_proxy::TrafficMode::Tun,
+            2080,
+            "127.0.0.1:4321",
+            "owned",
+            Some(&override_file),
+        )
+        .expect("the merged configuration builds");
+        let value: serde_json::Value = serde_json::from_str(&config).expect("JSON");
+        assert_eq!(
+            value["inbounds"][0]["type"], "tun",
+            "the mode still wins the list"
+        );
+        assert_eq!(value["inbounds"][0]["stack"], "system");
+        assert_eq!(value["dns"]["tag"], "override");
+        assert_eq!(value["route"]["rules"][0]["action"], "direct");
+        assert_eq!(value["route"]["final"], "direct");
+        assert_eq!(
+            conflicts,
+            Vec::<String>::new(),
+            "nothing reserved was touched"
+        );
+    }
 
     /// Starting a core must arm the orphan guard without breaking the spawn, and
     /// the reported guarantee has to be honest: Linux arms `PR_SET_PDEATHSIG`
@@ -808,8 +1035,10 @@ mod tests {
                 2080,
                 "127.0.0.1:12345",
                 "owned",
+                None,
             )
-            .unwrap(),
+            .unwrap()
+            .0,
         )
         .unwrap();
         assert_eq!(
@@ -818,6 +1047,10 @@ mod tests {
         );
         assert_eq!(config["experimental"]["clash_api"]["secret"], "owned");
         assert_eq!(config["experimental"]["cache_file"]["enabled"], true);
+        assert_eq!(
+            config["route"]["auto_detect_interface"], true,
+            "a subscription with no `route` object still gets the field the local runtime needs"
+        );
     }
 
     #[cfg(windows)]

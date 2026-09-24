@@ -8,6 +8,9 @@
 
 pub mod clash_api;
 pub mod command;
+/// The per-profile "覆写配置文件内容" model: storage, merge, reserved fields.
+/// (Named `config_override` because `override` is a reserved keyword.)
+pub mod config_override;
 pub mod controller;
 pub mod core;
 pub mod event;

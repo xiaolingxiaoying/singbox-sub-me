@@ -6,7 +6,7 @@ license = "MIT OR Apache-2.0"
 description = "Control plane for a private sing-box deployment"
 
 [workspace]
-members = ["crates/sbtui", "crates/client-core", "crates/sbgui"]
+members = ["crates/sbtui", "crates/client-core", "crates/sbgui", "crates/json-merge"]
 
 [features]
 # Explicitly opt in for fixture-only CLI/acceptance binaries. Never publish.
@@ -19,6 +19,7 @@ required-features = ["test-signing"]
 
 [dependencies]
 base64 = "0.22.1"
+json-merge = { path = "crates/json-merge", features = ["yaml"] }
 bytes = "1.10.1"
 chrono = { version = "0.4.42", features = ["serde"] }
 chrono-tz = "0.10.4"

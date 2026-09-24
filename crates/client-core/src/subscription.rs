@@ -337,6 +337,32 @@ pub fn parse_uri_list(text: &str) -> Result<SubscriptionSnapshot> {
     if outbounds.is_empty() {
         bail!("订阅里没有可导入的节点（跳过 {skipped} 行无法解析）");
     }
+    // Two nodes on one address with nothing to tell them apart collide on `tag`,
+    // and `summarize` de-duplicates by tag: the user silently got fewer nodes
+    // than the subscription listed, while the generated config still carried the
+    // duplicates for the core to reject. Renaming keeps every node visible and
+    // keeps the node list and the config describing the same set.
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for outbound in &mut outbounds {
+        let Some(tag) = outbound
+            .get("tag")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        if !used.contains(&tag) {
+            used.insert(tag);
+            continue;
+        }
+        let mut nth = 2;
+        while used.contains(&format!("{tag}-{nth}")) {
+            nth += 1;
+        }
+        let renamed = format!("{tag}-{nth}");
+        used.insert(renamed.clone());
+        outbound["tag"] = serde_json::json!(renamed);
+    }
     let mut snapshot = summarize(&outbounds)?;
     snapshot.raw = wrap_bare_node_config(
         serde_json::json!({ "outbounds": outbounds }),
@@ -418,7 +444,12 @@ fn parse_uri(line: &str) -> Result<Option<serde_json::Value>> {
                 .context("vmess payload is not base64")?;
             let payload: serde_json::Value =
                 serde_json::from_slice(&decoded).context("vmess payload is not JSON")?;
-            vmess_outbound(&payload, Some(&tag), host, port, sni, insecure)?
+            // The fragment, not the URI's derived tag: `tag` here already fell
+            // back to the host, and passing it in would let the address win over
+            // the name the panel chose in `ps` - the opposite of the intended
+            // precedence, and on a host carrying several nodes it produced
+            // identical tags that `summarize` then de-duplicated away.
+            vmess_outbound(&payload, fragment.as_deref(), host, port, sni, insecure)?
         }
         "hysteria2" | "hy2" => serde_json::json!({
             "type": "hysteria2", "tag": tag, "server": host, "server_port": port,
@@ -845,6 +876,49 @@ mod tests {
             .expect_err("nothing importable must not read as a valid subscription");
         let message = error.to_string();
         assert!(message.contains('2'), "count missing: {message}");
+    }
+
+    /// Three nodes behind one address, named only inside the payload. While the
+    /// URI-derived tag won, all three came out as `1.2.3.4`, and the
+    /// de-duplication in `summarize` left the user with one node out of three -
+    /// silently, with the config still carrying the duplicates.
+    #[test]
+    fn same_host_nodes_keep_their_names_and_all_survive() {
+        let encode = |name: &str| {
+            let payload = serde_json::json!({
+                "ps": name, "add": "1.2.3.4", "port": 443, "id": format!("uuid-{name}")
+            });
+            format!(
+                "vmess://{}",
+                base64::engine::general_purpose::STANDARD.encode(payload.to_string())
+            )
+        };
+        let body = [encode("东京-A"), encode("东京-B"), encode("东京-B")].join("\n");
+        let snapshot = parse_uri_list(&body).expect("three vmess links import");
+        let mut tags: Vec<String> = snapshot.nodes.iter().map(|node| node.tag.clone()).collect();
+        tags.sort();
+        assert_eq!(
+            tags,
+            vec![
+                "东京-A".to_owned(),
+                "东京-B".to_owned(),
+                "东京-B-2".to_owned()
+            ],
+            "ps names the node and a collision is renamed rather than dropped"
+        );
+        let raw: serde_json::Value = serde_json::from_str(&snapshot.raw).expect("raw is JSON");
+        let raw_tags: Vec<&str> = raw["outbounds"]
+            .as_array()
+            .expect("outbounds is a list")
+            .iter()
+            .filter_map(|outbound| outbound["tag"].as_str())
+            .collect();
+        for tag in &tags {
+            assert!(
+                raw_tags.contains(&tag.as_str()),
+                "{tag} is in the node list but not in the config: {raw_tags:?}"
+            );
+        }
     }
 
     fn node_of(value: &serde_json::Value, kind: &str) -> serde_json::Value {

@@ -182,6 +182,18 @@ pub fn profile_cache_path(dir: &Path, name: &str) -> PathBuf {
     dir.join("cache/profiles").join(format!("{id}.json"))
 }
 
+/// The user's override file for one profile, or where it would live.
+///
+/// Deliberately outside `cache/`: the subscription cache is rewritten by every
+/// update and cleared by profile maintenance, while an override is the user's
+/// own work and must survive both. The digest is the same one
+/// [`profile_cache_path`] uses, so a profile's two files always agree, and the
+/// name stays filesystem-safe for a profile called `a/b:c`.
+pub fn override_path(dir: &Path, name: &str) -> PathBuf {
+    let id = format!("{:x}", Sha256::digest(name.as_bytes()));
+    dir.join("overrides").join(format!("{id}.json"))
+}
+
 fn legacy_profile_cache_path(dir: &Path, name: &str) -> PathBuf {
     let safe: String = name
         .chars()
@@ -310,6 +322,37 @@ mod tests {
         assert_ne!(
             profile_cache_path(Path::new("/x"), "active-config"),
             Path::new("/x/cache/active-config.json")
+        );
+    }
+
+    /// The override file is addressed by the same identity as the cache, so
+    /// "this profile's override" can never mean a different profile's file, and
+    /// it lives outside the cache the subscription updates rewrite.
+    #[test]
+    fn override_paths_share_the_profile_identity_but_not_the_cache_directory() {
+        let path = override_path(Path::new("/x"), "a/b:c");
+        assert_eq!(path.parent().unwrap(), Path::new("/x/overrides"));
+        let digest = path
+            .file_name()
+            .expect("a hashed file name")
+            .to_string_lossy()
+            .strip_suffix(".json")
+            .expect("a JSON override file")
+            .to_owned();
+        assert_eq!(
+            profile_cache_path(Path::new("/x"), "a/b:c")
+                .file_name()
+                .expect("a hashed file name")
+                .to_string_lossy()
+                .strip_suffix(".json")
+                .expect("a cached profile"),
+            digest,
+            "the same profile name must hash to the same identity in both places"
+        );
+        assert_ne!(
+            path,
+            override_path(Path::new("/x"), "A/B:c"),
+            "case-only differences distinguish profiles on case-insensitive filesystems"
         );
     }
 

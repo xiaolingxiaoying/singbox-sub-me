@@ -1,0 +1,15 @@
+[package]
+name = "json-merge"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "The one deep-merge used by every sbctl config override (ADR-0021)"
+
+[dependencies]
+serde_json = "1.0.143"
+serde_yaml = { version = "0.9.34", optional = true }
+
+[features]
+# The YAML twin is only needed by the server's clash artifact; keeping it behind
+# a feature stops every client crate from pulling `serde_yaml` in.
+yaml = ["dep:serde_yaml"]

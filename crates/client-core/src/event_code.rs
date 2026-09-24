@@ -108,6 +108,20 @@ pub enum EventCode {
     CoreNotInstalledHint,
     /// Nothing has been imported yet: a subscription comes before starting.
     ReadyToImportFirstProfile,
+    /// `{0}` is the profile. An override file was written and validated.
+    OverrideSaved,
+    /// `{0}` is the profile. An override file was deleted.
+    OverrideCleared,
+    /// `{0}` is the reason, which names the field path. The file was refused:
+    /// nothing was written and nothing was merged.
+    OverrideRejected,
+    /// `{0}` is the list of fields. An override tried to change a field the
+    /// client depends on, which the client wrote back rather than honoured.
+    OverrideReservedIgnored,
+    /// `{0}` is the fragment id.
+    OverrideFragmentEnabled,
+    /// `{0}` is the fragment id.
+    OverrideFragmentDisabled,
 }
 
 impl EventCode {
@@ -132,6 +146,12 @@ impl EventCode {
         EventCode::CoreReadyToStart,
         EventCode::CoreNotInstalledHint,
         EventCode::ReadyToImportFirstProfile,
+        EventCode::OverrideSaved,
+        EventCode::OverrideCleared,
+        EventCode::OverrideRejected,
+        EventCode::OverrideReservedIgnored,
+        EventCode::OverrideFragmentEnabled,
+        EventCode::OverrideFragmentDisabled,
     ];
 
     pub fn zh(self) -> &'static str {
@@ -154,6 +174,12 @@ impl EventCode {
             Self::CoreReadyToStart => "就绪。按“启动内核”开始。",
             Self::CoreNotInstalledHint => "就绪。先下载 sing-box 内核，再导入订阅。",
             Self::ReadyToImportFirstProfile => "就绪。先导入订阅，再启动内核。",
+            Self::OverrideSaved => "已保存档案 {0} 的配置覆写（下次启动内核生效）",
+            Self::OverrideCleared => "已清除档案 {0} 的配置覆写（下次启动内核生效）",
+            Self::OverrideRejected => "配置覆写无效: {0}",
+            Self::OverrideReservedIgnored => "覆写改动了保留字段，已按客户端设置还原: {0}",
+            Self::OverrideFragmentEnabled => "已启用覆写片段 {0}（下次启动内核生效）",
+            Self::OverrideFragmentDisabled => "已停用覆写片段 {0}（下次启动内核生效）",
         }
     }
 
@@ -185,6 +211,22 @@ impl EventCode {
             Self::ReadyToImportFirstProfile => {
                 "Ready. Import a subscription first, then start the core."
             }
+            Self::OverrideSaved => {
+                "Saved the configuration override of profile {0} (applied at the next core start)"
+            }
+            Self::OverrideCleared => {
+                "Cleared the configuration override of profile {0} (applied at the next core start)"
+            }
+            Self::OverrideRejected => "The configuration override was rejected: {0}",
+            Self::OverrideReservedIgnored => {
+                "The override changed reserved fields; the client's own values were restored: {0}"
+            }
+            Self::OverrideFragmentEnabled => {
+                "Enabled override fragment {0} (applied at the next core start)"
+            }
+            Self::OverrideFragmentDisabled => {
+                "Disabled override fragment {0} (applied at the next core start)"
+            }
         }
     }
 
@@ -196,7 +238,9 @@ impl EventCode {
             | Self::SubscriptionAutoUpdateFailed
             | Self::CoreAutoRestartFailed
             | Self::CoreAutoStartFailed
+            | Self::OverrideRejected
             | Self::ConnectionRefreshFailed => EventLevel::Error,
+            Self::OverrideReservedIgnored => EventLevel::Warn,
             Self::ProfileActivated
             | Self::SettingsSaved
             | Self::CoreStopped
@@ -206,6 +250,10 @@ impl EventCode {
             | Self::StoreUnreadable
             | Self::CoreReadyToStart
             | Self::CoreNotInstalledHint
+            | Self::OverrideSaved
+            | Self::OverrideCleared
+            | Self::OverrideFragmentEnabled
+            | Self::OverrideFragmentDisabled
             | Self::ReadyToImportFirstProfile => EventLevel::Info,
         }
     }

@@ -70,6 +70,25 @@ pub enum ClientCommand {
     },
     /// Removes a local subscription profile and its cached configuration.
     RemoveProfile(String),
+    /// Writes (or replaces) one profile's config override file, 覆写配置文件内容.
+    /// `contents` is the document text; empty or whitespace-only clears it, the
+    /// same state as [`ClientCommand::ClearOverride`]. The engine validates
+    /// before writing, so a malformed document never reaches disk.
+    SetOverride {
+        profile: String,
+        contents: String,
+    },
+    /// Deletes one profile's override file, returning the runtime configuration
+    /// to the subscription plus the client's own re-asserted fields.
+    ClearOverride(String),
+    /// Enables or disables one rule fragment inside a profile's override file.
+    /// `enabled` of `None` flips the current state. The file is rewritten as the
+    /// documented fragment shape, so ids and labels survive.
+    ToggleOverrideFragment {
+        profile: String,
+        id: String,
+        enabled: Option<bool>,
+    },
     DownloadCore,
     SwitchProfile(String),
     /// Selects a member inside one proxy group (the group name matters because
@@ -120,6 +139,15 @@ impl ClientCommand {
             Self::ImportProfileFile(_) => "导入本地配置".to_owned(),
             Self::SetProfileUrl { .. } => "更新订阅链接".to_owned(),
             Self::RemoveProfile(name) => format!("删除档案 {name}"),
+            Self::SetOverride { contents, .. } => {
+                if contents.trim().is_empty() {
+                    "清除配置覆写".to_owned()
+                } else {
+                    "保存配置覆写".to_owned()
+                }
+            }
+            Self::ClearOverride(name) => format!("清除 {name} 的配置覆写"),
+            Self::ToggleOverrideFragment { id, .. } => format!("切换覆写片段 {id}"),
             Self::DownloadCore => "下载内核".to_owned(),
             Self::SwitchProfile(name) => format!("激活档案 {name}"),
             Self::SwitchNode { group, node } => format!("{group} → {node}"),

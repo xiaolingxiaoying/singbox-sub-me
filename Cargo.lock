@@ -1058,6 +1058,7 @@ dependencies = [
  "fs2",
  "futures-util",
  "getrandom 0.3.4",
+ "json-merge",
  "libc",
  "reqwest",
  "serde",
@@ -3428,6 +3429,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "json-merge"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "serde_yaml",
+]
+
+[[package]]
 name = "khronos-egl"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5564,6 +5573,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "insta",
+ "json-merge",
  "libc",
  "predicates",
  "qrcode",
