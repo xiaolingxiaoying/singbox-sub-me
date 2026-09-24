@@ -1,6 +1,8 @@
 use std::fs;
+use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::{ConfigError, DeploymentConfig, DeploymentStore};
@@ -473,14 +475,115 @@ fn unit_has_marker(root: &Path, relative: &str, marker: &str) -> Result<bool, St
 }
 
 pub fn restart_services(root: &Path) -> Result<(), String> {
-    systemctl(root, &["restart", "sing-box.service", "sbctl.service"])?;
+    let direct = DeploymentStore::new(root)
+        .load()
+        .map(|config| config.subscription_mode == crate::config::SubscriptionMode::Direct)
+        .map_err(|error| {
+            format!("could not determine subscription mode before restart: {error}")
+        })?;
+    reconcile_subscription_units(root, direct)?;
+
+    systemctl(root, &["restart", "sing-box.service"])?;
+    if direct {
+        // A socket-activated service must be started by a connection to its
+        // socket. `systemctl restart sbctl.service` starts it without LISTEN_FDS,
+        // so `sbctl serve` exits and systemd enters a restart loop.
+        systemctl(root, &["enable", "--now", "sbctl-http.socket"])?;
+        systemctl(root, &["stop", "sbctl.service"])?;
+        trigger_direct_socket()?;
+    } else {
+        if root.join(SBCTL_HTTP_SOCKET).is_file() {
+            systemctl(root, &["disable", "--now", "sbctl-http.socket"])?;
+        }
+        systemctl(root, &["restart", "sbctl.service"])?;
+    }
     // A configuration change has to survive the same observation window as an
     // install, or the caller's rollback never triggers for a daemon that dies
     // just after `restart` returned.
-    for unit in ["sing-box.service", "sbctl.service"] {
+    let mut health_units = vec!["sing-box.service", "sbctl.service"];
+    if direct {
+        health_units.push("sbctl-http.socket");
+    }
+    for unit in health_units {
         wait_for_stable_activation(root, unit)?;
     }
     Ok(())
+}
+
+/// Keeps the generated service/socket units in step with the committed
+/// subscription mode. A configuration edit can change modes without running
+/// the installer, so relying on the install-time unit files leaves Direct mode
+/// without socket activation (and makes `sbctl serve` exit immediately).
+fn reconcile_subscription_units(root: &Path, direct: bool) -> Result<(), String> {
+    let service_path = root.join(SBCTL_UNIT);
+    let existing_service = fs::read_to_string(&service_path)
+        .map_err(|error| format!("could not read {}: {error}", service_path.display()))?;
+    if !existing_service.contains(SBCTL_UNIT_MARKER) {
+        return Err(
+            "sbctl.service is not an sbctl-managed unit; refusing to replace it".to_owned(),
+        );
+    }
+
+    let desired_service = sbctl_unit(direct);
+    let mut changed = existing_service != desired_service;
+    if changed {
+        write_unit(root, SBCTL_UNIT, &desired_service).map_err(|error| error.to_string())?;
+    }
+    if direct {
+        let socket_path = root.join(SBCTL_HTTP_SOCKET);
+        if socket_path.exists() {
+            let existing_socket = fs::read_to_string(&socket_path)
+                .map_err(|error| format!("could not read {}: {error}", socket_path.display()))?;
+            if !existing_socket.contains(SBCTL_HTTP_SOCKET_MARKER) {
+                return Err(
+                    "sbctl-http.socket is not an sbctl-managed unit; refusing to replace it"
+                        .to_owned(),
+                );
+            }
+            changed |= existing_socket != SBCTL_HTTP_SOCKET_CONTENTS;
+        } else {
+            changed = true;
+        }
+        if changed {
+            write_unit(root, SBCTL_HTTP_SOCKET, SBCTL_HTTP_SOCKET_CONTENTS)
+                .map_err(|error| error.to_string())?;
+        }
+    } else {
+        let socket_path = root.join(SBCTL_HTTP_SOCKET);
+        if socket_path.exists() {
+            let existing_socket = fs::read_to_string(&socket_path)
+                .map_err(|error| format!("could not read {}: {error}", socket_path.display()))?;
+            if !existing_socket.contains(SBCTL_HTTP_SOCKET_MARKER) {
+                return Err(
+                    "sbctl-http.socket is not an sbctl-managed unit; refusing to alter it"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    if changed {
+        systemctl(root, &["daemon-reload"])?;
+    }
+    Ok(())
+}
+
+fn trigger_direct_socket() -> Result<(), String> {
+    let timeout = Duration::from_secs(2);
+    let mut last_error = None;
+    for address in ["[::1]:443", "127.0.0.1:443"] {
+        let address: SocketAddr = address.parse().expect("literal loopback socket address");
+        match TcpStream::connect_timeout(&address, timeout) {
+            Ok(stream) => {
+                drop(stream);
+                return Ok(());
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(format!(
+        "could not activate sbctl-http.socket through localhost:443: {}",
+        last_error.expect("at least one loopback address was attempted")
+    ))
 }
 
 pub fn service_status_entries(root: &Path) -> Vec<(&'static str, String)> {
