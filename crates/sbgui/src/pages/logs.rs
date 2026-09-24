@@ -513,14 +513,17 @@ mod tests {
     /// failed because 「导出」 read `snapshot.core_logs` directly.
     #[test]
     fn the_exported_text_honours_the_level_filter_instead_of_dumping_the_buffer() {
-        let mut snapshot = ClientSnapshot::default();
-        snapshot.core_logs = vec![
-            "INFO starting server".to_owned(),
-            "ERROR port 2080 is in use".to_owned(),
-            "INFO listening".to_owned(),
-        ]
-        .into_iter()
-        .collect();
+        let snapshot = ClientSnapshot {
+            core_logs: [
+                "INFO starting server",
+                "ERROR port 2080 is in use",
+                "INFO listening",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+            ..Default::default()
+        };
         let (kernel, events) = filtered_logs(&snapshot, LogLevelFilter::Error, "", Locale::Zh);
         assert_eq!(kernel, vec!["ERROR port 2080 is in use".to_owned()]);
         assert!(events.is_empty(), "no client events in this snapshot");
@@ -536,13 +539,13 @@ mod tests {
     /// it matches case-insensitively in both directions.
     #[test]
     fn the_keyword_filter_reaches_the_export_too_and_ignores_case() {
-        let mut snapshot = ClientSnapshot::default();
-        snapshot.core_logs = vec![
-            "ERROR Port 2080 is in use".to_owned(),
-            "ERROR dns timeout".to_owned(),
-        ]
-        .into_iter()
-        .collect();
+        let snapshot = ClientSnapshot {
+            core_logs: ["ERROR Port 2080 is in use", "ERROR dns timeout"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            ..Default::default()
+        };
         let (kernel, _) = filtered_logs(&snapshot, LogLevelFilter::All, " port ", Locale::En);
         assert_eq!(
             kernel,
