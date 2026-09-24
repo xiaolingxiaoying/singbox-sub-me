@@ -315,15 +315,48 @@ mihomo 腿仍只能算"未验"：它在第一种组合（`template=standard`，�
 
 
 
+## R15 — 订阅引用的规则 CDN 路径逐条实测
+
+我在 R13 里转抄了实现者的说法"`geoip/lan` 镜像解析不到，所以 LAN 只能是内置列表"，那是**别人的注释，不是我验的**。
+补测如下（对渲染器真正吐出的 URL 形态发 `HEAD`）：
+
+```bash
+B=https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat
+for p in geosite/cn.srs geoip/cn.srs geosite/private.srs geoip/private.srs \
+         geosite/category-ads-all.srs 'geosite/geolocation-!cn.srs' geosite/openai.srs \
+         geosite/netflix.srs geosite/telegram.srs geoip/lan.srs; do
+  printf '%s %s\n' "$(curl -s -o /dev/null -w '%{http_code}' -I "$B@sing/geo/$p")" "$p"
+done
+# 同理用 $B@meta/geo/<同名>.mrs 再测一遍（Clash 侧走 @meta 分支）
+```
+
+| 路径 | `@sing/*.srs` | `@meta/*.mrs` |
+| --- | --- | --- |
+| `geosite/cn`、`geoip/cn`、`geosite/private`、`geoip/private` | 200 | 200 |
+| `geosite/category-ads-all`、`geosite/geolocation-!cn` | 200 | 200 |
+| `geosite/openai`、`geosite/netflix`、`geosite/telegram` | 200 | 200 |
+| **`geoip/lan`** | **404** | **404** |
+
+结论：实现者的取舍成立——`geoip/lan` 在两个分支上都没有对应文件，所以 LAN 保持编译期内联是对的。
+**我第一遍探测全 404 是我自己拼错了 URL**（分支写成 `@release`，本应是 `@sing` / `@meta`），
+这也说明"用 HTTP 码判断镜像可用性"这件事必须按渲染器真实产出的形态来测，不能凭印象拼。
+
+顺带一条与目标文档相关的限制：以上都是**境外可达性**。国内网络与手机蜂窝网下的实际拉取，
+按本文件 §5 的分工只有真实 VPS + 真机能证明（"G3 可达性 仅 V"），本轮未做。
+
+
+
 ## 提交对应关系
 
 - `feat(winvm)`：R1
-- `fix(client-core)`：R3–R7；`fix(client-core)` 第二笔：L2 抓到的 unix 编译错误
+- `fix(client-core)`：R3–R7；第二笔：L2 抓到的 unix 编译错误（R14）
 - `fix(server)`：R8、R9
 - `fix(packaging)`：R2
 - `fix(release)`：R10
-- `feat(subscription)`：R13（G3 模板轴）
-- `docs`：本文件与 `docs/known-gaps-after-merge.md` 的状态回写，随各批提交
-- `chore(dev)`：`scripts/dev/fetch-sing-box-cores.sh`（R13/R14 暴露的 L2 真核前置）
+- `feat(subscription)`：R13（G3 模板轴）；`test(subscription)`：真核门覆盖三档模板（R15 的 CDN 实测属这一批）
+- `docs`：本文件、`known-gaps-after-merge.md`、`verification-and-build-flow.md`、
+  `client-description.md` 与 `subscription-guide.md` 的现状回写
+- `chore(dev)`：`scripts/dev/fetch-sing-box-cores.sh`、`scripts/dev/wsl-real-cores.sh`
+
 
 
