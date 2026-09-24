@@ -15,8 +15,13 @@ IMAGE=sbgui-shot
 DOCKER=${DOCKER:-docker}
 REPO_WIN=${REPO_WIN:-$(pwd -W 2>/dev/null || pwd)}
 OUT_REL=${OUT_REL:-.scratch/sbgui-shots}
-PAGES=${PAGES:-dashboard subscriptions proxies rules connections logs settings about}
+PAGES=${PAGES:-dashboard subscriptions proxies rules overrides connections logs settings about}
 SIZES=${SIZES:-1440x900}
+# The documented examples, and every human hand, write `860x640,1440x900`; the
+# loops below want words. Normalising here beats a run that captures the first
+# size, then reports `CAPTURE FAILED for 860x640,1440x900-<page>`.
+SIZES=${SIZES//,/ }
+PAGES=${PAGES//,/ }
 
 mkdir -p "$OUT_REL"
 CTX=$(mktemp -d)
@@ -36,6 +41,8 @@ MSYS_NO_PATHCONV=1 "$DOCKER" run --rm \
   -e SIZES="$SIZES" \
   -e DEMO_CORE="${DEMO_CORE:-}" \
   -e SBGUI_SHOW_STOP_CONFIRM="${SBGUI_SHOW_STOP_CONFIRM:-}" \
+  -e SBGUI_SHOW_CLEAR_CONFIRM="${SBGUI_SHOW_CLEAR_CONFIRM:-}" \
+  -e SBGUI_SEED_OVERRIDE="${SBGUI_SEED_OVERRIDE:-}" \
   -e SBGUI_SHOW_EXIT_CONFIRM="${SBGUI_SHOW_EXIT_CONFIRM:-}" \
   -e SBGUI_LANG="${SBGUI_LANG:-}" \
   -e SBGUI_SETTINGS_SECTION="${SBGUI_SETTINGS_SECTION:-}" \
