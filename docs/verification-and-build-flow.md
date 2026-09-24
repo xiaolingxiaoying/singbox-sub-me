@@ -184,6 +184,11 @@ powershell -File scripts/winvm/verify.ps1 all           # revert -> 8 页 GUI ->
    不是"我觉得像网络"。
 9. `#[cfg(unix)]` 的代码在宿主 L1 上**根本不参与编译**——本轮新增的 tun 设备探测就是这样在 L2 才被抓到
    （`is_char_device` 属于 `std::os::unix::fs::FileTypeExt`）。凡是 unix 门，必须至少跑过一次 L2。
+10. **`VAR=x wsl -d … -- bash script.sh` 不会把 `VAR` 带进 Linux 侧**：实测 `SRC_REV=HEAD …` 到了 WSL 里是
+   `unset`，脚本于是静默走回"同步工作树"分支，构建出的是**另一个 agent 正在编辑的半截代码**（报
+   `Tab::Override not covered`），而工件时间线看起来完全正常。规则：开关型变量写进 `bash -c 'VAR=x bash 路径'`
+   的内层，并且让脚本自己打印它选中了哪条分支（`build-acceptance-artifacts.sh` 打印
+   `exported revision <rev> into <dir>`），核对那行而不是核对"没报错"。
 
 ## 6. 本地重型资源位置
 

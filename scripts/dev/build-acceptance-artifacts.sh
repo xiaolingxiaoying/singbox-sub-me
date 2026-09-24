@@ -26,12 +26,25 @@ if [ -f "$HOME/.cargo/env" ]; then
   . "$HOME/.cargo/env"
 fi
 
-mkdir -p "$DST"
-tar -C "$SRC" \
-  --exclude=./target --exclude='./target-*' --exclude=./.git \
-  --exclude='./.reference-*' --exclude=./.scratch --exclude=./dist \
-  --exclude=./.tmp-sing-box-yg-research --exclude=./node_modules \
-  -cf - . | tar -C "$DST" -xf -
+# SRC_REV=HEAD builds exactly what is committed instead of the working tree.
+# Worth having: with another process editing a crate, a dirty tree can fail the
+# build for reasons unrelated to the artifacts under test, and an acceptance run
+# should describe a commit rather than a moment.
+if [ -n "${SRC_REV:-}" ]; then
+  DST="$HOME/ws/acceptance-src"
+  export CARGO_TARGET_DIR="$HOME/ws/acceptance-target"
+  rm -rf "$DST"
+  mkdir -p "$DST"
+  git -C "$SRC" archive "$SRC_REV" | tar -x -C "$DST"
+  echo "exported revision $SRC_REV into $DST"
+else
+  mkdir -p "$DST"
+  tar -C "$SRC" \
+    --exclude=./target --exclude='./target-*' --exclude=./.git \
+    --exclude='./.reference-*' --exclude=./.scratch --exclude=./dist \
+    --exclude=./.tmp-sing-box-yg-research --exclude=./node_modules \
+    -cf - . | tar -C "$DST" -xf -
+fi
 
 cd "$DST"
 echo "=== release build (no test-signing) ==="
