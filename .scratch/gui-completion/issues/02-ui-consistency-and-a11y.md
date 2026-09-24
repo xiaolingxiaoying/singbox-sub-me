@@ -1,6 +1,6 @@
 # GUI UI 一致性、可用性与可访问性
 
-Status: ready-for-agent（第 6 条已落地并量化；第 1、3、4、5 条 2026-09-24 落地，见 `docs/code-review-2026-09-24.md` R24；2、7、8、9 仍开放）
+Status: ready-for-agent（第 6 条已落地并量化；第 1、3、4、5 条 2026-09-24 落地，见 `docs/code-review-2026-09-24.md` R24 与 `fix(gui)` 87b9034；2、7、8、9 仍开放）
 Type: task
 Blocked by: sbctl-v0.2/issues/01
 
