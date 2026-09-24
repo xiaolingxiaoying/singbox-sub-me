@@ -57,7 +57,7 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
         KeyCode::BackTab => app.tab = app.tab.previous(),
         KeyCode::Left if app.tab == Tab::Proxies => move_proxy_group(app, -1),
         KeyCode::Right if app.tab == Tab::Proxies => move_proxy_group(app, 1),
-        KeyCode::Char(ch @ '1'..='6') => {
+        KeyCode::Char(ch @ '1'..='9') => {
             if let Some(tab) = Tab::from_index(ch as usize - '1' as usize) {
                 app.tab = tab;
             }
@@ -342,8 +342,27 @@ fn move_cursor(app: &mut App, delta: isize) {
         Tab::Settings => {
             app.profiles_list.select(Some(0));
         }
+        Tab::Override => move_fragment(app, delta),
         _ => {}
     }
+}
+
+/// Moves the rule-fragment highlight (`↑↓` / `j k` on the Override tab). The
+/// count comes from the engine's summary, so a file edited on disk between two
+/// refreshes cannot leave the cursor past the end.
+fn move_fragment(app: &mut App, delta: isize) {
+    let count = app
+        .snapshot
+        .override_summary
+        .as_ref()
+        .map(|summary| summary.fragments.len())
+        .unwrap_or(0);
+    if count == 0 {
+        app.selected_fragment = 0;
+        return;
+    }
+    app.selected_fragment =
+        ((app.selected_fragment as isize + delta).clamp(0, count as isize - 1)) as usize;
 }
 
 /// Pages the Logs panel by one screenful. Other tabs ignore the keys so they
@@ -422,8 +441,33 @@ fn select_current(app: &mut App) {
                 }
             }
         }
+        Tab::Override => toggle_highlighted_fragment(app),
         _ => {}
     }
+}
+
+/// The Override tab's `Enter`: flips the highlighted rule fragment.
+///
+/// No confirmation step, unlike `m`: the command rewrites one `enabled` flag in
+/// the override file and leaves the running core alone until the next start, so
+/// pressing `Enter` again is the undo. `enabled: None` asks the engine for the
+/// flip, which keeps the UI from tracking a flag it does not own.
+///
+/// A hand-written bare object has no fragment list to flip. That refusal is
+/// sent rather than predicted here, so the user reads the engine's reason
+/// instead of a second copy of it that can drift.
+fn toggle_highlighted_fragment(app: &mut App) {
+    let summary = app.snapshot.override_summary.as_ref();
+    let fragment = summary.and_then(|summary| summary.fragments.get(app.selected_fragment));
+    let (Some(summary), Some(fragment)) = (summary, fragment) else {
+        app.status = "没有覆写文件，也没有片段可开关".to_owned();
+        return;
+    };
+    app.send(ClientCommand::ToggleOverrideFragment {
+        profile: summary.profile.clone(),
+        id: fragment.id.clone(),
+        enabled: None,
+    });
 }
 
 fn test_current_delay(app: &mut App) {
@@ -592,6 +636,230 @@ mod tests {
             delays: Default::default(),
             failed: Vec::new(),
         }
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        handle_key(app, KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    /// Polls the engine until `check` passes, the way the real event loop does
+    /// on its tick. A command is a message to another task, so a key test that
+    /// asserts immediately proves nothing about what arrived.
+    async fn wait_until(mut check: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if check() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    const OVERRIDDEN_PROFILE: &str = "覆写档案";
+
+    /// Two enabled fragments, so a flip is visible in the file.
+    const TWO_FRAGMENTS: &str = r#"{"fragments":[
+        {"id":"private-direct","label":"内网直连","enabled":true,
+         "overlay":{"route":{"rules":[{"action":"direct","ip_is_private":true}]}}},
+        {"id":"lan-direct","label":"机房直连","enabled":true,
+         "overlay":{"route":{"rules":[{"action":"direct","ip_cidr":["10.0.0.0/8"]}]}}}
+    ]}"#;
+
+    /// An [`App`] wired to a real engine over a seeded profile and a real
+    /// override file: no mock sits between the key press and the file on disk.
+    async fn engine_with_override(text: &str) -> (App, tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("temporary data directory");
+        std::fs::write(
+            dir.path().join("profiles.toml"),
+            format!(
+                "active = \"{OVERRIDDEN_PROFILE}\"\n\n[[profiles]]\nname = \"{OVERRIDDEN_PROFILE}\"\nurl = \"\"\nsource = \"fixture\"\nlast_updated = 0\n"
+            ),
+        )
+        .expect("a seeded profile store");
+        let path = client_core::settings::override_path(dir.path(), OVERRIDDEN_PROFILE);
+        std::fs::create_dir_all(path.parent().expect("an overrides directory")).expect("directory");
+        std::fs::write(&path, text).expect("an override file");
+        let mut app = App::new(
+            ClientController::start(dir.path().to_path_buf()),
+            dir.path().to_path_buf(),
+        );
+        app.tab = Tab::Override;
+        // `ClientController::start` returns before the engine task has built
+        // its first snapshot, so the first read is the pre-engine one. Waiting
+        // for the profile to show up is what makes the rest of the test about
+        // the engine rather than about a race.
+        let published = wait_until(|| {
+            app.refresh_snapshot();
+            app.snapshot.active_profile.is_some()
+        })
+        .await;
+        assert!(
+            published,
+            "the engine never published the seeded profile: {}",
+            app.snapshot.status
+        );
+        (app, dir, path)
+    }
+
+    #[tokio::test]
+    async fn enter_on_the_override_page_flips_the_highlighted_fragment_on_disk() {
+        let (mut app, _dir, path) = engine_with_override(TWO_FRAGMENTS).await;
+        let summary = app
+            .snapshot
+            .override_summary
+            .clone()
+            .expect("the engine read the file at startup");
+        assert_eq!(
+            summary.enabled_count(),
+            2,
+            "both fragments start enabled: {summary:?}"
+        );
+
+        // `↓` moves the cursor, `Enter` flips that row — and the flip is the
+        // engine's, through `ToggleOverrideFragment { enabled: None }`.
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.selected_fragment, 1, "the cursor is on 机房直连");
+        press(&mut app, KeyCode::Enter);
+        let flipped = wait_until(|| {
+            std::fs::read_to_string(&path).is_ok_and(|text| text.contains("\"enabled\": false"))
+        })
+        .await;
+        assert!(
+            flipped,
+            "the engine has to rewrite the file with one fragment off"
+        );
+        assert!(
+            app.status.starts_with("切换覆写片段 lan-direct"),
+            "the status names the fragment: {}",
+            app.status
+        );
+
+        app.refresh_snapshot();
+        let after = app
+            .snapshot
+            .override_summary
+            .clone()
+            .expect("still readable");
+        assert_eq!(after.enabled_count(), 1, "one switch moved: {after:?}");
+        assert!(
+            after.fragments[0].enabled,
+            "the other fragment is untouched: {after:?}"
+        );
+        assert_eq!(
+            after.fragments[1].id, "lan-direct",
+            "the file keeps its ids and labels through the rewrite: {after:?}"
+        );
+        app.controller.shutdown();
+    }
+
+    #[tokio::test]
+    async fn a_hand_written_override_refuses_a_toggle_in_the_engine_s_words() {
+        // A bare object has no fragment list. The UI does not guess a reason of
+        // its own; it sends the command and shows what the engine said, so
+        // there is one sentence to keep true.
+        let (mut app, _dir, path) =
+            engine_with_override(r#"{"dns":{"servers":["1.1.1.1"]}}"#).await;
+        assert!(
+            app.snapshot
+                .override_summary
+                .as_ref()
+                .is_some_and(|summary| summary.implicit),
+            "the file parsed as one implicit fragment"
+        );
+        let before = std::fs::read_to_string(&path).expect("the file is readable");
+        press(&mut app, KeyCode::Enter);
+        let reported = wait_until(|| {
+            app.refresh_snapshot();
+            app.status.contains("手写整份覆写")
+        })
+        .await;
+        assert!(
+            reported,
+            "the refusal reaches the status line: {}",
+            app.status
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("still readable"),
+            before,
+            "a refused toggle must not restructure the user's file"
+        );
+        app.controller.shutdown();
+    }
+
+    #[tokio::test]
+    async fn the_seventh_digit_opens_the_override_page_and_o_still_switches_outbound() {
+        // The audit that put the fragment switch on `Enter` rather than `o`:
+        // `o` belongs to the outbound mode, on every page.
+        let (mut app, _dir, _path) = engine_with_override(TWO_FRAGMENTS).await;
+        app.tab = Tab::Dashboard;
+        press(&mut app, KeyCode::Char('7'));
+        assert_eq!(app.tab, Tab::Override, "7 is the seventh page");
+        press(&mut app, KeyCode::Char('1'));
+        assert_eq!(app.tab, Tab::Dashboard);
+        // Back to the page under test: the outbound key is global, so it has to
+        // hold here too — this is the binding `o` that the fragment switch must
+        // not steal.
+        app.tab = Tab::Override;
+        assert_eq!(
+            app.snapshot.outbound_mode,
+            client_core::clash_api::OutboundMode::Rule,
+            "the fixture starts in rule mode"
+        );
+        press(&mut app, KeyCode::Char('o'));
+        let switched = wait_until(|| {
+            app.refresh_snapshot();
+            app.snapshot.outbound_mode == client_core::clash_api::OutboundMode::Global
+        })
+        .await;
+        assert!(
+            switched,
+            "`o` still cycles the outbound mode, on this page too: {:?}",
+            app.snapshot.outbound_mode
+        );
+        assert_eq!(app.tab, Tab::Override, "and it did not also move the page");
+        app.controller.shutdown();
+    }
+
+    #[tokio::test]
+    async fn arrows_on_the_override_page_move_only_the_fragment_cursor() {
+        let (mut app, _dir, path) = engine_with_override(TWO_FRAGMENTS).await;
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.selected_fragment, 1, "clamped at the last fragment");
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.selected_fragment, 1, "`j` is the same move");
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.selected_fragment, 0);
+        assert_eq!(app.conn_sort, crate::app::ConnSort::Download);
+        // Nothing was sent: moving a cursor is not a command.
+        let text = std::fs::read_to_string(&path).expect("readable");
+        assert!(
+            !text.contains("\"enabled\": false"),
+            "the file is untouched until Enter: {text}"
+        );
+        app.controller.shutdown();
+    }
+
+    #[tokio::test]
+    async fn a_page_with_no_override_says_so_instead_of_switching_nothing() {
+        let dir = tempfile::tempdir().expect("temporary data directory");
+        let mut app = App::new(
+            ClientController::start(dir.path().to_path_buf()),
+            dir.path().to_path_buf(),
+        );
+        app.tab = Tab::Override;
+        // The engine writes the store it was handed on its first pass, so the
+        // file is the signal that it is up and looked.
+        let up = wait_until(|| dir.path().join("settings.toml").is_file()).await;
+        assert!(up, "the engine never opened the data directory");
+        app.refresh_snapshot();
+        assert!(app.snapshot.override_summary.is_none());
+        press(&mut app, KeyCode::Enter);
+        assert!(app.status.contains("没有覆写文件"), "{}", app.status);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.selected_fragment, 0, "nowhere to move");
+        app.controller.shutdown();
     }
 
     #[tokio::test]

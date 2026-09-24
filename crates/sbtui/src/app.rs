@@ -17,9 +17,17 @@ pub(crate) enum Tab {
     Settings,
     /// The inbounds and routing rules of the configuration the core uses.
     Rules,
+    /// 覆写配置文件内容: the active profile's override file, its switchable
+    /// rule fragments, and the redacted outline of the merged configuration.
+    Override,
 }
 
 impl Tab {
+    /// How many pages there are. The header's label bar is typed
+    /// `[&str; Tab::COUNT]`, so adding a variant without a title — or a title
+    /// without a variant — stops compiling instead of drifting.
+    pub(crate) const COUNT: usize = 7;
+
     pub(crate) fn next(self) -> Self {
         match self {
             Self::Dashboard => Self::Proxies,
@@ -27,18 +35,20 @@ impl Tab {
             Self::Connections => Self::Logs,
             Self::Logs => Self::Settings,
             Self::Settings => Self::Rules,
-            Self::Rules => Self::Dashboard,
+            Self::Rules => Self::Override,
+            Self::Override => Self::Dashboard,
         }
     }
 
     pub(crate) fn previous(self) -> Self {
         match self {
-            Self::Dashboard => Self::Rules,
+            Self::Dashboard => Self::Override,
             Self::Proxies => Self::Dashboard,
             Self::Connections => Self::Proxies,
             Self::Logs => Self::Connections,
             Self::Settings => Self::Logs,
             Self::Rules => Self::Settings,
+            Self::Override => Self::Rules,
         }
     }
 
@@ -50,6 +60,7 @@ impl Tab {
             3 => Self::Logs,
             4 => Self::Settings,
             5 => Self::Rules,
+            6 => Self::Override,
             _ => return None,
         })
     }
@@ -62,6 +73,7 @@ impl Tab {
             Self::Logs => 3,
             Self::Settings => 4,
             Self::Rules => 5,
+            Self::Override => 6,
         }
     }
 }
@@ -202,6 +214,11 @@ pub(crate) struct App {
     pub(crate) profiles_list: ListState,
     /// A profile name awaiting a second Delete press.
     pub(crate) confirm_delete: Option<String>,
+    // Override tab.
+    /// The highlighted rule fragment, the row `Enter` toggles. Held by index
+    /// like the proxy member highlight, and clamped against the fragment list
+    /// the engine published (the file can change under us).
+    pub(crate) selected_fragment: usize,
     // Input overlay.
     pub(crate) input: Option<InputGoal>,
     pub(crate) pending_profile_name: Option<String>,
@@ -256,6 +273,7 @@ impl App {
             log_query: String::new(),
             profiles_list: ListState::default(),
             confirm_delete: None,
+            selected_fragment: 0,
             input: None,
             pending_profile_name: None,
             input_text: String::new(),
@@ -285,6 +303,22 @@ impl App {
             .connections
             .sort_by(|a, b| conn_sort_key(a, b, sort));
         self.sync_proxy_selection();
+        self.sync_override_selection();
+    }
+
+    /// Keeps the fragment highlight inside the list the engine published. A
+    /// hand-edited file that loses fragments must not leave `Enter` pointing
+    /// past the end, and the highlight must not jump while the list is stable.
+    fn sync_override_selection(&mut self) {
+        let count = self
+            .snapshot
+            .override_summary
+            .as_ref()
+            .map(|summary| summary.fragments.len())
+            .unwrap_or(0);
+        if self.selected_fragment >= count {
+            self.selected_fragment = count.saturating_sub(1);
+        }
     }
 
     /// Mirrors the engine's proxy groups into the highlight state: snap the
@@ -345,22 +379,24 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::view::TAB_TITLES;
 
     #[test]
     fn tabs_cycle_in_both_directions() {
         assert_eq!(Tab::Dashboard.next(), Tab::Proxies);
         assert_eq!(Tab::Settings.next(), Tab::Rules);
-        assert_eq!(Tab::Rules.next(), Tab::Dashboard);
-        assert_eq!(Tab::Dashboard.previous(), Tab::Rules);
-        assert_eq!(Tab::Rules.previous(), Tab::Settings);
+        assert_eq!(Tab::Rules.next(), Tab::Override);
+        assert_eq!(Tab::Override.next(), Tab::Dashboard);
+        assert_eq!(Tab::Dashboard.previous(), Tab::Override);
+        assert_eq!(Tab::Override.previous(), Tab::Rules);
         assert_eq!(Tab::from_index(2), Some(Tab::Connections));
-        assert_eq!(Tab::from_index(5), Some(Tab::Rules));
+        assert_eq!(Tab::from_index(6), Some(Tab::Override));
         assert_eq!(Tab::from_index(9), None);
         // Cycling has to cover every tab and come back around, which is what
         // keeps the header's numbering and the number keys in step with the
         // enum when a tab is added.
         let mut tab = Tab::Dashboard;
-        for index in 1..=6 {
+        for index in 1..=Tab::COUNT {
             tab = tab.next();
             assert_eq!(
                 Tab::from_index(tab.index()),
@@ -368,7 +404,30 @@ mod tests {
                 "cycle step {index}"
             );
         }
-        assert_eq!(tab, Tab::Dashboard, "six tabs, so the cycle closes at 6");
+        assert_eq!(
+            tab,
+            Tab::Dashboard,
+            "{} tabs, so the cycle closes at {}",
+            Tab::COUNT,
+            Tab::COUNT
+        );
+        // The header's label bar is typed `[&str; Tab::COUNT]`, so a new tab
+        // without a title is a compile error; what is left to pin is that the
+        // titles sit in index order (the bar draws `i + 1` beside each) and
+        // that every tab is still reachable by its number key.
+        for (index, title) in TAB_TITLES.iter().enumerate() {
+            let tab = Tab::from_index(index).unwrap_or_else(|| panic!("no tab at {index}"));
+            assert_eq!(tab.index(), index, "title {title:?} is out of step");
+            assert!(!title.is_empty(), "tab {index} has no title to draw");
+            // The digit key that jumps to a tab is its index plus one, so the
+            // tenth tab would be the first one only cycling can reach.
+            let digit = char::from(b'1' + index as u8);
+            assert!(
+                digit.is_ascii_digit(),
+                "`input.rs` routes 1–9 to tabs; {title:?} is past that range"
+            );
+            assert_eq!(Tab::from_index(digit as usize - '1' as usize), Some(tab));
+        }
     }
 
     /// sbtui has no locale, so it always renders the record's Chinese — the

@@ -1,6 +1,6 @@
 # core：覆写模型与合并引擎
 
-Status: claimed
+Status: needs-verification（引擎侧已落地；L1+L2 全绿，覆写页金标准已过 Linux 平台）
 Type: task
 Blocked by: sbctl-v0.2/issues/01
 
