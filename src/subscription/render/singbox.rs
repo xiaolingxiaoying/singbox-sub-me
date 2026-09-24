@@ -387,8 +387,11 @@ fn remote_rule_set(tag: &str, url: &str) -> Value {
 /// resolution strategy prefers, so their server configuration pins IPv4 even
 /// when the deployment never opted in; the explicit flag forces the same
 /// restriction on dual-stack hosts.
-fn ipv4_only_required(config: &DeploymentConfig) -> bool {
-    config.ipv4_only || !crate::system::host_has_ipv6_route()
+/// The host fact arrives as an argument so this stays a decision, not a probe:
+/// the golden test used to call the network through here and its output changed
+/// with whatever IPv6 the machine running it happened to have.
+fn ipv4_only_required(config: &DeploymentConfig, host_has_ipv6: bool) -> bool {
+    config.ipv4_only || !host_has_ipv6
 }
 
 pub(crate) fn sing_box_server(
@@ -456,7 +459,7 @@ pub(crate) fn sing_box_server(
         "log": {"level": "info"},
         "inbounds": inbounds
     });
-    if ipv4_only_required(config) {
+    if ipv4_only_required(config, crate::system::host_has_ipv6_route()) {
         // The inbound `domain_strategy` field was deprecated in 1.11 and
         // removed in 1.13, so the destination pin now lives on a route action
         // (the documented migration). Pinning the default DNS strategy keeps
@@ -618,7 +621,31 @@ fn server_tls(tls_server_name: &str, certificate: &Value, alpn: &[&str]) -> Valu
 
 #[cfg(test)]
 mod tests {
+    use super::ipv4_only_required;
     use super::sing_box_full;
+
+    /// The whole point of passing the host fact in: both halves of the rule are
+    /// now reachable without a network. `ipv4_only` pins it on its own, a host
+    /// without an IPv6 route pins it by necessity, and a host that has one leaves
+    /// the server config alone.
+    #[test]
+    fn the_ipv4_pin_follows_the_deployment_choice_or_the_hosts_lack_of_a_route() {
+        let mut config = vless_config();
+        config.ipv4_only = true;
+        assert!(
+            ipv4_only_required(&config, true),
+            "an explicit pin holds even on a host that has IPv6"
+        );
+        config.ipv4_only = false;
+        assert!(
+            ipv4_only_required(&config, false),
+            "no IPv6 route means destinations are pinned to A records"
+        );
+        assert!(
+            !ipv4_only_required(&config, true),
+            "with a route and no request, nothing is pinned"
+        );
+    }
     /// Two halves, because a field that is only ever read is not yet honoured:
     /// every generated profile must carry exactly the stack its own entry
     /// declares, and a profile that declares none must not inherit one.

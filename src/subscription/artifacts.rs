@@ -639,6 +639,13 @@ mod tests {
         // Domain mode keeps only certificate *paths* in the server artifact;
         // self-signed mode would generate a fresh key pair on every run.
         config.certificate_mode = CertificateMode::Domain;
+        // Pinned for the same reason: the server artifact's `dns` and `route`
+        // blocks are emitted when the deployment asks for an IPv4 pin **or** when
+        // the host running generation has no IPv6 route. Left to the probe, the
+        // goldens changed shape depending on the machine — and the probe opens a
+        // UDP socket to a public address, so a firewall or an IPv6 prefix flip
+        // failed this test with no code change anywhere.
+        config.ipv4_only = true;
         config.monthly_traffic_limit = 1_099_511_627_776;
         if let Some(creds) = config.vless_reality.as_mut() {
             creds.listen_port = 44321;

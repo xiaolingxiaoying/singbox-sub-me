@@ -940,3 +940,32 @@ M18 追加改成覆写 → `startup.rs` 五道红。
 处置是整体回退那三个文件，把设计以 447 行补丁留在 `.scratch/g12-gui-partial.patch`，
 工单 04 记明剩余四步（handler、match 分支、面板与确认条 + seam、两张帧）。
 **G12 因此只算半闭**：目标里"覆写配置文件内容"在 TUI 可达了，GUI 仍只能看与删。
+
+## R31 — 一条"金标准"测试其实在打网络：426 个测试里藏着的机器相关判据
+
+收尾跑 `cargo test --workspace` 才暴露出来（**我此前所有门都只跑单个 crate**，
+`-p sbgui` / `-p sbtui` / `-p client-core` 都不会碰服务端那条门）：
+`subscription::artifacts::tests::the_generated_artifact_set_matches_the_pinned_goldens` 判红，
+`sing-box-server.json` 少了整块 `dns.strategy` 与五条 `route.rules: resolve`。
+
+`src/` 与 HEAD 一致，所以这不是我改坏的，是**它本来就依赖跑测试这台机器**：
+`render/singbox.rs:390` 的判据是 `config.ipv4_only || !crate::system::host_has_ipv6_route()`，
+而 `system.rs:117` 那个探测是
+`UdpSocket::bind("[::]:0")` + `connect("[2001:4860:4860::8888]:443")`——
+**一次真实的出网 UDP connect**。金标准是在"没有 IPv6 路由"的机器上钉的，
+换到有的机器（或防火墙/前缀一变、或离线跑 CI）整块配置就消失。
+这不是"测试偶尔红"，是**一条会自己改变产品结论的门**：谁在别的机器上重新 `insta accept`，
+就会把 13 个金标准里最要紧的一个悄悄换成另一种形态。
+
+修法两步，都不改运行期行为：
+1. `ipv4_only_required(config, host_has_ipv6)` —— 主机事实变成参数，于是**两半都可单测**
+   （新测试 `the_ipv4_pin_follows_the_deployment_choice_or_the_hosts_lack_of_a_route`；
+   变异检验：把 `|| !host_has_ipv6` 去掉 → 判红）。
+2. 金标准的 fixture 显式 `config.ipv4_only = true`，与它旁边那条
+   "self-signed 会每次生成新密钥对所以要钉住"是同一纪律。短路之后**探测根本不会被调用**，
+   有无 IPv6 的机器产出同一份金标准。
+
+**流程教训（写给自己）**：单 crate 的门不等于工作区的门。今天 G11/G12/G13 的改动全在
+`crates/*`，服务端一行没动，却正好落在**唯一一条没人跑的服务端门**的盲区里。
+收尾必须有一次 `cargo test --workspace`，且 `fmt`/`clippy` 要放进同一条 `&&` 链——
+这个坑我今天中了**两次**（第一次把未格式化的文件提交进去，第二次把带 clippy 错误的提交放进去）。
