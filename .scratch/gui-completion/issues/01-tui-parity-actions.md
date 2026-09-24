@@ -1,6 +1,6 @@
 # GUI 功能对齐 TUI 的六项缺口
 
-Status: ready-for-agent
+Status: ready-for-agent（第 6 条覆写页已于 2026-09-24 落地，见 `feat(clients)` fbecb86；1–5 项仍开放）
 Type: task
 Blocked by: sbctl-v0.2/issues/01
 
@@ -18,7 +18,7 @@ Blocked by: sbctl-v0.2/issues/01
 3. 连接页：排序切换（下载/上传/开始时间，对应 TUI `S` 四态）。
 4. 日志页：暂停/继续按钮（冻结视图，恢复时补全期间新增行）。
 5. 帮助浮层：`?` 键与标题栏入口，列快捷键与危险操作说明。
-6. （2026-09-24 新增）覆写页：TUI 已有第 7 页「覆写」（只读生效配置 + 规则片段开关），
+6. ✅（2026-09-24 新增，已落地）覆写页：TUI 已有第 7 页「覆写」（只读生效配置 + 规则片段开关），
    GUI 完全没有这一页。数据已在共享快照里（`override_summary` / `override_error` /
    `effective_outline`，均已脱敏），命令也已存在（`SetOverride` / `ClearOverride` /
    `ToggleOverrideFragment`，重读磁盘是引擎内部动作而非命令），所以这是纯渲染 + 开关的活，边界见
