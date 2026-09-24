@@ -42,3 +42,28 @@ sing-box 上的，作用是"父进程死了内核跟着死"，它不触发客户
 - `orphan_guard.rs` 证明的是内核回收，不是代理恢复（`#![cfg(target_os = "linux")]`）。
 - 非 GNOME 的 Linux 代理写入本来就只能提示用户设 env（`system_proxy.rs:432`），
   那种环境下"残留代理"不成立，但也不该靠这条来免除本工单。
+
+## 2026-09-24 落地情况（TUI 半边已修）
+
+`fix(tui)` 4bf4764：`run_app` 的 `tokio::select!` 多一条分支，循环前订阅一次
+SIGTERM/SIGHUP，收到就 `break` —— 与被 `q` 打断走的是**同一个**函数出口，清理逻辑没有第二份。
+`SIGINT` 故意不接（raw 模式下 Ctrl+C 是按键，接了会把"UI 卡死时唯一出口"堵掉）。
+判据抽成 `should_clear_proxy(enabled, kept_on_purpose)` 纯函数，两次变异都判红。
+
+门：`scripts/dev/wsl-signal-exit.sh`，在 Linux 下用 pty 起真 sbtui 再发信号。
+**它第一版是假绿**：`pgrep -f "script -qeefc $BIN"` 匹配到 pty 包装器，而 `script` 自己会
+接住 SIGTERM 返回 0；是控制组（同一目标发 `SIGKILL` 得到 137）暴露的。
+修好后按进程名匹配子进程、打印 `wrapper=` 与 `sbtui=` 两个 pid、两者相同拒跑、轮询子进程消失。
+Linux 实测：控制组 137、SIGTERM 0、SIGHUP 0 三例全过；`cargo test -p sbtui` 在
+Windows 与 WSL 都是 48 passed。
+
+## 还剩两半（本工单不闭）
+
+1. **GUI 同型缺口，已确认存在**：`system_proxy::disable` 在 sbgui 里只有一处调用
+   （`app.rs:467` 的 `choose_exit`），而它只由退出浮层的按钮触发（`overlay.rs:107/:114`）。
+   所以任务管理器"结束任务"、注销、关机这三条路都不会恢复代理——与 TUI 修掉的那个是同一个病。
+   GUI 没有控制台，`tokio::signal` 那套在这里不适用；要做的是 Win32 侧接
+   `WM_ENDSESSION` / `WM_QUERYENDSESSION`（GPUI 的窗口过程不在本 crate 里，需要子类化或
+   等上游提供钩子）。**验收必须真机**：VM 里开代理后用 `taskkill /F` 与注销两条路各测一次。
+2. **清理要有界且幂等**：现在的实现里子进程回收靠 `PR_SET_PDEATHSIG`，代理恢复是同步一次调用；
+   若将来在清理里加等待，必须带超时，且第二次信号要能直接退（不要出现"卡在恢复代理上"）。
