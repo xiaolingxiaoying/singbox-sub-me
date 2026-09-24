@@ -70,14 +70,18 @@ pub enum CertificateError {
 
 /// Return an actionable error before any ACME work when Direct mode needs
 /// Certbot but the Debian/Ubuntu package is absent.
-pub fn require_certbot() -> Result<(), CertificateError> {
-    let found = std::env::var_os("PATH")
-        .into_iter()
-        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-        .any(|directory| {
-            let executable = directory.join("certbot");
-            executable.is_file()
-        });
+pub fn require_certbot(root: &Path) -> Result<(), CertificateError> {
+    let found = if root != Path::new("/") {
+        // CLI acceptance fixtures resolve host commands beneath their fake
+        // root through Runtime; use the same path here instead of the runner's
+        // real PATH.
+        root.join("usr/bin/certbot").is_file()
+    } else {
+        std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+            .any(|directory| directory.join("certbot").is_file())
+    };
     if found {
         Ok(())
     } else {

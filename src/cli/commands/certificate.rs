@@ -62,7 +62,7 @@ pub(crate) fn run_certificate(root: &Path, command: CertificateCommand) -> ExitC
         match &command {
             CertificateCommand::Obtain { .. } => {
                 if config.subscription_mode == sbctl::config::SubscriptionMode::Direct {
-                    sbctl::certificate::require_certbot().map_err(|error| {
+                    sbctl::certificate::require_certbot(root).map_err(|error| {
                         sbctl::config::ConfigError::StateContent(error.to_string())
                     })?;
                 }
