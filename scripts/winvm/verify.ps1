@@ -108,8 +108,15 @@ function Invoke-Vmrun([string[]]$Args_, [switch]$Credentialed, [switch]$AllowFai
   if ($Credentialed) { $a += @('-gu', $GuestUser, '-gp', $Pass) }
   $a += $VmPath
   $a += $Args_
+  # vmrun writes ordinary progress to stderr, and with $ErrorActionPreference
+  # still on 'Stop' a native command's stderr stream is promoted to
+  # NativeCommandError - which would make -AllowFail a lie and abort the leg on
+  # a harmless notice. Relax it for the call, then restore it.
+  $prior = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
   $out = & $Vmrun @a 2>&1
   $code = $LASTEXITCODE
+  $ErrorActionPreference = $prior
   if ($code -ne 0 -and -not $AllowFail) {
     # The only thing safe to print is the argument shape, never the values.
     Fail ("vmrun {0} exited {1}: {2}" -f $Args_[0], $code, (($out | Select-Object -First 4) -join ' / '))
@@ -202,6 +209,11 @@ $FingerprintBefore = Get-HostFingerprint
 
 # runProgramInGuest cannot see host paths, so the binaries live in the guest first.
 function Deliver-Binaries {
+  # The parent has to exist first: every leg opens with `revert`, so a snapshot
+  # taken before anyone ran anything has no C:\Users\Public\sbwin at all, and
+  # copyFileFromHostToGuest into a missing directory fails on the very first
+  # binary - which is how this script, never having run end to end, would die.
+  Invoke-Vmrun @('createDirectoryInGuest', $GuestDir) -Credentialed -AllowFail | Out-Null
   Invoke-Vmrun @('createDirectoryInGuest', "$GuestDir\shots") -Credentialed -AllowFail | Out-Null
   $gui = Join-Path $RepoRoot 'target\release\sbgui.exe'
   $tui = Join-Path $RepoRoot 'target\release\sbtui.exe'
