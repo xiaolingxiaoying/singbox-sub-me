@@ -401,9 +401,57 @@ done
 3. 键序若要成为契约：原始字节金标准 + ticket 27（构建形态决定键序）一并解决。
 4. `verify.ps1 all` 真跑一次；`release.yml` 的 sbgui/MSI 两个 job 在 runner 上跑一次。
 5. 复审还指出：`sbtui`/`sbgui` 需要接住"`parse_uri_list` 现在对全不可解析的列表直接报错"这一变化
-   （过去是空档案），下一批 GUI/TUI 对齐时一并验。
+   （过去是空档案），下一批 GUI/TUI 对齐时一并验。→ **已闭，见 R19**（结论与复审的猜测不同）。
 
 
+
+## R18 — L3 复跑通过，以及它前一次为什么根本没跑起来
+
+`tests/acceptance/verify.sh` 的 userinfo 断言改成客户端视角（`upload=36; download=71`）之后，
+L3 一直没复跑过。本轮跑完：**exit=0，12 条腿全绿**（debian:12-slim / ubuntu:22.04 / ubuntu:24.04 ×
+bootstrap / verify / verify-real / verify-client），日志 `.scratch` 外的 `/tmp/l3-run.txt`，
+计数为 `acceptance passed` 出现 12 次、失败 0 次。这条腿现在描述的是 commit `da505b9`，不是某个工作树瞬间。
+
+上一轮它**根本没跑起来**，原因值得记：`SRC_REV=HEAD MSYS_NO_PATHCONV=1 wsl -d Ubuntu-22.04 -- bash 脚本`
+里，`SRC_REV` 到了 Linux 侧是 `unset`（实测打印 `[unset]`），于是 `build-acceptance-artifacts.sh` 静默走了
+"同步工作树"分支，构建的是**另一个 agent 正在改的半截 `crates/sbtui`**，`SBCTUI_ARTIFACT` 因此没产出来，
+`run.sh` 在 `set -eu` 下第 9 行就退出。两个教训已进 `docs/verification-and-build-flow.md` 已知坑 #10：
+
+1. 开关型变量必须写在 `bash -c '...'` 的内层，`VAR=x wsl …` 不可靠；
+2. 脚本要自己打印它选了哪条分支（现在会打印 `exported revision <rev> into <dir>`），
+   核对那一行，而不是核对"构建没有报错"——工件时间戳看起来完全正常。
+
+同一条坑还制造了一次假绿：`cargo check -p sbtui --all-targets 2>&1 | tail -25` 报 exit 0，
+那是 `tail` 的状态（已知坑 #6 第三次命中）。改成"重定向到文件 + 单独取 `$?`"之后同一份代码报 8 个错误。
+
+## R19 — `parse_uri_list` 的拒绝文案把"不支持"说成了"0 行"
+
+R17 第 5 条的猜测（两个界面接不住新错误）不成立：只读复审确认 `parse_uri_list` 只有
+`subscription::parse` 一个调用方，`parse` 只有两个调用点
+（`crates/client-core/src/controller.rs:923` 更新订阅、`:1028` 导入本地文件），两处都用 `?` 上抛，
+最终落到 `operation_error`（`:398-404`）→ `note()` → `snapshot.status`，另有自动更新路径
+`:1288-1291` 的 `EventCode::SubscriptionAutoUpdateFailed`。没有 `let _ =`、没有 `unwrap_or_default`。
+
+但它抓到了文案的真缺陷：`ss:// / trojan:// / ssr://` 走 `Ok(None)`（`subscription.rs:476-478`，
+"非 Managed 协议，静默跳过"），而新的计数只累加 `Err`。于是一份纯 Shadowrocket 列表被拒绝时打印的是
+**"跳过 0 行无法解析"** —— 数字在说"文件没问题"，客户端却刚刚拒绝了它。修法是拆成两个计数：
+
+```
+订阅里没有可导入的节点（{unsupported} 行不受支持，{skipped} 行无法解析）；
+本客户端管理 sing-box 出站，不导入 ss / trojan / ssr 节点
+```
+
+门（先红后绿，红的时候实测打印就是 `跳过 0 行无法解析`）：
+`a_list_of_unsupported_protocols_says_unsupported_not_unparseable`、
+强化的 `a_list_of_only_junk_says_so_instead_of_looking_empty`（原来只断言 `message.contains('2')`，
+任何位置出现字符 2 都算过——这类断言不算门），以及边界测试
+`an_unimportable_file_refuses_without_leaving_a_profile_behind`（`controller.rs`）。
+边界测试里"没留下幽灵档案"那半句在修复前也会通过——`import_profile_file` 本来就是先 `parse` 再写盘，
+所以它是回归钉，不是 bug 报告；写清楚免得以后误读成"这条也曾是红的"。
+`cargo test -p client-core --lib` → 112 passed / 0 failed。
+
+顺带确认**不是** bug 的一点：JSON 分支（`subscription.rs:272-274`）在列表带 `inbounds`/`clash_api`/`selector`
+时提前返回、绕过空节点 `bail`。整份 sing-box 客户端配置本来就没有"节点"概念，0 节点是正常结果，不是漏判。
 
 ## 提交对应关系
 
@@ -418,6 +466,9 @@ done
 - `feat(clients)`：G4 覆写核心（含 R16 的 1/2/3 三条修复）
 - `fix(winvm)`：R16 的 4/5 两条
 - R16/R17 的文档更正（`implementation-plan.md`、`.scratch/sbctl-release/*`、`render/singbox.rs` 注释）随本批提交
+- `fix(clients)`：R19（`parse_uri_list` 的拒绝文案 + 三道新门）
+- `chore(dev)`：R18 的 `SRC_REV` 模式与已知坑 #10
+- `docs(clients)`：ADR-0023、`PRODUCT.md` 的覆写边界、R18/R19 本文
 
 
 

@@ -30,6 +30,11 @@ adaptive
 ## Capabilities and Constraints
 
 - 保留现有订阅导入、核心下载、节点切换、系统代理、TUN、流量、连接与日志能力。
+- 覆写配置文件内容是**每 profile 一份文档**，与服务端管理员覆写共用同一个合并引擎
+  （ADR-0023）：界面只读展示合并结果与规则片段开关，不提供任意 JSON 编辑器；
+  客户端自己的控制面字段（clash_api 地址与 secret、inbounds 与 mixed 端口、
+  `route/auto_detect_interface`）由客户端写回并**报告冲突**，覆写改不动它们；
+  合并结果一律过 `sing-box check`，坏文档阻止启动而不是被静默跳过。
 - 内核内存、运行版本、节点上报延迟与路由规则由引擎统一发布，两个界面一致显示。
 - 保留全键盘操作和 Windows/Linux/macOS 终端兼容性。
 - 系统代理与 TUN 是会影响网络的操作，必须维持明确状态与可恢复路径。
