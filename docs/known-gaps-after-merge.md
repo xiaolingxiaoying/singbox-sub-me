@@ -16,7 +16,7 @@
 | --- | --- | --- | --- | --- |
 | G1 | Windows 真机验证流水线缺失（`scripts/winvm/verify.ps1` 不存在） | GUI/TUI 平台行为 | `.scratch/verification-environments/issues/03-windows-vm-pipeline.md` | **入口已建成**（`all` 腿待一次真机运行） |
 | G2 | Windows MSI 打包缺陷 + 发布链不含 `sbgui`/MSI | 发布 | `.scratch/gui-completion/issues/03-release-matrix-and-ci-gate.md` | **代码已修，runner 未验**；其中两条建议被撤回（见 R11） |
-| G3 | 订阅模板 `ClientTemplate::{Global,Split}` 是空壳 | 服务端订阅内容 | `.scratch/subscription-capability-20261002/issues/30-client-template-axis.md` | needs-implementation |
+| G3 | 订阅模板 `ClientTemplate::{Global,Split}` 是空壳 | 服务端订阅内容 | `.scratch/subscription-capability-20261002/issues/30-client-template-axis.md` | **已落地**（`standard` 字节未动、`minimal` 保留内联分流）；新模板**未过真核** |
 | G4 | 客户端"覆写配置文件内容"未实现 | TUI/GUI | `.scratch/client-config-override/spec.md`（+ `issues/01`、`02`） | ready-for-agent |
 | G5 | GUI 与 TUI 功能对齐 / UI 一致性 / a11y | GUI | `.scratch/gui-completion/issues/01`、`02` | ready-for-agent |
 | G6 | `tray-icon` 死依赖，且 CI 无未用依赖门禁 | GUI 构建 | `.scratch/subscription-capability-20261002/issues/04-ci-unused-deps.md` | **依赖已删**；CI 未用依赖门禁仍开放 |
@@ -30,6 +30,10 @@
 ---
 
 ## G1 — Windows 真机验证流水线缺失
+
+> **2026-09-24 更新**：入口已建成（`scripts/winvm/verify.ps1` + 正式化的 `shot-guest.ps1` + 新 `tui-guest.ps1`），
+> `parse-check` 门做过变异检验；但 **`all` 这条腿还没真跑过一次虚拟机**，所以 G8 那串平台行为仍是"未验证"。
+> 见 R1 与 `feat(winvm)` 提交。下面原文保留作为设计与约束记录。
 
 - 证据：`scripts/winvm/verify.ps1` **不存在**（`Test-Path` 为 false）。工单规定的入口是 `snapshot | revert | gui | tui | collect`。
 - 现有可复用资产：`.scratch/win11-vm/`（`shot-guest.ps1`、`run-one.ps1`、`capture-vm.ps1`、`probe.ps1`、`manifest*.txt`、`shots-win/*.png`）。
@@ -48,6 +52,12 @@
 建议：版本号对齐 workspace；拆分 `sbtui`/`sbgui` 两个组件各自的快捷方式与目标；补 `wintun.dll` 组件与提权清单；`release.yml` 增加 `sbgui` + MSI 构建与上传。
 
 ## G3 — 订阅模板 `ClientTemplate::{Global,Split}` 是空壳
+
+> **2026-09-24 更新**：本条已落地，见 `feat(subscription): give Global and Split real content` 与
+> [code-review-2026-09-24.md](code-review-2026-09-24.md) R13。`for_template` 不再丢弃参数，
+> 三档目录各自成立且 `standard` 逐字节未变；`minimal` 恢复"有分流但不碰 CDN"。
+> **仍欠**：新模板从未过真核 `sing-box check`/`mihomo -t`——那两个测试只渲染默认模板，
+> 把它们按模板参数化才是本条真正的收尾。下面原文保留作为背景。
 
 - 证据：`src/subscription/template.rs:162` — `let _ = template;`（`for_template` 忽略模板参数）；`template.rs:10-11`、`:157-158` 注释明确 `Global`/`Split` 声明但未实现，三者输出逐字节相同。
 - 现状：`Standard` 的规则集只有 `geosite-private` / `geoip-private` / `geosite-cn` / `geoip-cn` 四项，策略组 3 个；目标文档要求的 `ads`/`proxy`/`openai`/`netflix`/`telegram`/`lan` 目录、`fallback`/`load-balancing`/按区域分组、以及"内联规则孪生"均未落地。
@@ -105,14 +115,39 @@
 
 ## 复核方式
 
-每条缺口都能用以下命令独立复核（在仓库根）：
+每条缺口都能用以下命令独立复核（在仓库根）。**注意方向**：`grep` 一类的命令"无输出"才是已修，
+所以每条都写了期望结果，免得把成功读成命令失败。
 
 ```bash
-test -f scripts/winvm/verify.ps1 || echo 'G1: missing'
-grep -n 'Version=' packaging/windows/sbtui.wxs                       # G2
-grep -n 'let _ = template' src/subscription/template.rs              # G3
-grep -rn 'overrides/' crates/client-core/src || echo 'G4: absent'
-grep -n 'tray-icon' crates/sbgui/Cargo.toml                          # G6
+# G1 已建：应有此文件；`parse-check` 应打印三行 OK 且退出 0
+test -f scripts/winvm/verify.ps1 && echo 'G1: entry exists' || echo 'G1: MISSING'
+powershell -File scripts/winvm/verify.ps1 parse-check; echo "exit=$?"   # 期望 0
+
+# G2 版本号与快捷方式：期望 0.2.0，且 sbgui 指向 sbgui.exe、sbtui 指向 sbtui.exe
+grep -n 'Version=' packaging/windows/sbtui.wxs
+grep -n 'Shortcut Id' packaging/windows/sbtui.wxs
+# G2 仍未验：这两条期望"无输出"，因为没有任何 runner 跑过 build-msi
+grep -n 'sbgui' .github/workflows/release.yml | head -3   # 有（job 已写）；但"跑过"无证据
+
+# G3 已落地：期望"无输出"（模板参数不再被丢弃）
+grep -n 'let _ = template' src/subscription/template.rs || echo 'G3: axis wired'
+# G3 未验部分：新模板从未过真核（这两个测试只渲染默认模板）
+grep -n 'client_template' tests/version_profiles.rs tests/clash_mihomo.rs || echo 'G3: real-core covers default template only'
+
+# G4 见下（本轮进行中）：有输出即已实现
+grep -rn 'overrides/' crates/client-core/src | head -3 || echo 'G4: absent'
+
+# G6 期望"无输出"
+git grep -n tray-icon -- crates || echo 'G6: dep gone'
+
+# G7 仍开放：看计数是否降到 0
 git grep -c '\.note(' -- crates | awk -F: '{s+=$2} END {print "G7 note() calls:", s}'
-grep -n 'SING_BOX_VERSION_PROFILES' src/subscription/profile.rs      # G9
+
+# G9 仍是人工滑带：期望命中（表还在），配合 CI 带检查
+grep -n 'SING_BOX_VERSION_PROFILES' src/subscription/profile.rs | head -1
+
+# G8/G15：Windows 平台行为，只有真跑过 verify.ps1 all 才有证据
+ls .scratch/winvm 2>/dev/null || echo 'G8: no real-machine evidence collected yet'
 ```
+
+2026-09-24 的实测结果与逐条修复过程见 [code-review-2026-09-24.md](code-review-2026-09-24.md)。
