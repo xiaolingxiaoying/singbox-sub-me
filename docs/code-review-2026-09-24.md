@@ -969,3 +969,33 @@ M18 追加改成覆写 → `startup.rs` 五道红。
 `crates/*`，服务端一行没动，却正好落在**唯一一条没人跑的服务端门**的盲区里。
 收尾必须有一次 `cargo test --workspace`，且 `fmt`/`clippy` 要放进同一条 `&&` 链——
 这个坑我今天中了**两次**（第一次把未格式化的文件提交进去，第二次把带 clippy 错误的提交放进去）。
+
+## R32 — 第 7 项落地：GUI 现在能在内核运行时换 TUN，用的是引擎允许的那条命令
+
+`feat(gui)` 51bb662。GUI 此前只会发 `UpdateSettings{traffic_mode}`，内核运行时被引擎拒绝；
+TUI 的 `m` 一直发的是 `SetTrafficMode{restart: true}`——同一条能力，GUI 没有入口。
+现在设置页 TUN 分区在内核运行时多一个「切换并重启内核」：第一击预备，第二击发命令。
+
+**一处与工单建议不同的决定**（写清楚，免得以后被当成疏忽）：工单 01 第 7 项原话说
+"这条改的是置灰的语义，工单 02 第 3 条的两道测试要一起改判据"。我**没改那两道测试**。
+因为能力是做成了**第二个显式控件**、而不是把同一个开关的手势改成两段确认——
+重启会断所有连接，不该藏在和一个免费设置一模一样的点击手势后面。
+于是"内核运行时开关不可点"这条规则依然成立，`tun_toggle` / `switch_track` 两道门依然在守它，
+它们没有变成自证过时的门。
+
+**预备态存目标模式而不是布尔**：`confirm_traffic_restart: Option<TrafficMode>`。
+若只存 `true`，"预备→停内核→再开内核→点另一个方向"的序列里，第一次点击就会直接重启。
+这是新测试的第三个断言，也是唯一一个不看就想不到的坑。
+
+证据：`cargo test -p sbgui` 59 passed、clippy `-D warnings`、fmt 退出码 0；
+两次变异都咬（忽略预备态 → 红；`restart:true`→`false` → 红）；
+`1440x900-settings-tun.png` 里置灰开关 + "切换到 TUN 需要重启内核，当前连接会断开" + 按钮同行不裁切。
+窄屏那张只能拍到分区列表（设置页在 860 折成上下两段，内容在滚动区外）——
+**这条限制与工单 02 第 3 条那条同源，仍未解决**：harness 的 `--capture` 没有滚动控制。
+
+## 本轮收尾的全局门
+
+- `cargo test --workspace`：**426 passed / 0 failed**；`clippy --workspace --all-targets -D warnings`、
+  `fmt --all --check` 退出码 0。
+- L3（`SRC_REV=HEAD` 导出的三个 Linux 产物）：**12/12 acceptance passed**，退出码 0。
+- G11 的 Linux 信号门：控制组 137、SIGTERM 0、SIGHUP 0 三例全过。
