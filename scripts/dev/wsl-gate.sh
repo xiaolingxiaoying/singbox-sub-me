@@ -25,6 +25,14 @@ if [ "${INCLUDE_GUI:-0}" != "1" ]; then
   exclude=(--exclude sbgui)
 fi
 
+# `wsl -- bash script.sh` is a non-login shell, so it never reads ~/.cargo/env
+# the way `wsl -e bash -lc` does. Without this the gate dies at its first cargo
+# line with "cargo: command not found", which reads like a broken toolchain.
+if [ -f "$HOME/.cargo/env" ]; then
+  # shellcheck disable=SC1091
+  . "$HOME/.cargo/env"
+fi
+
 mkdir -p "$DST"
 synced_at=$(date +%s)
 tar -C "$SRC" \
