@@ -92,15 +92,55 @@ sbctl config override clear     # 删除并重新生成
 `sbctl` 菜单「订阅中心 → 12. 客户端模板配置」（或向导主题）可调：
 
 - `client_dns_mode`：fake-ip（默认）/ redir-host
-- `client_rule_profile`：standard（远程 rule-set，默认）/ minimal（全部内置规则，不访问规则 CDN）
-- `client_rule_set_base_url`：默认 `https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat`（`@sing`/`@meta` 分支由 sbctl 附加；换镜像只改这一处）
+- `client_template`：**standard（默认）/ global / split** —— 编译期内置的内容目录（ADR-0022），
+  决定订阅里的策略组、规则集、内联分流规则、DNS 与最终出口，不是磁盘上的管理员模板文件。
+  - `standard`：三组（选择 / 自动选择 / direct），CN 走直连，AI 后缀钉在选择组——
+    **逐字节复现本轴引入之前的输出**，所以升级默认不会改动任何客户端工件
+    （工件一变，`sbctl` 会重启被管内核，见 §排期陷阱）。
+  - `global`：除私有地址外全部走代理，广告阻断。
+  - `split`：CN 与私有直连、广告阻断，AI / 流媒体 / Telegram 各自成组，另有故障转移组。
+- `client_rule_profile`：standard（远程 rule-set，默认）/ minimal（全部内置规则，不访问规则 CDN）。
+  `minimal` **只改获取方式，不改分流结果**：每个规则集支撑的规则都带一份编译期内联孪生，
+  所以在 `minimal` 下 CN/私有目标仍然直连，而不是悄悄落到代理组。
+- `client_rule_set_base_url`：默认 `https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat`（`@sing`/`@meta` 分支由 sbctl 附加；换镜像只改这一处）。
+  注意 `geoip/lan` 在该镜像上解析不到，因此 LAN 一直是内置列表而不是规则集 URL。
 - `client_latency_probe_url`：默认 `http://aliyun.com/generate_204`（选择组含 DIRECT，探测必须国内可达）
 
-修改后 `sbctl restart` 重新生成并生效。
+修改后 `sbctl restart` 重新生成并生效。三档模板都已过 1.10–1.14 五个真实内核的
+`sing-box check`（`cargo test --test version_profiles -- --ignored`，5 内核 × 3 模板 = 15 种组合）。
 
 ## 安全边界
 
 - 凭据只走 URL path；query 参数、错误凭据、未知路径一律 404。
 - 按源 IP 限流：同一地址可在瞬间花掉 60 次请求的突发额度，之后每秒只恢复一次；超出时返回 `429` + `Retry-After`。计费和判定都发生在读 URL 之前，所以**被限流时真凭据与错凭据的响应完全相同**（都带同样的头、空正文、不回显凭据），探测者无法用"是否 429"来反查某个订阅是否存在。ACME 挑战路径不受此限：它由 Let's Encrypt 的服务器发起，掐断它等于让证书续期失败。
+  - **external-proxy 模式下这层限流被关闭**：该模式里对端地址永远是本机反代（`127.0.0.1`），
+    所有真实用户会共用同一个令牌桶，等于自我制造宕机；而真实客户端地址在转发头里，
+    本服务**刻意不信任** `X-Forwarded-For`——可伪造的转发头会让限流反过来变成
+    "这个订阅是否存在"的预言机，也让人可以嫁祸别人。每客户端限额请配在前置代理上。
+  - 读不到对端地址时放过（fail open）：fail closed 会在任何平台意外隐藏 peer 时
+    把所有订阅一起停掉。这层是公平/滥用下限，不是安全边界。
 - 所有响应带 `Cache-Control: no-store`；订阅凭据泄露时执行 `sbctl credential rotate` 全部作废。
 - IP fallback 模式为明文 HTTP，仅建议无域名时临时使用。
+
+## `subscription-userinfo` 的字段含义
+
+订阅响应带一个 `subscription-userinfo` 头，键序是对外契约（客户端按名字解析、按此顺序展示，
+新键只追加在末尾），由测试用**整串等式**锁死：
+
+```text
+upload=<已用上行字节>; download=<已用下行字节>; total=<额度>; expire=<下次重置的 Unix 秒>; profile-update-interval=24
+```
+
+- **方向按客户端视角**：`upload=` 是客户端发出的字节，也就是 VPS 网卡的 `rx_bytes`；
+  `download=` 是 VPS 发出的字节，即 `tx_bytes`。统计源永远是网卡的 rx/tx（`src/traffic.rs`），
+  但表头标签站在订阅用户那一边——v2rayN、Clash Verge、Shadowrocket 都把这两个键显示成
+  "我上传/我下载了多少"。早先的实现按服务端视角打标签，于是下载为主的月份在客户端里显示成巨额"上传"。
+  （`docs/implementation-plan.md` 里那行 `download=RX、upload=TX` 是当年有意的写法，现已按消费方语义纠正。）
+- `total=` 是配置的月度额度；没有配额度时它退化为"已用字节"，不是"无限"。
+- `expire=` 承担"刷新/重置日期"语义：本项目没有账号到期概念，它就是账期的下次重置时刻。
+  因此**不设** `refresh=` 键（各客户端渲染重置日期用的就是 `expire`）。
+- `profile-update-interval=24` 是对客户端的**策略声明**（"一天拉一次就够"），不描述服务端行为：
+  仓库里没有"订阅自动刷新间隔"这一配置项。
+- 账期状态读不出来时，宁可不发这个头也不发伪造值：响应仍是 200、正文正常，只是少了这个头。
+- `sbctl traffic` / `status` 打印的 `received:` / `transmitted:` 是**服务端网卡视角**的原始计数，
+  与上面这个头是两个方向，不要互相"对齐"。
