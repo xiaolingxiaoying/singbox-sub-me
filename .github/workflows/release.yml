@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
     inputs:
       sing_box_version:
-        description: Official sing-box version to bundle, without the v prefix
-        required: true
+        description: Official sing-box version to bundle (blank resolves latest stable)
+        required: false
         type: string
       tag:
         description: Existing or new release tag
@@ -228,9 +228,26 @@ jobs:
         with:
           name: msi-windows-latest
           merge-multiple: true
+      - name: Resolve sing-box release version
+        id: sing-box-version
+        env:
+          REQUESTED_VERSION: ${{ inputs.sing_box_version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$REQUESTED_VERSION" ]; then
+            version="${REQUESTED_VERSION#v}"
+          else
+            tag=$(gh api repos/SagerNet/sing-box/releases/latest --jq .tag_name)
+            version="${tag#v}"
+          fi
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "invalid sing-box version: $version" >&2; exit 2;
+          }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Using official sing-box version $version"
       - name: Download and verify official sing-box archives
         env:
-          SING_BOX_VERSION: ${{ inputs.sing_box_version || '1.12.0' }}
+          SING_BOX_VERSION: ${{ steps.sing-box-version.outputs.version }}
         run: |
           set -euo pipefail
           for arch in amd64 arm64; do
@@ -251,7 +268,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-          SING_BOX_VERSION: ${{ inputs.sing_box_version || '1.12.0' }}
+          SING_BOX_VERSION: ${{ steps.sing-box-version.outputs.version }}
           SBCTL_SIGNING_SEED: ${{ secrets.SBCTL_SIGNING_SEED }}
         run: |
           set -euo pipefail

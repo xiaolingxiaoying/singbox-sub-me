@@ -68,6 +68,25 @@ pub enum CertificateError {
     Storage(String),
 }
 
+/// Return an actionable error before any ACME work when Direct mode needs
+/// Certbot but the Debian/Ubuntu package is absent.
+pub fn require_certbot() -> Result<(), CertificateError> {
+    let found = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .any(|directory| {
+            let executable = directory.join("certbot");
+            executable.is_file()
+        });
+    if found {
+        Ok(())
+    } else {
+        Err(CertificateError::Certbot(
+            "certbot is not installed. On Debian/Ubuntu, install it with `sudo apt-get update && sudo apt-get install certbot`, then retry.".to_owned(),
+        ))
+    }
+}
+
 /// A certificate that passed every loading check. The parsed chain and key are
 /// kept so the TLS acceptor can be rebuilt when the pinned material changes.
 #[derive(Debug)]

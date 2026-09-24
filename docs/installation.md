@@ -50,6 +50,8 @@ sbctl install \
   --anytls-port 12005
 ```
 
+Direct 模式安装前会只读检查 TCP 80/443；若被 Nginx、Caddy 或其他程序占用，安装会停止并报告 `ss` 检测到的监听信息。请自行释放端口或改用 External proxy，sbctl 不会停止或改写已有服务。`sbctl install` 需要 root 权限，建议通过 `sudo` 执行。首次执行 `sbctl certificate obtain` 前也会检查 Certbot；Debian/Ubuntu 可用 `sudo apt-get update && sudo apt-get install certbot` 安装。
+
 `sbctl config init` 使用同样的五个参数。未指定的协议端口仍会自动分配高端口；指定了未启用协议的端口会直接报错。请同时在 VPS 安全组/防火墙中放行对应的 TCP 或 UDP 端口。
 
 ## 独立管理 sing-box
@@ -71,6 +73,9 @@ sbctl sing-box remove
 `sing-box update` 会先用候选二进制执行 `sing-box check`，再替换二进制并检查
 systemd 服务；失败时恢复 rollback 目录中的旧二进制。完整的 `sbctl update` 仍然
 保留同时升级控制面和数据面的能力。
+
+服务端发布的 sing-box 工件默认在发布时解析 SagerNet 官方最新稳定版；手动触发
+`release.yml` 时也可显式填写 `sing_box_version` 固定版本。签名 manifest 与归档均使用同一个已解析版本。
 
 ## 证书状态与后续必做清单
 

@@ -29,10 +29,17 @@ pub(crate) fn install(root: &Path, options: InstallOptions) -> ExitCode {
     let mut installation_started = false;
     // Snapshot before anything is written: a failed install must not delete
     // persistent state it did not create.
+    if let Err(error) = sbctl::preflight::require_install_privileges(root) {
+        eprintln!("install preflight failed: {error}");
+        return ExitCode::from(2);
+    }
     let state_before_install = sbctl::lifecycle::preexisting_state(root);
     let result = (|| {
-        sbctl::preflight::preflight(root)
-            .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+        sbctl::preflight::preflight_install(
+            root,
+            matches!(&options.mode, crate::cli::args::CliSubscriptionMode::Direct),
+        )
+        .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
         let subscription_host =
             required_install_value(options.subscription_host, "Subscription host")?;
         let interface = options.interface.map(Ok).unwrap_or_else(|| {

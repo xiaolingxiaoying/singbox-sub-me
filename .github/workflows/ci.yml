@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [master, 'codex/**']
   workflow_call:
   pull_request:
 
@@ -10,6 +10,22 @@ permissions:
   contents: read
 
 jobs:
+  build-sbctl-linux-amd64:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Build sbctl production binary
+        run: cargo build --release --locked -p sbctl --no-default-features
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbctl-linux-amd64
+          path: target/release/sbctl
+          if-no-files-found: error
+          retention-days: 7
+
   test:
     runs-on: ubuntu-24.04
     steps:

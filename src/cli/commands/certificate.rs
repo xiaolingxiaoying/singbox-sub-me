@@ -61,6 +61,11 @@ pub(crate) fn run_certificate(root: &Path, command: CertificateCommand) -> ExitC
     let result = store.load().and_then(|config| {
         match &command {
             CertificateCommand::Obtain { .. } => {
+                if config.subscription_mode == sbctl::config::SubscriptionMode::Direct {
+                    sbctl::certificate::require_certbot().map_err(|error| {
+                        sbctl::config::ConfigError::StateContent(error.to_string())
+                    })?;
+                }
                 sbctl::certificate::obtain(&store, &config, obtain_email.as_deref())
             }
             CertificateCommand::Renew => sbctl::certificate::renew(&store, &config),

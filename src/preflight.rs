@@ -54,6 +54,16 @@ pub enum PreflightError {
     MissingSystemd,
     #[error("unsupported CPU architecture; sbctl requires amd64 or arm64")]
     UnsupportedArchitecture,
+    #[error("sbctl install requires root; rerun as root (for example: sudo sbctl install)")]
+    RequiresRoot,
+    #[error(
+        "Direct mode requires TCP ports 80 and 443, but these are occupied: {0}. Stop the listed service or choose External proxy mode; sbctl will not change existing services."
+    )]
+    DirectPortsOccupied(String),
+    #[error(
+        "could not inspect TCP 80/443 listeners with `ss`; install iproute2 and retry. sbctl will not assume the ports are free"
+    )]
+    PortProbeUnavailable,
     #[error("Existing deployment detected ({0}); sbctl will not modify it")]
     ExistingDeployment(ExistingDeployment),
 }
@@ -103,6 +113,40 @@ pub fn preflight(root: &Path) -> Result<(), PreflightError> {
             ExistingDeployment::from_artifacts(existing),
         ))
     }
+}
+
+/// Checks privileges and Direct's fixed public listeners before installation
+/// downloads artifacts or writes persistent state. Fixture roots are read-only
+/// test environments and intentionally skip host privilege/port probes.
+pub fn preflight_install(root: &Path, direct: bool) -> Result<(), PreflightError> {
+    require_install_privileges(root)?;
+    preflight(root)?;
+    if direct && root == Path::new("/") {
+        let output = std::process::Command::new("ss")
+            .args(["-H", "-ltnp", "( sport = :80 or sport = :443 )"])
+            .output();
+        let output = output.map_err(|_| PreflightError::PortProbeUnavailable)?;
+        if !output.status.success() {
+            return Err(PreflightError::PortProbeUnavailable);
+        }
+        let listeners = String::from_utf8_lossy(&output.stdout).into_owned();
+        if !listeners.trim().is_empty() {
+            return Err(PreflightError::DirectPortsOccupied(
+                listeners.trim().to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn require_install_privileges(root: &Path) -> Result<(), PreflightError> {
+    if root == Path::new("/") {
+        #[cfg(unix)]
+        if unsafe { libc::geteuid() } != 0 {
+            return Err(PreflightError::RequiresRoot);
+        }
+    }
+    Ok(())
 }
 
 fn existing_deployment_paths(root: &Path) -> Vec<String> {
