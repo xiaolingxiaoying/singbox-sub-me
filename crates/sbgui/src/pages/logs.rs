@@ -1,7 +1,8 @@
 //! The log page: the level-filtered log tail.
 
 use client_core::ClientCommand;
-use client_core::state::{EventLine, LogLevel};
+use client_core::ClientSnapshot;
+use client_core::state::{EventLine, LogLevel, log_level_shown};
 use gpui::{
     ClickEvent, ClipboardItem, Context, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, Window, div, px, rgb,
@@ -87,6 +88,67 @@ fn follow_target(seen: Option<&LogTail>, tail: &LogTail, follow: bool) -> Option
     tail.last_row()
 }
 
+/// The two streams the page shows, copies **and** exports, after the level chip
+/// and the keyword box have had their say.
+///
+/// This exists as one function because the page used to have two answers to
+/// "which lines": the painted list and 「复制」 went through the filters, while
+/// 「导出」 re-read `snapshot.core_logs` and `event_lines()` raw. Filtering to
+/// Error, seeing three lines, and getting a file with hundreds is the bug
+/// (issue 05 item B) — and the two buttons sit next to each other, so the file
+/// read as a faithful copy of the screen.
+pub(crate) fn filtered_logs(
+    snapshot: &ClientSnapshot,
+    level: LogLevelFilter,
+    query: &str,
+    locale: Locale,
+) -> (Vec<String>, Vec<String>) {
+    let query = query.trim().to_lowercase();
+    let keep = |line: &str| -> bool {
+        if !query.is_empty() && !line.to_lowercase().contains(&query) {
+            return false;
+        }
+        match level {
+            // Threshold semantics shared with the terminal client: "Info"
+            // keeps the client's own unmarked events rather than hiding
+            // them, and "Debug" is the whole buffer.
+            LogLevelFilter::All => client_core::state::log_level_shown(None, line),
+            LogLevelFilter::Debug => log_level_shown(Some(LogLevel::Debug), line),
+            LogLevelFilter::Info => log_level_shown(Some(LogLevel::Info), line),
+            LogLevelFilter::Warn => log_level_shown(Some(LogLevel::Warn), line),
+            LogLevelFilter::Error => log_level_shown(Some(LogLevel::Error), line),
+        }
+    };
+    let kernel: Vec<String> = snapshot
+        .core_logs
+        .iter()
+        .filter(|line| keep(line))
+        .cloned()
+        .collect();
+    let events: Vec<String> = snapshot
+        .event_lines()
+        .into_iter()
+        .filter(|line| keep(line.text))
+        .map(|line| localised_event_line(&line, locale))
+        .collect();
+    (kernel, events)
+}
+
+/// The text 「复制」 puts on the clipboard and 「导出」 writes to a file. Prefixing
+/// lives here so the two cannot disagree about what a line looks like.
+pub(crate) fn log_text(kernel: &[String], events: &[String], client_source: &str) -> String {
+    kernel
+        .iter()
+        .map(|line| format!("[sing-box] {line}"))
+        .chain(
+            events
+                .iter()
+                .map(|line| format!("[{client_source}] {line}")),
+        )
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 impl Sbgui {
     // ----------------------------------------------------------------- logs
 
@@ -95,45 +157,9 @@ impl Sbgui {
         // The source column and the copy/export prefix name the same stream, so
         // they share one label.
         let client_source = tr!(locale, "客户端", "Client");
-        let query = self.field(InputField::LogQuery).text.trim().to_lowercase();
+        let query = self.field(InputField::LogQuery).text.clone();
         let level = self.log_level;
-        let keep = |line: &str| -> bool {
-            if !query.is_empty() && !line.to_lowercase().contains(&query) {
-                return false;
-            }
-            match level {
-                // Threshold semantics shared with the terminal client: "Info"
-                // keeps the client's own unmarked events rather than hiding
-                // them, and "Debug" is the whole buffer.
-                LogLevelFilter::All => client_core::state::log_level_shown(None, line),
-                LogLevelFilter::Debug => {
-                    client_core::state::log_level_shown(Some(LogLevel::Debug), line)
-                }
-                LogLevelFilter::Info => {
-                    client_core::state::log_level_shown(Some(LogLevel::Info), line)
-                }
-                LogLevelFilter::Warn => {
-                    client_core::state::log_level_shown(Some(LogLevel::Warn), line)
-                }
-                LogLevelFilter::Error => {
-                    client_core::state::log_level_shown(Some(LogLevel::Error), line)
-                }
-            }
-        };
-        let kernel: Vec<String> = self
-            .snapshot
-            .core_logs
-            .iter()
-            .filter(|line| keep(line))
-            .cloned()
-            .collect();
-        let events: Vec<String> = self
-            .snapshot
-            .event_lines()
-            .into_iter()
-            .filter(|line| keep(line.text))
-            .map(|line| localised_event_line(&line, locale))
-            .collect();
+        let (kernel, events) = filtered_logs(&self.snapshot, level, &query, locale);
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         for (index, line) in kernel.iter().rev().take(KERNEL_ROWS).rev().enumerate() {
             rows.push(log_row(index, "sing-box", line, self.log_wrap));
@@ -158,16 +184,10 @@ impl Sbgui {
         if let Some(row) = pin_to {
             self.log_scroll.scroll_to_item(row);
         }
-        let copy_text = kernel
-            .iter()
-            .map(|line| format!("[sing-box] {line}"))
-            .chain(
-                events
-                    .iter()
-                    .map(|line| format!("[{client_source}] {line}")),
-            )
-            .collect::<Vec<_>>()
-            .join("\n");
+        // Both 「复制」 and 「导出」 rebuild their text inside their own click, from
+        // the same two functions the list was drawn with. Building it here instead
+        // would join the whole filtered buffer on every paint to hand a String to
+        // a button that may never be pressed (issue 02 item 9).
         let mut level_chips: Vec<gpui::AnyElement> = Vec::new();
         for candidate in [
             LogLevelFilter::All,
@@ -244,9 +264,19 @@ impl Sbgui {
                             Tone::Neutral,
                             None,
                             cx,
-                            move |view, cx| {
-                                let _ = view;
-                                cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
+                            |view, cx| {
+                                let locale = view.locale;
+                                let (kernel, events) = filtered_logs(
+                                    &view.snapshot,
+                                    view.log_level,
+                                    &view.field(InputField::LogQuery).text.clone(),
+                                    locale,
+                                );
+                                cx.write_to_clipboard(ClipboardItem::new_string(log_text(
+                                    &kernel,
+                                    &events,
+                                    tr!(locale, "客户端", "Client"),
+                                )));
                             },
                         ))
                         .child(self.button(
@@ -269,25 +299,21 @@ impl Sbgui {
                             Tone::Neutral,
                             None,
                             cx,
-                            move |view, cx| {
-                                let events: Vec<String> = view
-                                    .snapshot
-                                    .event_lines()
-                                    .into_iter()
-                                    .map(|line| localised_event_line(&line, view.locale))
-                                    .collect();
-                                let text = view
-                                    .snapshot
-                                    .core_logs
-                                    .iter()
-                                    .map(|line| format!("[sing-box] {line}"))
-                                    .chain(
-                                        events
-                                            .iter()
-                                            .map(|line| format!("[{client_source}] {line}")),
-                                    )
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
+                            |view, cx| {
+                                // The same two functions the list was drawn with:
+                                // what the file holds is what the screen showed,
+                                // filters included. It used to re-read the raw
+                                // snapshot, so an Error-only view still exported
+                                // every line (issue 05 item B).
+                                let locale = view.locale;
+                                let (kernel, events) = filtered_logs(
+                                    &view.snapshot,
+                                    view.log_level,
+                                    &view.field(InputField::LogQuery).text.clone(),
+                                    locale,
+                                );
+                                let text =
+                                    log_text(&kernel, &events, tr!(locale, "客户端", "Client"));
                                 let path = view.data_dir.join("serein-logs.txt");
                                 let locale = view.locale;
                                 view.snapshot.status = match std::fs::write(&path, text) {
@@ -480,6 +506,61 @@ mod tests {
             kernel_last, event_last,
             "the source column is part of the last row's identity"
         );
+    }
+
+    /// The claim issue 05 item B is about: the file a user exports is the screen
+    /// they are looking at, not the whole buffer. Written before the fix, this
+    /// failed because 「导出」 read `snapshot.core_logs` directly.
+    #[test]
+    fn the_exported_text_honours_the_level_filter_instead_of_dumping_the_buffer() {
+        let mut snapshot = ClientSnapshot::default();
+        snapshot.core_logs = vec![
+            "INFO starting server".to_owned(),
+            "ERROR port 2080 is in use".to_owned(),
+            "INFO listening".to_owned(),
+        ]
+        .into_iter()
+        .collect();
+        let (kernel, events) = filtered_logs(&snapshot, LogLevelFilter::Error, "", Locale::Zh);
+        assert_eq!(kernel, vec!["ERROR port 2080 is in use".to_owned()]);
+        assert!(events.is_empty(), "no client events in this snapshot");
+        let text = log_text(&kernel, &events, "客户端");
+        assert_eq!(text, "[sing-box] ERROR port 2080 is in use");
+        assert!(
+            !text.contains("INFO"),
+            "an Error-filtered export must not carry the info lines it hid: {text}"
+        );
+    }
+
+    /// The keyword box is the other half of what the export used to ignore, and
+    /// it matches case-insensitively in both directions.
+    #[test]
+    fn the_keyword_filter_reaches_the_export_too_and_ignores_case() {
+        let mut snapshot = ClientSnapshot::default();
+        snapshot.core_logs = vec![
+            "ERROR Port 2080 is in use".to_owned(),
+            "ERROR dns timeout".to_owned(),
+        ]
+        .into_iter()
+        .collect();
+        let (kernel, _) = filtered_logs(&snapshot, LogLevelFilter::All, " port ", Locale::En);
+        assert_eq!(
+            kernel,
+            vec!["ERROR Port 2080 is in use".to_owned()],
+            "the query is trimmed and case-folded, and only the matching line stays"
+        );
+    }
+
+    /// Both streams carry their source prefix, so a pasted log says which side
+    /// each line came from — the same label the table's source column shows.
+    #[test]
+    fn every_line_in_the_text_names_its_stream() {
+        let text = log_text(
+            &["a".to_owned()],
+            &["b".to_owned(), "c".to_owned()],
+            "Client",
+        );
+        assert_eq!(text, "[sing-box] a\n[Client] b\n[Client] c");
     }
 
     #[test]
