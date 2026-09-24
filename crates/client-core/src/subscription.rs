@@ -318,6 +318,7 @@ fn wrap_bare_node_config(value: serde_json::Value, nodes: &[NodeSummary]) -> Res
 /// startup probe.
 pub fn parse_uri_list(text: &str) -> Result<SubscriptionSnapshot> {
     let mut outbounds = Vec::new();
+    let mut unsupported = 0usize;
     let mut skipped = 0usize;
     for line in text.lines() {
         let line = line.trim();
@@ -327,15 +328,20 @@ pub fn parse_uri_list(text: &str) -> Result<SubscriptionSnapshot> {
         // A subscription is third-party input: one line this client's sing-box
         // build has no outbound for (an unknown scheme, a malformed tail) must
         // not delete the nodes that do parse. When nothing parses, the count is
-        // what makes the empty profile diagnosable instead of mysterious.
+        // what makes the empty profile diagnosable instead of mysterious — and
+        // it has to be two counts, because `Ok(None)` lines are readable
+        // protocols this client does not manage, not failures to read them.
         match parse_uri(line) {
             Ok(Some(outbound)) => outbounds.push(outbound),
-            Ok(None) => {}
+            Ok(None) => unsupported += 1,
             Err(_) => skipped += 1,
         }
     }
     if outbounds.is_empty() {
-        bail!("订阅里没有可导入的节点（跳过 {skipped} 行无法解析）");
+        bail!(
+            "订阅里没有可导入的节点（{unsupported} 行不受支持，{skipped} 行无法解析）；\
+             本客户端管理 sing-box 出站，不导入 ss / trojan / ssr 节点"
+        );
     }
     // Two nodes on one address with nothing to tell them apart collide on `tag`,
     // and `summarize` de-duplicates by tag: the user silently got fewer nodes
@@ -474,7 +480,8 @@ fn parse_uri(line: &str) -> Result<Option<serde_json::Value>> {
             "tls": { "enabled": true, "server_name": sni, "insecure": insecure.unwrap_or(false) }
         }),
         "ss" | "trojan" | "ssr" => {
-            // Not a Managed protocol; skip quietly so a mixed list still loads.
+            // Not a Managed protocol; skipped so a mixed list still loads, and
+            // counted as unsupported so a list of only these says so.
             return Ok(None);
         }
         other => bail!("unsupported URI scheme: {other}"),
@@ -875,7 +882,29 @@ mod tests {
         let error = parse_uri_list("wireguard://a@b:1\nnonsense\n\n")
             .expect_err("nothing importable must not read as a valid subscription");
         let message = error.to_string();
-        assert!(message.contains('2'), "count missing: {message}");
+        assert!(
+            message.contains("2 行无法解析") && message.contains("0 行不受支持"),
+            "both counts, in the reader's own words: {message}"
+        );
+    }
+
+    /// A Shadowrocket-style list of `ss://` and `trojan://` lines is readable by
+    /// the parser — every scheme is known — and importable by nothing: those
+    /// protocols are not `Managed` here, so each line returns `Ok(None)`. The
+    /// refusal has to say that, or the only number it prints ("0 unparseable")
+    /// tells the user the file is fine while their client declined it.
+    #[test]
+    fn a_list_of_unsupported_protocols_says_unsupported_not_unparseable() {
+        let error = parse_uri_list(
+            "ss://YWVzLTI1Ni1nY206cGFzcw==@1.2.3.4:8388#one\n\
+             trojan://pass@example.com:443#two",
+        )
+        .expect_err("a list this client cannot use is not a valid subscription");
+        let message = error.to_string();
+        assert!(
+            message.contains("2 行不受支持") && message.contains("0 行无法解析"),
+            "the schemes are known, the protocols are not managed: {message}"
+        );
     }
 
     /// Three nodes behind one address, named only inside the payload. While the

@@ -1953,6 +1953,34 @@ mod tests {
     const ONE_FRAGMENT: &str = r#"{"fragments":[{"id":"dns","label":"公共 DNS","enabled":true,
         "overlay":{"dns":{"servers":[{"tag":"public","address":"223.5.5.5"}]}}}]}"#;
 
+    /// The refusal has to reach the operator as a refusal. A subscription of
+    /// protocols this client does not manage parses line by line and imports
+    /// nothing; the old message counted those lines as zero failures, which
+    /// read like "empty file" while the reason was "not my protocols".
+    #[tokio::test]
+    async fn an_unimportable_file_refuses_without_leaving_a_profile_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nodes.txt");
+        std::fs::write(
+            &path,
+            "ss://YWVzLTI1Ni1nY206cGFzcw==@1.2.3.4:8388#one\ntrojan://pass@example.com:443#two",
+        )
+        .unwrap();
+        let mut engine = test_engine(dir.path()).await;
+        let error = engine
+            .import_profile_file(path.to_string_lossy().into())
+            .await
+            .expect_err("nothing here is a managed protocol");
+        assert!(
+            error.to_string().contains("2 行不受支持"),
+            "the reason is the count of unsupported lines: {error}"
+        );
+        assert!(
+            engine.snapshot.profiles.is_empty() && engine.profiles.active.is_none(),
+            "a refused import must not leave a profile or a cache file behind"
+        );
+    }
+
     /// Imports one local profile and makes it active, the way the TUI does.
     async fn engine_with_profile(dir: &std::path::Path, name: &str) -> Engine {
         let mut engine = test_engine(dir).await;
