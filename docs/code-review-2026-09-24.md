@@ -277,6 +277,14 @@ Shadowrocket 里会显示成巨额"上传"。
 从 GitHub 下 `geoip.metadb` 而超时——那份工件的字节与 HEAD 完全一致（金标准未动），
 所以这条是宿主状态，不是本改动。
 
+**2026-09-24 补记：真核矩阵已经跑通（默认模板）。** 宿主能连 GitHub、WSL 不能，所以内核在宿主下载后
+暂存到 `C:\Users\ranly\tmp-sbcores`，由 `fetch-sing-box-cores.sh` 的 `STAGE_DIR` 分支拷进 `~/bin`。
+之后 `scripts/dev/wsl-real-cores.sh` 的 version_profiles 腿：**3 passed / 0 failed**，
+其中包含"5 个真实内核各自接受自己的工件"与"服务端配置过 1.14"。
+仍**未验**的是新模板：那两个测试**只测默认模板**，所以"Global/Split 过真核"这件事今天没有门覆盖，
+把它按模板参数化是下一批的第一项。mihomo 腿仍卡在下 `geoip.metadb`（同一网络原因，非工件问题）。
+
+
 **由此暴露的一个真缺口**：`tests/version_profiles.rs` 与 `tests/clash_mihomo.rs` **只测默认模板**，
 所以"新模板过真核"这件事今天没有任何门覆盖。需要把这两个测试按模板参数化——已在 R12 记为待办，
 并且必须等 GitHub 可达时才能验证。

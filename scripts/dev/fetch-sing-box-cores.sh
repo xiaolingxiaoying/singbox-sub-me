@@ -12,17 +12,32 @@
 # then:
 #   wsl -d Ubuntu-22.04 -- bash -c 'source ~/bin/sb-cores.env && \
 #     bash <repo>/scripts/dev/wsl-gate.sh'
+#
+# Invoke it by path, not through `bash -c "..."`: from this host's Git Bash a
+# `-c` string gets its `$vars` expanded by the outer shell first, so the loop
+# silently fetches `sing-box--linux-amd64.tar.gz`. MSYS also rewrites
+# `/mnt/c/...` arguments unless MSYS_NO_PATHCONV=1.
 set -eu
 
 # The five minors the subscription version band currently covers, newest first.
 CORE_VERSIONS="1.14.1 1.13.21 1.12.25 1.11.15 1.10.7"
 BIN_DIR=${BIN_DIR:-$HOME/bin}
+# This machine's WSL has no route to GitHub while the Windows host does, so a
+# host-side staging directory is checked before the network is tried at all.
+STAGE_DIR=${STAGE_DIR:-/mnt/c/Users/ranly/tmp-sbcores}
 
 mkdir -p "$BIN_DIR"
 for version in $CORE_VERSIONS; do
   target="$BIN_DIR/sing-box-$version"
   if [ -x "$target" ]; then
     echo "have sing-box-$version"
+    continue
+  fi
+  staged="$STAGE_DIR/sb-$version"
+  if [ -f "$staged" ]; then
+    cp -f "$staged" "$target"
+    chmod +x "$target"
+    echo "copied sing-box-$version from $STAGE_DIR"
     continue
   fi
   archive="sing-box-$version-linux-amd64.tar.gz"
@@ -51,4 +66,5 @@ done
 } >> "$env_file"
 
 echo "env file: $env_file"
-"$BIN_DIR/sing-box-$(printf '%s\n' $CORE_VERSIONS | head -1) version" | head -1
+newest=$(printf '%s\n' $CORE_VERSIONS | head -1)
+"$BIN_DIR/sing-box-$newest" version | head -1
