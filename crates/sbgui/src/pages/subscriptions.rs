@@ -71,11 +71,10 @@ impl Sbgui {
         let narrow = window.viewport_size().width < px(940.0);
         // The action cell is fixed so the header lines up with the rows: its
         // content is wider than the "Actions" label, and an auto width would
-        // shift the grow columns per row. The track has to fit the widest *pair*
-        // in either language — 设为当前 + 编辑链接 / "Set as current" + "Edit
-        // link" — because `flex_wrap` only breaks lines inside the track, and a
-        // track narrower than the pair overflows the card and cuts the last
-        // glyph off (issue 01 item 8, seen at 860×640).
+        // shift the grow columns per row. It has to hold the widest *triple* in
+        // either language — English is the long one ("Use this" + "Edit link" +
+        // "Delete") — and the table's min width has to stay under the window's
+        // content width for that to be possible at all. See the min_w below.
         let action_width = if narrow { 250.0 } else { 268.0 };
         let usage = self.snapshot.subscription_usage;
         let node_count = self
@@ -434,7 +433,9 @@ impl Sbgui {
                                 tr!(locale, "未启用", "Inactive")
                             }),
                     )
-                    .child(grow_col(1.2, if narrow { 130.0 } else { 170.0 }).children(usage_cell))
+                    .when(!narrow, |row| {
+                        row.child(grow_col(1.2, 170.0).children(usage_cell))
+                    })
                     .when(!narrow, |row| {
                         row.child(
                             div()
@@ -535,7 +536,11 @@ impl Sbgui {
                         .overflow_x_scroll()
                         .child(
                             div()
-                                .min_w(px(600.0))
+                                // The narrow track has to be *below* the content width, or the
+                                // scroller engages and cuts the last button off the card — which
+                                // is what issue 01 item 8 was: 600 of columns inside ~574 of
+                                // window, with the overflow landing on 「删除」 / "Delete".
+                                .min_w(px(if narrow { 440.0 } else { 600.0 }))
                                 .child(
                                     table_head_row()
                                         .child(
@@ -546,10 +551,13 @@ impl Sbgui {
                                             tr!(locale, "状态", "Status"),
                                             Some(if narrow { 64.0 } else { 72.0 }),
                                         ))
-                                        .child(
-                                            grow_col(1.2, if narrow { 130.0 } else { 170.0 })
-                                                .child(tr!(locale, "流量与节点", "Usage & nodes")),
-                                        )
+                                        .when(!narrow, |head| {
+                                            head.child(grow_col(1.2, 170.0).child(tr!(
+                                                locale,
+                                                "流量与节点",
+                                                "Usage & nodes"
+                                            )))
+                                        })
                                         .when(!narrow, |head| {
                                             head.child(table_col(
                                                 tr!(locale, "上次更新", "Last updated"),
