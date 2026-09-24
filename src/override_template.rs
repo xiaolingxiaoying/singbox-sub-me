@@ -98,71 +98,29 @@ fn load_yaml_if_present(path: &Path) -> Result<Option<serde_yaml::Value>, Overri
 /// other types replace — except an array under a key literally named `rules`,
 /// which the overlay prepends to so an override rule wins over the generated
 /// verdicts without restating the whole list.
-pub fn deep_merge(base: &mut serde_json::Value, overlay: &serde_json::Value) {
-    match (base, overlay) {
-        (serde_json::Value::Object(base_map), serde_json::Value::Object(overlay_map)) => {
-            for (key, value) in overlay_map {
-                match base_map.get_mut(key) {
-                    Some(existing) => {
-                        if key == "rules" && existing.is_array() && value.is_array() {
-                            let serde_json::Value::Array(base_rules) = existing else {
-                                unreachable!("checked is_array above")
-                            };
-                            let serde_json::Value::Array(overlay_rules) = value else {
-                                unreachable!("checked is_array above")
-                            };
-                            let mut merged = overlay_rules.clone();
-                            merged.extend(base_rules.iter().cloned());
-                            *existing = serde_json::Value::Array(merged);
-                            continue;
-                        }
-                        deep_merge(existing, value);
-                    }
-                    None => {
-                        base_map.insert(key.clone(), value.clone());
-                    }
-                }
-            }
-        }
-        (base, overlay) => *base = overlay.clone(),
-    }
-}
-
-/// The YAML twin of [`deep_merge`], operating on `serde_yaml::Value`.
-pub fn deep_merge_yaml(base: &mut serde_yaml::Value, overlay: &serde_yaml::Value) {
-    match (base, overlay) {
-        (serde_yaml::Value::Mapping(base_map), serde_yaml::Value::Mapping(overlay_map)) => {
-            for (key, value) in overlay_map {
-                match base_map.get_mut(key) {
-                    Some(existing) => {
-                        if key == "rules" && existing.is_sequence() && value.is_sequence() {
-                            let serde_yaml::Value::Sequence(base_rules) = existing else {
-                                unreachable!("checked is_sequence above")
-                            };
-                            let serde_yaml::Value::Sequence(overlay_rules) = value else {
-                                unreachable!("checked is_sequence above")
-                            };
-                            let mut merged = overlay_rules.clone();
-                            merged.extend(base_rules.iter().cloned());
-                            *existing = serde_yaml::Value::Sequence(merged);
-                            continue;
-                        }
-                        deep_merge_yaml(existing, value);
-                    }
-                    None => {
-                        base_map.insert(key.clone(), value.clone());
-                    }
-                }
-            }
-        }
-        (base, overlay) => *base = overlay.clone(),
-    }
-}
+///
+/// The implementation lives in the `json-merge` crate, which the client engine
+/// uses for its own per-profile override too: ADR-0021 documents one set of
+/// merge semantics, so there is exactly one function implementing them. Re-exported
+/// here because this module is the server's override vocabulary.
+pub use json_merge::{deep_merge, deep_merge_yaml};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The behaviour ADR-0021 locks is asserted through the shared table, not a
+    /// copy of it: `json-merge` owns the rows, and this is the server's stake in
+    /// them. If the merge semantics move, every consumer's test reddens at once.
+    #[test]
+    fn the_shared_merge_table_holds_for_json_and_yaml() {
+        assert_eq!(json_merge::merge_semantics_failures(), Vec::<&str>::new());
+        assert_eq!(
+            json_merge::merge_semantics_yaml_failures(),
+            Vec::<&str>::new()
+        );
+    }
 
     #[test]
     fn objects_merge_recursively_and_scalars_replace() {
