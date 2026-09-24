@@ -108,6 +108,12 @@
 - 证据：`src/subscription/profile.rs:144` 的 `SING_BOX_VERSION_PROFILES` 是硬编码 5 项（1.10–1.14），`latest_version_profile()` 取 `.last()`；上游发布新 minor 时不会自动纳入。
 - 已缓解：注册表连续性单测、CI 上游 `releases/latest` 带检查（红构建即提醒）、运行期用已装内核选档（`resolve_full_profile`）、"内核比表更新"只告警不断服务。
 - 缺口：仍**需人工**加 5 行注册表条目 + notes + CI pinned 内核列表。属"可检测"而非"已滑动"。
+- 本地门覆盖不到的部分（2026-09-24 复核）：`tests/version_profiles.rs` 六个测试里
+  **三个是 `#[ignore]`**——真核 `sing-box check`（`:17`）、上游 latest 漂移（`:111`）、
+  服务端配置过最新核（`:182`）——只有 CI 的 `sing-box-profiles` job 用 `-- --ignored` 跑
+  （`.github/workflows/ci.yml:113`）。本地 `cargo test` 常跑的只有注册表连续性
+  (`:144`)、"比表更新才告警"(`:224`)、"读不到内核就闭嘴"(`:303`)。
+  也就是说：**漂移检测在本地根本不存在**，把 CI 关掉就等于没有这道门。
 - 建议：保持 CI 带检查；在发布 checklist 中加入"上游新 minor → 更新注册表"步骤。
 
 ## G10 — `subscription-userinfo` 无 `refresh` 键
