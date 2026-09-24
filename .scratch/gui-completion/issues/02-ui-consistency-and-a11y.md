@@ -1,6 +1,6 @@
 # GUI UI 一致性、可用性与可访问性
 
-Status: ready-for-agent
+Status: ready-for-agent（第 6 条已落地并量化；1–5、7–9 仍开放）
 Type: task
 Blocked by: sbctl-v0.2/issues/01
 
@@ -12,8 +12,8 @@ Blocked by: sbctl-v0.2/issues/01
 3. 设置页 TUN 开关在内核运行时置灰（与工具条/概览一致）。
 4. 空输入点「添加」不再静默关面板，显示错误提示。
 5. 单实例锁/初始化失败：写日志文件并在已有窗口内提示，不再无控制台静默退出。
-6. 对比度：FAINT/CYAN 只用于非关键装饰，正文/标签改用 MUTED 以上；
-   以 WCAG AA 4.5:1 为目标。
+6. ✅（2026-09-24 已落地，`fix(gui)` 6f8172e）对比度：见文末实测表；`MUTED`/`AMBER` 调暗，
+   文字位的 `FAINT`/`CYAN` 换成 `MUTED`/`CYAN_DARK`，并加了三道 `#[cfg(test)]` 门。
 7. 键盘路径：`?` 帮助、页面切换快捷键、`Esc` 关闭浮层、Tab 焦点环；
    输入框支持 Home/End/Delete/方向键与 IME 组合（至少不丢字）。
 8. 硬编码颜色入 `theme.rs` token；规则表头/行 1px 对齐。
