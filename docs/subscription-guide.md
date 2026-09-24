@@ -119,6 +119,10 @@ sbctl config override clear     # 删除并重新生成
     "这个订阅是否存在"的预言机，也让人可以嫁祸别人。每客户端限额请配在前置代理上。
   - 读不到对端地址时放过（fail open）：fail closed 会在任何平台意外隐藏 peer 时
     把所有订阅一起停掉。这层是公平/滥用下限，不是安全边界。
+  - 反代只在 `external-proxy` 下被建模。若你把 `direct`/`ip-fallback` 的 sbctl 也挡在本机
+    nginx/caddy 后面（模式没改），对端地址就变成反代自己（回环，或宿主自己的 IP），
+    **全体访客会共用一个令牌桶**——表现为随机 429，而不是攻击。这种拓扑请改模式，
+    或把每客户端限额配在反代上。
 - 所有响应带 `Cache-Control: no-store`；订阅凭据泄露时执行 `sbctl credential rotate` 全部作废。
 - IP fallback 模式为明文 HTTP，仅建议无域名时临时使用。
 
