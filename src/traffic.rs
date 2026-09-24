@@ -68,9 +68,66 @@ pub enum CorrectionRecord {
     /// A signed total-only adjustment applied to reported VPS traffic without
     /// fabricating RX/TX direction values. Existing nonnegative byte values
     /// remain compatible with this representation.
-    TotalAdjustment { bytes: i128, at: DateTime<Utc> },
+    TotalAdjustment {
+        #[serde(with = "signed_i128")]
+        bytes: i128,
+        at: DateTime<Utc>,
+    },
     /// A direction-aware correction setting the reported RX and TX totals.
     SetDirection { rx: u64, tx: u64, at: DateTime<Utc> },
+}
+
+mod signed_i128 {
+    use serde::de::{self, Visitor};
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &i128, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match u64::try_from(*value) {
+            Ok(value) => serializer.serialize_u64(value),
+            Err(_) => serializer.serialize_str(&value.to_string()),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<i128, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct SignedI128Visitor;
+
+        impl Visitor<'_> for SignedI128Visitor {
+            type Value = i128;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an integer byte count or its decimal string")
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(i128::from(value))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(i128::from(value))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                value.parse().map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_any(SignedI128Visitor)
+    }
 }
 
 impl TrafficState {
