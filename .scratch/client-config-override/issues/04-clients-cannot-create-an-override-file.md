@@ -1,9 +1,31 @@
 # 两个客户端都无法"创建"覆写文件（引擎命令没人发）
 
-Status: needs-implementation
+Status: partially-done（TUI 已落地并过门；GUI 那一半没做完，设计留存见下）
 Type: task
 Found: 2026-09-24（R25 的 TUI 能力审计）
 Blocked by: 01
+
+## 2026-09-24 进度
+
+**TUI 侧已落地**（本轮 `feat(tui)` 提交）：覆写页新增 `f`，提示输入**已存在文件的路径**，
+读出来交给 `SetOverride`；已有覆写时**再按一次 f 确认**，中间任何别的键撤回；
+空路径 / 读不到 / 空白文件三种情况各有自己的句子（空白文件明确说"空内容在引擎那里等于清除，要清除请按 O"）；
+确认条站着时若档案被切换则**拒绝装载**（不是装载到"当前那个"）。
+页脚与 `?` 帮助行都进了断言（帮助行超出面板会被测出来）。
+引擎侧没改生产代码，只补了一条测试：`SetOverride` 的 `apply` 分支此前**完全没测**
+（`the_set_override_command_writes_the_named_profile_and_refuses_a_bad_document`）。
+变异检验 7 条：P1 不确认就覆盖 / P2 去掉档案漂移守卫 / P3 空白文件被接受 / P5 确认键也被撤回 /
+P6 改成写到"当前档案" / P7 帮助行超长 —— 全部判红；
+**P4（去掉空路径守卫）第一次存活**，因为该测试从没按过空路径，去掉守卫后 `read("")` 自己报错照样"没发命令"。
+补了一条断言（空路径要说"不能为空"，不是文件系统报错）后 P4 判红。
+
+**GUI 侧未完成**：writer agent 在 150 轮上限处停下，`crates/sbgui` 只有纯函数
+（`override_load_request` / `PendingLoad::command` / `LoadReject`）和调用点，**页面 UI 一行没写**
+（`pages/overrides.rs` 未改），`show_override_load` 等字段是没人渲染的死状态，整个 crate 编译不过。
+处置：把那部分改动整体回退，**设计以补丁形式留在 `.scratch/g12-gui-partial.patch`（447 行）**，
+下一步照它实现即可，不必重新设计。剩余工作：`submit_override_load` handler、
+`InputField::OverrideFile` 的 match 分支、覆写页的装载面板 + 确认条 + `SBGUI_SHOW_LOAD_PANEL` seam、
+以及 860×640 / 1440×900 两张帧。
 
 ## 事实
 

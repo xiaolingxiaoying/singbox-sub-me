@@ -93,6 +93,9 @@ pub(crate) enum InputGoal {
     ConnFilter,
     /// A substring filter over the kernel log tail.
     LogQuery,
+    /// The path of a JSON file to install as the active profile's override,
+    /// asked for by the Override tab's `f`.
+    OverrideFile,
 }
 
 /// Connection-table sort order, cycled with `S`.
@@ -221,6 +224,15 @@ pub(crate) struct App {
     pub(crate) selected_fragment: usize,
     /// A pending `O` on the Override tab: the second press deletes the file.
     pub(crate) confirm_clear_override: bool,
+    /// A pending `f` on the Override tab, holding the profile the bytes were
+    /// read for and the bytes themselves: `(profile, contents)`.
+    ///
+    /// The profile travels with the contents because the two clients share one
+    /// engine: an import or a delete elsewhere can move the active profile while
+    /// this confirmation is standing, and a load that followed whoever is current
+    /// then would write the wrong file. The second press re-reads the target and
+    /// refuses instead.
+    pub(crate) pending_override_load: Option<(String, String)>,
     // Input overlay.
     pub(crate) input: Option<InputGoal>,
     pub(crate) pending_profile_name: Option<String>,
@@ -277,6 +289,7 @@ impl App {
             confirm_delete: None,
             selected_fragment: 0,
             confirm_clear_override: false,
+            pending_override_load: None,
             input: None,
             pending_profile_name: None,
             input_text: String::new(),

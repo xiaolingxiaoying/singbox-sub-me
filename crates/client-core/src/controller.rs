@@ -2134,6 +2134,79 @@ mod tests {
         assert!(engine.snapshot.override_error.is_none());
     }
 
+    /// The command arm, not just the method behind it. Neither client used to
+    /// send `SetOverride`, so everything above covered `set_override` while the
+    /// `apply` arm that both interfaces now go through had no test at all: an arm
+    /// that dropped the contents, or wrote for the active profile instead of the
+    /// named one, was invisible from here.
+    #[tokio::test]
+    async fn the_set_override_command_writes_the_named_profile_and_refuses_a_bad_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = engine_with_profile(dir.path(), "mine").await;
+        let other = dir.path().join("other.json");
+        std::fs::write(&other, NODE_CONFIG).unwrap();
+        engine
+            .import_profile_file(other.to_string_lossy().into())
+            .await
+            .unwrap();
+        // "other" is active now; the command below names "mine".
+        assert_eq!(
+            engine.snapshot.active_profile.as_ref().unwrap().name,
+            "other"
+        );
+
+        engine
+            .apply(ClientCommand::SetOverride {
+                profile: "mine".to_owned(),
+                contents: ONE_FRAGMENT.to_owned(),
+            })
+            .await
+            .expect("the command arm reaches the handler");
+        let mine = settings::override_path(dir.path(), "mine");
+        assert_eq!(
+            std::fs::read_to_string(&mine).unwrap(),
+            ONE_FRAGMENT,
+            "the named profile's file is written verbatim at {}",
+            mine.display()
+        );
+        assert!(
+            !settings::override_path(dir.path(), "other").exists(),
+            "and only that one: the active profile keeps having no override"
+        );
+        assert!(
+            engine.snapshot.override_summary.is_none(),
+            "the summary tracks the active profile, so another profile's write stays unpublished"
+        );
+
+        let error = engine
+            .apply(ClientCommand::SetOverride {
+                profile: "mine".to_owned(),
+                contents: r#"{"fragments":[{"id":"broken","overlay":"not an object"}]}"#.to_owned(),
+            })
+            .await
+            .expect_err("the arm must not swallow the refusal");
+        assert!(
+            error.to_string().contains("/fragments/0/overlay"),
+            "the caller gets the engine's own sentence: {error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&mine).unwrap(),
+            ONE_FRAGMENT,
+            "a document refused through the command still never reaches the disk"
+        );
+
+        assert!(
+            engine
+                .apply(ClientCommand::SetOverride {
+                    profile: "nobody".to_owned(),
+                    contents: ONE_FRAGMENT.to_owned(),
+                })
+                .await
+                .is_err(),
+            "an override cannot be invented for a profile that does not exist"
+        );
+    }
+
     /// A file the user hand-edited into nonsense is the case that cannot be
     /// refused at write time. It has to be visible *and* stop the start: the
     /// alternative is a client that silently runs without the override.

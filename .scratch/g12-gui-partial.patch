@@ -1,0 +1,447 @@
+diff --git a/crates/sbgui/src/app.rs b/crates/sbgui/src/app.rs
+index 289d548..cd3d2df 100644
+--- a/crates/sbgui/src/app.rs
++++ b/crates/sbgui/src/app.rs
+@@ -12,13 +12,14 @@ use gpui::{
+ };
+ 
+ use crate::parse::{
+-    ImportRequest, file_import_request, link_edit_request, parse_count, parse_port,
+-    subscription_request, url_editor_target,
++    ImportRequest, LoadAttempt, file_import_request, link_edit_request, override_load_request,
++    parse_count, parse_port, subscription_request, url_editor_target,
+ };
+ use crate::state::{
+     ExitChoice, INPUT_FIELDS, InputField, LogLevelFilter, Page, Sbgui, TextField, Tone, env_locale,
+     env_page, env_settings_section, env_show_clear_confirm, env_show_exit_confirm,
+-    env_show_import_panel, env_show_stop_confirm, env_show_url_editor, env_startup_notice,
++    env_show_import_panel, env_show_load_panel, env_show_stop_confirm, env_show_url_editor,
++    env_startup_notice,
+ };
+ use crate::theme::{
+     BG, BORDER, CONTENT_MAX, CONTENT_PAD, DANGER, GAP_ITEM, GAP_SECTION, LABEL, TEXT, WINDOW_RADIUS,
+@@ -83,6 +84,9 @@ impl Sbgui {
+             confirm_close_all: false,
+             confirm_delete_profile: None,
+             confirm_clear_override: env_show_clear_confirm(),
++            show_override_load: env_show_load_panel(),
++            pending_override_load: None,
++            override_load_error: None,
+         };
+         // The seam replays the click instead of painting its result: the panel is
+         // open, so pressing 「添加」 on the still-empty field goes through the very
+@@ -99,6 +103,12 @@ impl Sbgui {
+             let name = profile.name.clone();
+             view.arm_url_editor(&name, cx);
+         }
++        // The load panel's seam, replayed the same way: the panel is open, so
++        // pressing 「装载覆写」 on the empty path field goes through the handler a
++        // user reaches, and the frame shows the refusal rather than a still panel.
++        if env_show_load_panel() {
++            view.submit_override_load(cx);
++        }
+         view
+     }
+ 
+@@ -191,6 +201,7 @@ impl Sbgui {
+                         | InputField::SubName
+                         | InputField::SubFile
+                         | InputField::SubEditUrl
++                        | InputField::OverrideFile
+                 ) =>
+             {
+                 self.commit_field(field, cx)
+@@ -224,6 +235,9 @@ impl Sbgui {
+             InputField::SubEditUrl => {
+                 self.submit_profile_url(cx);
+             }
++            InputField::OverrideFile => {
++                self.submit_override_load(cx);
++            }
+             InputField::Mirror => self.send(ClientCommand::UpdateSettings(SettingsPatch {
+                 mirror: Some(text),
+                 ..Default::default()
+diff --git a/crates/sbgui/src/parse.rs b/crates/sbgui/src/parse.rs
+index 44c9c8a..16c19c5 100644
+--- a/crates/sbgui/src/parse.rs
++++ b/crates/sbgui/src/parse.rs
+@@ -147,6 +147,138 @@ pub(crate) fn url_editor_target(open: Option<&str>, clicked: &str) -> Option<Str
+     (open != Some(clicked)).then(|| clicked.to_owned())
+ }
+ 
++/// Why the 「装载覆写」 click installed nothing. Deliberately not `ImportReject`:
++/// whether the document is valid JSON is the engine's judgement (`SetOverride`
++/// parses before it writes), while these are about the file the engine never saw,
++/// and one of them can only be told in the operating system's words.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(crate) enum LoadReject {
++    /// The page shows no profile, so there is no override file to write. The
++    /// engine's own `require_profile` would refuse it too; saying it here is what
++    /// lets the panel name the missing thing instead of failing after the read.
++    NoProfile,
++    EmptyPath,
++    /// Reading failed. Both halves come from outside the app — the path the user
++    /// typed and the operating system's reason — so the sentence is composed here,
++    /// in whichever language is showing, and nothing about the file is guessed at.
++    Unreadable { path: String, reason: String },
++    /// The file holds nothing. Blank text is the engine's *clear* command, so
++    /// passing an empty file through would delete the override the button was
++    /// pressed to replace; clearing has a button of its own, with a confirmation.
++    BlankFile,
++}
++
++impl LoadReject {
++    pub(crate) fn label(&self, locale: Locale) -> String {
++        match self {
++            Self::NoProfile => tr!(
++                locale,
++                "还没有档案，覆写文件没有能归属的档案。",
++                "There is no profile yet, so an override file has nothing to belong to."
++            )
++            .to_owned(),
++            Self::EmptyPath => tr!(
++                locale,
++                "覆写文件路径不能为空。",
++                "The override file path cannot be empty."
++            )
++            .to_owned(),
++            Self::Unreadable { path, reason } => tr!(
++                locale,
++                format!("读取 {path} 失败：{reason}"),
++                format!("Could not read {path}: {reason}")
++            )
++            .to_owned(),
++            Self::BlankFile => tr!(
++                locale,
++                "这个文件是空的：空内容在引擎那里等于清除覆写，要清除请用「清除覆写」。",
++                "This file is empty: to the engine, blank contents mean clear the override. Use \
++                 Clear override to remove it."
++            )
++            .to_owned(),
++        }
++    }
++}
++
++/// A document read off disk, with the profile it was read for. The view holds one
++/// of these between the two clicks that replace an override that is already in
++/// place, so the second click sends exactly what the first one checked — not a
++/// re-read of a file that may have changed in between.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(crate) struct PendingLoad {
++    pub(crate) profile: String,
++    /// Only to name the source in the bar's sentence.
++    pub(crate) path: String,
++    pub(crate) contents: String,
++}
++
++impl PendingLoad {
++    /// What the confirming click sends. The caller checks `profile` is still the
++    /// profile on screen first: both clients drive one engine, so an import or a
++    /// delete elsewhere can move the target while the bar is standing, and
++    /// installing onto whoever is current then would be a change nobody asked for.
++    pub(crate) fn command(&self) -> ClientCommand {
++        ClientCommand::SetOverride {
++            profile: self.profile.clone(),
++            contents: self.contents.clone(),
++        }
++    }
++}
++
++/// What 「装载覆写」 makes of the path field, the file behind it, and whether the
++/// profile already has an override to lose.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(crate) enum LoadAttempt {
++    /// Tell the engine now: there was nothing in the way.
++    Send(ClientCommand),
++    /// Show the bar first: these bytes would replace a file that exists.
++    Confirm(PendingLoad),
++    Refuse(LoadReject),
++}
++
++/// The 「装载覆写」 decision, as a pure function: the file is the user's, written
++/// outside the client (ADR-0023 keeps authoring out of the app), and the target is
++/// always the profile the page is showing — never a name typed into a second box,
++/// because the file on disk is keyed by that profile's sha256 and picking the
++/// wrong one is invisible until a core start that changes nothing.
++///
++/// `read` is the file's contents, or `None` when there was no path to read. The
++/// bytes go to the engine unchanged: what the engine validates is what lands.
++pub(crate) fn override_load_request(
++    profile: Option<&str>,
++    path: &str,
++    read: Option<Result<String, String>>,
++    replaces: bool,
++) -> LoadAttempt {
++    let Some(profile) = profile else {
++        return LoadAttempt::Refuse(LoadReject::NoProfile);
++    };
++    let contents = match read {
++        None => return LoadAttempt::Refuse(LoadReject::EmptyPath),
++        Some(Err(reason)) => {
++            return LoadAttempt::Refuse(LoadReject::Unreadable {
++                path: path.to_owned(),
++                reason,
++            });
++        }
++        Some(Ok(contents)) if contents.trim().is_empty() => {
++            return LoadAttempt::Refuse(LoadReject::BlankFile);
++        }
++        Some(Ok(contents)) => contents,
++    };
++    if replaces {
++        return LoadAttempt::Confirm(PendingLoad {
++            profile: profile.to_owned(),
++            path: path.to_owned(),
++            contents,
++        });
++    }
++    LoadAttempt::Send(ClientCommand::SetOverride {
++        profile: profile.to_owned(),
++        contents,
++    })
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -361,4 +493,168 @@ mod tests {
+             "another row moves the editor rather than stacking a second one"
+         );
+     }
++
++    /// The load's whole promise: bytes the user wrote elsewhere, addressed to the
++    /// profile the page is showing, reaching the engine through `SetOverride` —
++    /// the command that existed and that no client had ever sent.
++    #[test]
++    fn a_read_file_becomes_a_set_override_for_the_profile_the_page_shows() {
++        let document = "{ \"dns\": { \"tag\": \"hand-written\" } }\n";
++        assert_eq!(
++            override_load_request(
++                Some("内网订阅"),
++                "D:/sbctl/override.json",
++                Some(Ok(document.to_owned())),
++                false,
++            ),
++            LoadAttempt::Send(ClientCommand::SetOverride {
++                profile: "内网订阅".to_owned(),
++                contents: document.to_owned(),
++            }),
++            "the bytes go over verbatim, whitespace and trailing newline included"
++        );
++        // With a file already in place the same bytes wait for a second click.
++        assert_eq!(
++            override_load_request(
++                Some("内网订阅"),
++                "D:/sbctl/override.json",
++                Some(Ok(document.to_owned())),
++                true,
++            ),
++            LoadAttempt::Confirm(PendingLoad {
++                profile: "内网订阅".to_owned(),
++                path: "D:/sbctl/override.json".to_owned(),
++                contents: document.to_owned(),
++            }),
++        );
++    }
++
++    /// Nothing is "loaded" onto no one: the request names a profile or refuses,
++    /// rather than letting the engine answer after the file was already read.
++    #[test]
++    fn a_page_without_a_profile_refuses_the_load() {
++        assert_eq!(
++            override_load_request(None, "D:/sbctl/override.json", Some(Ok("{}".to_owned())), true),
++            LoadAttempt::Refuse(LoadReject::NoProfile)
++        );
++    }
++
++    #[test]
++    fn a_blank_path_refuses_without_naming_a_file_the_user_never_typed() {
++        for blank in ["", "   ", "\t"] {
++            assert_eq!(
++                override_load_request(Some("内网订阅"), blank, None, false),
++                LoadAttempt::Refuse(LoadReject::EmptyPath),
++                "no path, nothing to read: {blank:?}"
++            );
++        }
++        assert_ne!(
++            LoadReject::EmptyPath.label(Locale::Zh),
++            LoadReject::NoProfile.label(Locale::Zh),
++            "the two refusals must not blame the same thing"
++        );
++    }
++
++    /// The engine cannot report a file it never received, so this is the one place
++    /// the client speaks for itself — and it says the OS's words, not a guess.
++    #[test]
++    fn an_unreadable_file_is_answered_with_the_os_sentence_and_its_own_path() {
++        let attempt = override_load_request(
++            Some("内网订阅"),
++            "D:/sbctl/missing.json",
++            Some(Err("entity not found".to_owned())),
++            false,
++        );
++        assert_eq!(
++            attempt,
++            LoadAttempt::Refuse(LoadReject::Unreadable {
++                path: "D:/sbctl/missing.json".to_owned(),
++                reason: "entity not found".to_owned(),
++            })
++        );
++        let reject = match attempt {
++            LoadAttempt::Refuse(reject) => reject,
++            other => panic!("a failed read must not send: {other:?}"),
++        };
++        let label = reject.label(Locale::Zh);
++        assert!(label.contains("D:/sbctl/missing.json"), "{label}");
++        assert!(label.contains("entity not found"), "{label}");
++        let english = reject.label(Locale::En);
++        assert!(english.contains("Could not read"), "{english}");
++        assert_ne!(label, english);
++    }
++
++    /// The trap specific to this command: `SetOverride` reads blank text as
++    /// "clear the override", which is `ClearOverride` with a confirmation in front
++    /// of it. Loading an empty file must never be how that happens.
++    #[test]
++    fn an_empty_file_is_refused_because_to_the_engine_empty_means_clear() {
++        for blank in ["", "   ", "\n\t "] {
++            assert_eq!(
++                override_load_request(
++                    Some("内网订阅"),
++                    "D:/sbctl/blank.json",
++                    Some(Ok(blank.to_owned())),
++                    true,
++                ),
++                LoadAttempt::Refuse(LoadReject::BlankFile),
++                "whitespace is not a document: {blank:?}"
++            );
++        }
++        assert!(
++            !LoadReject::BlankFile.label(Locale::En).is_empty(),
++            "an empty file needs a refusal sentence in both languages"
++        );
++        assert!(
++            LoadReject::BlankFile
++                .label(Locale::Zh)
++                .contains("清除覆写"),
++            "the refusal points at the button that does mean clear: {}",
++            LoadReject::BlankFile.label(Locale::Zh)
++        );
++    }
++
++    /// Every refusal the page can show has both halves, because one of them is
++    /// built around an interpolated path and interpolations are where a translation
++    /// gets dropped.
++    #[test]
++    fn every_load_refusal_has_an_english_half() {
++        let rejects = [
++            LoadReject::NoProfile,
++            LoadReject::EmptyPath,
++            LoadReject::Unreadable {
++                path: "C:/x/override.json".to_owned(),
++                reason: "permission denied".to_owned(),
++            },
++            LoadReject::BlankFile,
++        ];
++        for reject in rejects {
++            let zh = reject.label(Locale::Zh);
++            let en = reject.label(Locale::En);
++            assert!(!zh.is_empty() && !en.is_empty(), "{reject:?}");
++            assert_ne!(zh, en, "{reject:?} shares one sentence");
++            assert!(
++                !en.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
++                "an English refusal leaked Chinese: {en}"
++            );
++        }
++    }
++
++    /// The armed bar sends what was read, for the profile it was read for — not
++    /// for whatever the engine happens to have active when the click lands.
++    #[test]
++    fn a_pending_load_carries_its_own_target() {
++        let pending = PendingLoad {
++            profile: "内网订阅".to_owned(),
++            path: "C:/x/override.json".to_owned(),
++            contents: r#"{"dns":{"tag":"mine"}}"#.to_owned(),
++        };
++        assert_eq!(
++            pending.command(),
++            ClientCommand::SetOverride {
++                profile: "内网订阅".to_owned(),
++                contents: r#"{"dns":{"tag":"mine"}}"#.to_owned(),
++            }
++        );
++    }
+ }
+diff --git a/crates/sbgui/src/state.rs b/crates/sbgui/src/state.rs
+index 76adc7f..85809f8 100644
+--- a/crates/sbgui/src/state.rs
++++ b/crates/sbgui/src/state.rs
+@@ -104,6 +104,10 @@ pub(crate) enum InputField {
+     SubFile,
+     /// One profile's link, opened by that row's 「编辑链接」.
+     SubEditUrl,
++    /// A JSON file to install as the active profile's override, opened by the
++    /// override page's 「从文件装载」. Grouped with the other file paths so the
++    /// settings fields stay the tail of the list, which `INPUT_FIELDS` pins.
++    OverrideFile,
+     Mirror,
+     MixedPort,
+     TestUrl,
+@@ -111,7 +115,7 @@ pub(crate) enum InputField {
+     CoreVersion,
+ }
+ 
+-pub(crate) const INPUT_FIELDS: [InputField; 13] = [
++pub(crate) const INPUT_FIELDS: [InputField; 14] = [
+     InputField::ConnFilter,
+     InputField::LogQuery,
+     InputField::ProxySearch,
+@@ -120,6 +124,7 @@ pub(crate) const INPUT_FIELDS: [InputField; 13] = [
+     InputField::SubName,
+     InputField::SubFile,
+     InputField::SubEditUrl,
++    InputField::OverrideFile,
+     InputField::Mirror,
+     InputField::MixedPort,
+     InputField::TestUrl,
+@@ -330,6 +335,15 @@ pub(crate) struct Sbgui {
+     /// Arming belongs to that page alone: clearing an override has no undo, so
+     /// the click that asks must never also be the click that deletes.
+     pub(crate) confirm_clear_override: bool,
++    /// Whether the override page's 「从文件装载」 panel is open. Like the
++    /// subscription import panel, it is the only place a path is typed.
++    pub(crate) show_override_load: bool,
++    /// Bytes read from that path, held back for the click that confirms replacing
++    /// an override that is already in place.
++    pub(crate) pending_override_load: Option<crate::parse::PendingLoad>,
++    /// Why the last 「装载覆写」 click installed nothing, in the same code-not-sentence
++    /// shape as the other two field refusals.
++    pub(crate) override_load_error: Option<crate::parse::LoadReject>,
+ }
+ 
+ /// Visual-review seams read once at startup. Ordinary launches never set
+@@ -350,6 +364,9 @@ pub(crate) struct Sbgui {
+ /// - `SBGUI_SHOW_CLEAR_CONFIRM=1` renders the override page's armed
+ ///   delete-the-override bar, which otherwise needs the click the harness
+ ///   cannot make.
++/// - `SBGUI_SHOW_LOAD_PANEL=1` opens the override page's load-from-file panel
++///   without a click, and presses 「装载覆写」 on the empty path field so the frame
++///   carries that refusal too.
+ /// - `SBGUI_LANG=en` starts the interface in English, so a translation can be
+ ///   screenshotted without a pointer reaching the title-bar control.
+ pub(crate) fn env_locale() -> crate::lang::Locale {
+@@ -446,6 +463,13 @@ pub(crate) fn env_show_clear_confirm() -> bool {
+     std::env::var("SBGUI_SHOW_CLEAR_CONFIRM").is_ok_and(|value| value == "1")
+ }
+ 
++/// Review seam for the override page's 「从文件装载」 panel, which only opens on a
++/// click. Like the import panel's seam it also replays that click on the still
++/// empty field, so the frame shows the panel *and* the refusal it answers with.
++pub(crate) fn env_show_load_panel() -> bool {
++    std::env::var("SBGUI_SHOW_LOAD_PANEL").is_ok_and(|value| value == "1")
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::{INPUT_FIELDS, InputField, Locale, Page, switch_language};

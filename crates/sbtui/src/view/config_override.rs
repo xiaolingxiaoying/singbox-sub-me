@@ -1,12 +1,14 @@
 //! The Override tab (覆写配置文件内容): a read-only view of the configuration
-//! the core actually starts from, plus the one edit this UI offers — switching
-//! a rule fragment on or off.
+//! the core actually starts from, plus the two edits this UI offers — switching
+//! a rule fragment on or off, and installing a JSON document the user prepared
+//! outside the client (`f`, which sends `SetOverride` for the active profile).
 //!
 //! There is deliberately no JSON editor here. `docs/target-spec-gap-and-
 //! verification-plan.md` §2 locks the terminal client to "只读查看生效配置 +
-//! 规则片段开关", so the page answers the three questions an operator can ask
-//! without one: is there an override for this profile, what does it change, and
-//! did the client refuse part of it.
+//! 规则片段开关", and ADR-0023 keeps authoring the document outside the app; the
+//! page answers the three questions an operator can ask without an editor: is
+//! there an override for this profile, what does it change, and did the client
+//! refuse part of it.
 //!
 //! Everything drawn comes from the engine snapshot (`override_summary`,
 //! `override_error`, `effective_outline`), so the page is honest before the
@@ -224,13 +226,13 @@ pub(crate) fn note_rows(app: &App, width: usize) -> Vec<Row> {
     rows
 }
 
-/// Where an override comes from at all, said on every state of the page: this
-/// UI reads the configuration and switches fragments, and it never opens an
-/// editor.
+/// Where an override comes from at all, said on every state of the page: this UI
+/// reads the configuration, switches fragments, and installs a document the user
+/// prepared elsewhere — it never opens an editor.
 fn readonly_note() -> Row {
     Row::new(
         Tone::Muted,
-        "本页只读，不编辑 JSON：要改覆写就在数据目录的 overrides/ 下改文件，再重启 sbtui。"
+        "本页只读、不编辑 JSON：外部写好的文件按 f 装载，也可直接改数据目录 overrides/ 下的文件。"
             .to_owned(),
     )
 }

@@ -54,6 +54,9 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
     if key != KeyCode::Char('O') {
         app.confirm_clear_override = false;
     }
+    if key != KeyCode::Char('f') {
+        app.pending_override_load = None;
+    }
     match key {
         KeyCode::Char('?') => app.show_help = true,
         KeyCode::Tab => app.tab = app.tab.next(),
@@ -84,6 +87,7 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
         KeyCode::Char('T') if app.tab == Tab::Proxies => test_group_delays(app),
         KeyCode::Char('u') => app.send(ClientCommand::UpdateSubscription),
         KeyCode::Char('O') if app.tab == Tab::Override => clear_override_file(app),
+        KeyCode::Char('f') if app.tab == Tab::Override => load_override_file(app),
         KeyCode::Char('x') if app.tab == Tab::Connections => close_selected_connection(app),
         KeyCode::Char('X') if app.tab == Tab::Connections => close_all_connections(app),
         KeyCode::Char('S') if app.tab == Tab::Connections => {
@@ -313,6 +317,7 @@ fn commit_input(app: &mut App, goal: InputGoal) {
                 format!("日志关键字: {}", app.log_query)
             };
         }
+        InputGoal::OverrideFile => commit_override_load(app, text),
     }
 }
 
@@ -474,6 +479,18 @@ fn toggle_highlighted_fragment(app: &mut App) {
     });
 }
 
+/// The profile the Override page is about: the one the engine addresses the
+/// override file by, and the only one a fragment switch, a delete or a load may
+/// name. It comes from `active_profile`, not from `override_summary`, because the
+/// states that most need an answer — no file yet, and a file that failed to parse
+/// — are exactly the ones with no summary.
+fn override_target(app: &App) -> Option<String> {
+    app.snapshot
+        .active_profile
+        .as_ref()
+        .map(|profile| profile.name.clone())
+}
+
 /// The Override tab's `O`: delete the active profile's override file, on the
 /// second press.
 ///
@@ -482,17 +499,8 @@ fn toggle_highlighted_fragment(app: &mut App) {
 /// the user cannot find it to edit or remove it. Clearing is the one override
 /// action that cannot be undone by pressing the key again, which is why it asks
 /// once while a fragment toggle does not.
-///
-/// The name comes from the active profile, not from `override_summary`, because
-/// the state that most needs an exit is a file that failed to parse: then there
-/// is no summary, only `override_error`, and the core will not start.
 fn clear_override_file(app: &mut App) {
-    let Some(profile) = app
-        .snapshot
-        .active_profile
-        .as_ref()
-        .map(|profile| profile.name.clone())
-    else {
+    let Some(profile) = override_target(app) else {
         app.status = "尚无档案，也没有覆写文件".to_owned();
         return;
     };
@@ -507,6 +515,90 @@ fn clear_override_file(app: &mut App) {
     }
     app.confirm_clear_override = false;
     app.send(ClientCommand::ClearOverride(profile));
+}
+
+/// The Override tab's `f`: install a JSON document the user prepared outside the
+/// app as the active profile's override file, by sending `SetOverride`.
+///
+/// This is a *load*, not an editor (ADR-0023 keeps the editing outside the
+/// client, like the server's administrator templates). The only judgement here is
+/// about the file, which the engine cannot see: whether there is a profile to own
+/// it, whether it can be read, and whether it holds anything. The document's
+/// shape is not checked twice — `set_override` parses before it writes and its
+/// refusal arrives in the footer in its own words.
+///
+/// The second press replaces an override that is already in place, which is the
+/// one outcome the first press cannot walk back: the engine writes atomically, so
+/// it refuses a bad document without touching the old file, but a *good* one wins
+/// and the previous contents are gone.
+fn load_override_file(app: &mut App) {
+    if let Some((profile, contents)) = app.pending_override_load.take() {
+        let Some(active) = override_target(app) else {
+            app.status = "档案已被删除，未装载覆写".to_owned();
+            return;
+        };
+        if active != profile {
+            app.status = format!("当前档案已是 {active}，未装载 {profile} 的覆写；再按 f 重来");
+            return;
+        }
+        app.send(ClientCommand::SetOverride { profile, contents });
+        return;
+    }
+    let Some(profile) = override_target(app) else {
+        app.status = "尚无档案，覆写文件还没有能归属的档案".to_owned();
+        return;
+    };
+    app.input = Some(InputGoal::OverrideFile);
+    app.input_text.clear();
+    app.status = format!("输入覆写 JSON 的文件路径，将写入档案 {profile} 的覆写");
+}
+
+/// What `Enter` on that prompt does: reads the file and either sends it or asks
+/// once before overwriting what is already there.
+fn commit_override_load(app: &mut App, path: String) {
+    let Some(profile) = override_target(app) else {
+        app.status = "尚无档案，覆写文件还没有能归属的档案".to_owned();
+        return;
+    };
+    if path.is_empty() {
+        app.status = "覆写文件路径不能为空".to_owned();
+        return;
+    }
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        // The OS's own sentence, with the path in front of it: this is the one
+        // failure the engine has no way to report, because it never saw a file.
+        Err(error) => {
+            app.status = format!("读取 {path} 失败: {error}");
+            return;
+        }
+    };
+    if contents.trim().is_empty() {
+        app.status = format!(
+            "{} 是空的：空内容在引擎那里等于清除覆写，要清除请按 O",
+            file_label(&path)
+        );
+        return;
+    }
+    let replaces = app.snapshot.override_summary.is_some() || app.snapshot.override_error.is_some();
+    if replaces {
+        app.status = format!(
+            "再按 f 确认：用 {} 覆盖档案 {profile} 现有的覆写文件（旧内容不保留）",
+            file_label(&path)
+        );
+        app.pending_override_load = Some((profile, contents));
+        return;
+    }
+    app.send(ClientCommand::SetOverride { profile, contents });
+}
+
+/// A path for one status line: the file's own name, which is what the user typed
+/// last, rather than the whole directory it sits in.
+fn file_label(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_owned())
 }
 
 fn test_current_delay(app: &mut App) {
@@ -697,6 +789,11 @@ mod tests {
 
     const OVERRIDDEN_PROFILE: &str = "覆写档案";
 
+    /// A profile that exists but is *not* the active one, listed first in the
+    /// store: a load that picked a profile by position instead of by the page's
+    /// own target would land here, and the tests would never notice otherwise.
+    const OTHER_PROFILE: &str = "另一个档案";
+
     /// Two enabled fragments, so a flip is visible in the file.
     const TWO_FRAGMENTS: &str = r#"{"fragments":[
         {"id":"private-direct","label":"内网直连","enabled":true,
@@ -717,10 +814,13 @@ mod tests {
         text: Option<&str>,
     ) -> (App, tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("temporary data directory");
+        // `OTHER_PROFILE` is listed first on purpose: the active profile is the
+        // second, so anything that resolves a target by position instead of by
+        // the page's own target lands on the wrong file and a test says so.
         std::fs::write(
             dir.path().join("profiles.toml"),
             format!(
-                "active = \"{OVERRIDDEN_PROFILE}\"\n\n[[profiles]]\nname = \"{OVERRIDDEN_PROFILE}\"\nurl = \"\"\nsource = \"fixture\"\nlast_updated = 0\n"
+                "active = \"{OVERRIDDEN_PROFILE}\"\n\n[[profiles]]\nname = \"{OTHER_PROFILE}\"\nurl = \"\"\nsource = \"fixture\"\nlast_updated = 0\n\n[[profiles]]\nname = \"{OVERRIDDEN_PROFILE}\"\nurl = \"\"\nsource = \"fixture\"\nlast_updated = 0\n"
             ),
         )
         .expect("a seeded profile store");
@@ -1088,6 +1188,306 @@ mod tests {
             "nothing to confirm, and the reason is said: {}",
             app.status
         );
+    }
+
+    /// A fragment list, distinct from the fixture's own document so the two are
+    /// never confused on disk.
+    const INCOMING: &str = r#"{"fragments":[{"id":"lan-direct","label":"机房直连","enabled":true,
+        "overlay":{"route":{"rules":[{"action":"direct","ip_cidr":["10.0.0.0/8"]}]}}}]}"#;
+
+    /// The hand-written shape, so a load can be told apart from the fixture file
+    /// by the summary it publishes as well as by the bytes on disk.
+    const BARE_INCOMING: &str = r#"{"dns":{"tag":"from-file"}}"#;
+
+    /// Puts the file `f` will be pointed at inside the fixture's data directory,
+    /// nowhere near the `overrides/` the engine writes to.
+    fn incoming(dir: &tempfile::TempDir, text: &str) -> String {
+        let path = dir.path().join("incoming.json");
+        std::fs::write(&path, text).expect("a file to load from");
+        path.to_string_lossy().into_owned()
+    }
+
+    /// `f`, a typed path, `Enter` — the overlay's whole round trip, with the
+    /// keystrokes-to-the-caret part left out because that is the overlay's
+    /// behaviour and has its own tests.
+    fn press_f_with_path(app: &mut App, path: &str) {
+        press(app, KeyCode::Char('f'));
+        assert_eq!(
+            app.input,
+            Some(InputGoal::OverrideFile),
+            "f opens the path prompt: {}",
+            app.status
+        );
+        app.input_text = path.to_owned();
+        press(app, KeyCode::Enter);
+        assert!(app.input.is_none(), "Enter closes the prompt");
+    }
+
+    /// The gap this ticket is about: the command existed, the display existed,
+    /// and nothing sent it. This is the whole load path — a key, a path, the
+    /// engine's own answer, and the file at the sha256 name the page shows.
+    #[tokio::test]
+    async fn f_installs_a_file_written_outside_the_app_for_the_active_profile() {
+        let (mut app, dir, path) = engine_with_override_file(None).await;
+        let source = incoming(&dir, INCOMING);
+
+        press(&mut app, KeyCode::Char('f'));
+        assert!(
+            app.status.contains(OVERRIDDEN_PROFILE),
+            "the prompt names the profile the file will be written for, because \
+             the file on disk is named by its sha256 and nothing else says whose it is: {}",
+            app.status
+        );
+        app.input_text = source.clone();
+        press(&mut app, KeyCode::Enter);
+        assert!(app.input.is_none(), "Enter closes the prompt");
+        assert!(
+            app.pending_override_load.is_none(),
+            "with no file in place there is nothing to confirm overwriting"
+        );
+
+        let installed =
+            wait_until(|| std::fs::read_to_string(&path).is_ok_and(|text| text == INCOMING)).await;
+        assert!(
+            installed,
+            "the bytes reach {} verbatim, which is what they were checked against",
+            path.display()
+        );
+        let said = wait_until(|| {
+            app.refresh_snapshot();
+            app.status.contains("已保存档案")
+        })
+        .await;
+        assert!(
+            said,
+            "the engine's own success line reaches the footer: {}",
+            app.status
+        );
+        assert!(
+            !client_core::settings::override_path(dir.path(), OTHER_PROFILE).exists(),
+            "the file landed on the profile the page shows, not on the first one in the store"
+        );
+        app.refresh_snapshot();
+        let summary = app
+            .snapshot
+            .override_summary
+            .as_ref()
+            .expect("the page reads the file back from the engine");
+        assert_eq!(
+            summary.profile, OVERRIDDEN_PROFILE,
+            "the profile the page shows is the one the load wrote for"
+        );
+        assert_eq!(summary.fragments.len(), 1);
+        assert_eq!(summary.fragments[0].id, "lan-direct");
+        app.controller.shutdown();
+    }
+
+    /// A malformed document is refused by the engine before it reaches the disk
+    /// (`controller.rs` parses, then writes). The page must not re-implement that
+    /// judgement — it has to show the engine's sentence and nothing else.
+    #[tokio::test]
+    async fn a_broken_file_is_refused_by_the_engine_and_never_reaches_the_disk() {
+        let (mut app, dir, path) = engine_with_override_file(None).await;
+        let source = incoming(&dir, r#"{ "route": {"rules": }"#);
+        press_f_with_path(&mut app, &source);
+
+        let refused = wait_until(|| {
+            app.refresh_snapshot();
+            app.status.contains("不是有效的 JSON")
+        })
+        .await;
+        assert!(
+            refused,
+            "the engine's parse message, verbatim, in the footer: {}",
+            app.status
+        );
+        assert!(
+            !path.exists(),
+            "a refused load must not create the override file at {}",
+            path.display()
+        );
+        assert!(
+            app.snapshot.override_summary.is_none() && app.snapshot.override_error.is_none(),
+            "and the page still reports no override, not a half-applied one"
+        );
+        app.controller.shutdown();
+    }
+
+    /// Replacing a file the user already has is the one thing here a second press
+    /// cannot undo, so it borrows the `O` page's confirmation and its disarm.
+    #[tokio::test]
+    async fn replacing_an_existing_override_asks_once_and_another_key_withdraws_it() {
+        let (mut app, dir, path) = engine_with_override(TWO_FRAGMENTS).await;
+        let before = std::fs::read_to_string(&path).expect("the fixture's file");
+        let source = incoming(&dir, BARE_INCOMING);
+
+        press_f_with_path(&mut app, &source);
+        assert_eq!(
+            app.pending_override_load
+                .as_ref()
+                .map(|(profile, _)| profile.as_str()),
+            Some(OVERRIDDEN_PROFILE),
+            "the bytes wait for a second press, addressed to the profile shown"
+        );
+        assert!(
+            app.status.contains("再按 f") && app.status.contains(OVERRIDDEN_PROFILE),
+            "the prompt names the key and the profile: {}",
+            app.status
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("still readable"),
+            before,
+            "asking writes nothing"
+        );
+
+        press(&mut app, KeyCode::Down);
+        assert!(
+            app.pending_override_load.is_none(),
+            "a different key must withdraw the offer, as it does for O"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("untouched"),
+            before,
+            "and withdrawing must not have sent anything"
+        );
+
+        press_f_with_path(&mut app, &source);
+        press(&mut app, KeyCode::Char('f'));
+        let replaced =
+            wait_until(|| std::fs::read_to_string(&path).is_ok_and(|text| text == BARE_INCOMING))
+                .await;
+        assert!(replaced, "the second press installs the new document");
+        app.refresh_snapshot();
+        assert!(
+            app.pending_override_load.is_none(),
+            "and the confirmation is spent, not left standing"
+        );
+        assert!(
+            app.snapshot
+                .override_summary
+                .as_ref()
+                .is_some_and(|summary| summary.implicit),
+            "the loaded bare object is what the page now describes"
+        );
+        app.controller.shutdown();
+    }
+
+    /// The two failures the engine cannot report because it never saw the file:
+    /// no file to read, and a file holding nothing. The second one matters most —
+    /// blank text is the engine's *clear* command, so a load that passed it
+    /// through would delete an override the user meant to replace.
+    #[tokio::test]
+    async fn an_unreadable_or_blank_file_is_answered_before_any_command_is_sent() {
+        let (mut app, dir, path) = engine_with_override_file(None).await;
+
+        let missing = dir
+            .path()
+            .join("nowhere.json")
+            .to_string_lossy()
+            .into_owned();
+        press_f_with_path(&mut app, &missing);
+        assert!(
+            app.status.contains("nowhere.json"),
+            "the refusal names the path the user typed: {}",
+            app.status
+        );
+        assert!(app.pending_override_load.is_none());
+        assert!(!path.exists(), "nothing was sent, so nothing was written");
+
+        let blank = dir.path().join("blank.json");
+        std::fs::write(&blank, "   \n").expect("a blank file");
+        press_f_with_path(&mut app, &blank.to_string_lossy());
+        assert!(
+            app.status.contains("空") && app.status.contains("清除"),
+            "a blank file is the engine's *clear*, which is a different key: {}",
+            app.status
+        );
+        assert!(app.pending_override_load.is_none());
+        assert!(!path.exists(), "and it still wrote nothing");
+
+        // An empty path has its own sentence, and nothing else in this test
+        // reaches it: with the guard gone the read of "" fails on its own and the
+        // user is told "读取  失败: …" for having pressed Enter on an empty box.
+        // Mutation P4 is what showed this branch had no claim on it.
+        press_f_with_path(&mut app, "");
+        assert!(
+            app.status.contains("不能为空"),
+            "an empty path is answered as an empty path, not as a filesystem error: {}",
+            app.status
+        );
+        assert!(app.pending_override_load.is_none());
+        assert!(!path.exists(), "and it wrote nothing either");
+        app.controller.shutdown();
+    }
+
+    /// The two clients share one engine, so the active profile can move while a
+    /// confirmation is standing. Sending then would put the armed bytes on
+    /// whoever is current now — the one outcome worse than a refused load, because
+    /// it is a configuration change nobody asked for on a profile nobody chose.
+    #[tokio::test]
+    async fn an_armed_load_refuses_when_the_page_moved_to_another_profile() {
+        let (mut app, dir, path) = engine_with_override(TWO_FRAGMENTS).await;
+        let before = std::fs::read_to_string(&path).expect("the fixture's file");
+        press_f_with_path(&mut app, &incoming(&dir, BARE_INCOMING));
+        assert!(
+            app.pending_override_load.is_some(),
+            "the overwrite is armed: {}",
+            app.status
+        );
+
+        app.send(ClientCommand::SwitchProfile(OTHER_PROFILE.to_owned()));
+        let moved = wait_until(|| {
+            app.refresh_snapshot();
+            app.snapshot
+                .active_profile
+                .as_ref()
+                .is_some_and(|profile| profile.name == OTHER_PROFILE)
+        })
+        .await;
+        assert!(moved, "the engine never activated the other profile");
+
+        press(&mut app, KeyCode::Char('f'));
+        assert!(
+            app.pending_override_load.is_none(),
+            "the spent confirmation must not linger"
+        );
+        assert!(
+            app.status.contains("未装载") && app.status.contains(OVERRIDDEN_PROFILE),
+            "the refusal says whose file it declined to touch: {}",
+            app.status
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("untouched"),
+            before,
+            "the first profile's override survives a load that no longer belongs to it"
+        );
+        assert!(
+            !client_core::settings::override_path(dir.path(), OTHER_PROFILE).exists(),
+            "and the profile now on screen gets nothing either"
+        );
+        app.controller.shutdown();
+    }
+
+    #[tokio::test]
+    async fn f_on_a_profile_that_does_not_exist_yet_says_so_instead_of_prompting() {
+        let dir = tempfile::tempdir().expect("temporary data directory");
+        let mut app = App::new(
+            ClientController::start(dir.path().to_path_buf()),
+            dir.path().to_path_buf(),
+        );
+        app.tab = Tab::Override;
+        app.snapshot = Default::default();
+        press(&mut app, KeyCode::Char('f'));
+        assert!(
+            app.input.is_none() && app.pending_override_load.is_none(),
+            "there is no profile to own the file, so no prompt to fill"
+        );
+        assert!(
+            app.status.contains("档案"),
+            "and the reason is said: {}",
+            app.status
+        );
+        app.controller.shutdown();
     }
 
     #[tokio::test]

@@ -137,7 +137,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         }
         Tab::Settings => "n 新增  ·  e 编辑  ·  Delete 删除  ·  d 下载内核  ·  a/P/U 选项",
         Tab::Rules => "入站与规则来自内核正在使用的配置  ·  r 返回日志",
-        Tab::Override => "只读  ·  ↑↓/Enter 开关片段（下次启动生效）  ·  O 删覆写",
+        Tab::Override => "只读  ·  ↑↓/Enter 开关片段  ·  f 装载覆写  ·  O 删覆写",
     };
     let line = Line::from(vec![
         Span::styled(" ", Style::default()),
@@ -206,8 +206,11 @@ fn draw_input_overlay(frame: &mut Frame, app: &App) {
     frame.set_cursor_position(Position::new(area.left() + caret_x as u16, area.top() + 3));
 }
 
-fn draw_help_overlay(frame: &mut Frame, app: &App) {
-    let page_keys = match app.tab {
+/// The keys one page adds to the global set, as one line. It has to fit inside
+/// the help overlay's own panel (82 columns, minus the "当前页" label), which is
+/// what `every_pages_help_line_fits_the_help_overlay` measures.
+fn help_keys(tab: Tab) -> &'static str {
+    match tab {
         Tab::Dashboard => "s 启动/停止 · u 更新订阅 · p 开/关系统代理 · m 切换模式",
         Tab::Proxies => "↑↓ 选节点 · ←→ 切组 · Enter 切换 · t 测当前 · T 测全组",
         Tab::Connections => "↑↓ 选择 · x 关闭连接 · X 关闭全部 · S 切换排序 · / 关键字过滤",
@@ -216,11 +219,12 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         }
         Tab::Settings => "n 新增 · e 编辑 · Delete 删除 · d 下载内核 · a/P/U/g/y 选项",
         Tab::Rules => "只读视图 · r 返回日志",
-        Tab::Override => {
-            "只读视图 · ↑↓ 选片段 · Enter 开/关片段 · O 删除覆写文件（两次确认） · \
-             改文件请在数据目录 overrides/ 下"
-        }
-    };
+        Tab::Override => "↑↓ 选片段 · Enter 开/关片段 · f 装载覆写 · O 删覆写（两次确认）",
+    }
+}
+
+fn draw_help_overlay(frame: &mut Frame, app: &App) {
+    let page_keys = help_keys(app.tab);
     let pages = format!("Tab / 1–{}", Tab::COUNT);
     let body = vec![
         Line::from(Span::styled(
@@ -245,7 +249,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         Line::from(vec![
             Span::styled("提示  ", Style::default().fg(AMBER)),
             Span::styled(
-                "模式切换与保留系统代理退出，均需再次按对应按键确认。",
+                "模式切换、装载覆写与保留系统代理退出，均需再次按对应按键确认。",
                 Style::default().fg(TEXT),
             ),
         ]),
@@ -311,6 +315,7 @@ fn input_label(goal: &InputGoal) -> &'static str {
         InputGoal::TestUrl => "延迟测试地址",
         InputGoal::ConnFilter => "连接过滤关键字（留空 = 全部）",
         InputGoal::LogQuery => "日志关键字（留空 = 不过滤）",
+        InputGoal::OverrideFile => "覆写 JSON 文件路径（档案名见状态行）",
     }
 }
 
@@ -621,7 +626,7 @@ mod render_tests {
         // the selected fragment into view.
         let fragments_frame = frame_at(Tab::Override, fragments, 2);
         assert!(
-            fragments_frame.contains("O 删覆写"),
+            fragments_frame.contains("O 删覆写") && fragments_frame.contains("f 装载覆写"),
             "the footer is clipped to the terminal width, so a key hint that \
              does not fit is a key the user cannot discover: {fragments_frame}"
         );
@@ -662,6 +667,37 @@ mod render_tests {
             "the engine's own words, with the file named:\n{broken_frame}"
         );
         insta::assert_snapshot!("override-error", broken_frame);
+    }
+
+    /// The help overlay draws its page line with no wrap, so a long line loses
+    /// its tail in silence — the same failure the footer assertion above catches
+    /// at 100 columns, and the reason `f 装载覆写` is checked in both places.
+    #[tokio::test]
+    async fn the_override_pages_help_line_arrives_whole() {
+        let dir = tempfile::tempdir().expect("temporary data directory");
+        let controller = ClientController::start(dir.path().to_path_buf());
+        let mut app = App::new(controller, dir.path().to_path_buf());
+        app.snapshot = dense_snapshot();
+        app.tab = Tab::Override;
+        app.show_help = true;
+        app.dir = std::path::PathBuf::from("<DATA_DIR>");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 32)).expect("terminal");
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("frame draws");
+        let rendered = terminal.backend().to_string();
+        app.controller.shutdown();
+        let keys = help_keys(Tab::Override);
+        assert!(
+            rendered.contains(keys),
+            "the override page's key line was cut inside the help overlay \
+             ({keys}), so its last key is one nobody can read:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("装载覆写") && rendered.contains("删覆写"),
+            "both override actions are named in the overlay:\n{rendered}"
+        );
     }
 
     /// The rules view is its own tab (index 5, titled 入站); the Logs tab's `r`
