@@ -313,6 +313,12 @@ pub fn obtain_with_runtime<C: crate::runtime::Clock>(
 ) -> Result<ValidatedCertificate, CertificateError> {
     require_direct(config)?;
     let webroot = store.acme_webroot();
+    std::fs::create_dir_all(&webroot).map_err(|error| {
+        CertificateError::Certbot(format!(
+            "could not create ACME webroot {}: {error}",
+            webroot.display()
+        ))
+    })?;
     let webroot = webroot.to_string_lossy();
     let mut args: Vec<&str> = vec![
         "certonly",
