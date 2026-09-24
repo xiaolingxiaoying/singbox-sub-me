@@ -8,14 +8,123 @@ use serde_json::{Value, json};
 use std::io::Write;
 
 use super::{
-    AI_DOMAIN_SUFFIXES, AUTO_TAG, DIRECT_TAG, FAKE_IP_FILTER_SUFFIXES, SELECTOR_TAG,
-    client_outbounds,
+    AI_DOMAIN_SUFFIXES, AI_TAG, AUTO_TAG, DIRECT_TAG, FAKE_IP_FILTER_SUFFIXES, FALLBACK_TAG,
+    PROXY_TAG, SELECTOR_TAG, STREAM_TAG, TELEGRAM_TAG, client_outbounds,
 };
 use crate::canonical::CanonicalNode;
-use crate::config::{CertificateMode, DeploymentConfig, ManagedProtocol, SubscriptionMode};
+use crate::config::{
+    CertificateMode, ClientRuleProfile, DeploymentConfig, ManagedProtocol, SubscriptionMode,
+};
 use crate::subscription::artifacts::SubscriptionError;
 use crate::subscription::profile::SingBoxVersionProfile;
-use crate::subscription::{GroupRole, OutboundRole, RuleMatcher, TemplateSpec};
+use crate::subscription::template::{GroupMember, GroupTag};
+use crate::subscription::{GroupRole, GroupSpec, RuleMatcher, TemplateSpec};
+
+/// The outbound a pre-1.11 core blocks traffic with. Route rule actions arrived
+/// in 1.11.0 and the `block` outbound was removed in 1.13.0, so this tag only
+/// ever appears in the 1.10 profile, where `action: reject` does not exist.
+const LEGACY_BLOCK_TAG: &str = "block-out";
+
+/// A group's member list expanded into sing-box outbound tags, in declaration
+/// order. [`GroupMember::AllNodes`] is the canonical node order, so a group can
+/// never drift from the outbounds the same artifact carries.
+fn group_members<'a>(group: &GroupSpec, node_tags: &'a [&'a str]) -> Vec<&'a str> {
+    let mut members = Vec::new();
+    for member in &group.members {
+        match member {
+            GroupMember::Group(tag) => members.push(sing_box_tag(*tag)),
+            GroupMember::BuiltinDirect => members.push(DIRECT_TAG),
+            GroupMember::AllNodes => members.extend(node_tags.iter().copied()),
+        }
+    }
+    members
+}
+
+/// Maps a template group identity to the sing-box tag vocabulary. `🚀节点选择`,
+/// `♻️自动选择` and `direct` are the tags every released artifact already
+/// carries; the rest are new groups the richer templates declare, and they share
+/// their spelling with clash because nothing has to translate them.
+fn sing_box_tag(tag: GroupTag) -> &'static str {
+    match tag {
+        GroupTag::Selector => SELECTOR_TAG,
+        GroupTag::Auto => AUTO_TAG,
+        GroupTag::Direct => DIRECT_TAG,
+        // Never reached: `purpose_groups` declares the fallback group clash-only,
+        // and the referential test below would catch a rule naming it anyway.
+        GroupTag::Fallback => FALLBACK_TAG,
+        GroupTag::Proxy => PROXY_TAG,
+        GroupTag::Ai => AI_TAG,
+        GroupTag::Stream => STREAM_TAG,
+        GroupTag::Telegram => TELEGRAM_TAG,
+        GroupTag::Reject => LEGACY_BLOCK_TAG,
+    }
+}
+
+/// The verdict half of a route rule, as the field pair sing-box expects.
+fn sing_box_verdict(target: GroupTag, legacy_route: bool) -> serde_json::Map<String, Value> {
+    let verdict = if target == GroupTag::Reject {
+        // 1.10 has no rule actions, so the block verdict is an outbound there.
+        if legacy_route {
+            json!({"outbound": LEGACY_BLOCK_TAG})
+        } else {
+            json!({"action": "reject"})
+        }
+    } else {
+        json!({"outbound": sing_box_tag(target)})
+    };
+    verdict
+        .as_object()
+        .expect("a verdict is a JSON object")
+        .clone()
+}
+
+/// The matcher half of a route rule: one object per rule the matcher expands
+/// into. [`RuleMatcher::Cn`] yields two (sing-box rejects a rule that mixes
+/// domain and IP matchers), and a rule-set whose tags this core has no URL for
+/// yields none, which is how a clash-only entry stays out of this artifact.
+fn sing_box_matchers(
+    spec: &TemplateSpec,
+    matcher: RuleMatcher,
+    twin: Option<RuleMatcher>,
+    remote_rule_sets: bool,
+) -> Vec<Value> {
+    let rule_set_urls = |tag: &str| {
+        spec.rule_sets
+            .iter()
+            .any(|entry| entry.tag == tag && entry.sing_box_url.is_some())
+    };
+    match matcher {
+        RuleMatcher::Private => vec![json!({"ip_is_private": true})],
+        RuleMatcher::AiDomains => vec![json!({"domain_suffix": AI_DOMAIN_SUFFIXES})],
+        RuleMatcher::Cn => vec![
+            json!({"domain_suffix": RuleMatcher::CN_DOMAINS}),
+            json!({"ip_cidr": RuleMatcher::CN_ADDRESSES}),
+        ],
+        RuleMatcher::DomainSuffix(suffixes) => vec![json!({"domain_suffix": suffixes})],
+        RuleMatcher::IpCidr(cidrs) => vec![json!({"ip_cidr": cidrs})],
+        RuleMatcher::RuleSet(tags) => {
+            // An entry this core has no URL for is not this renderer's content
+            // at all — in either profile. That is how the clash-only private
+            // rule sets stay out of the sing-box artifact, where `ip_is_private`
+            // above already answers the question.
+            let visible: Vec<&str> = tags
+                .iter()
+                .copied()
+                .filter(|tag| rule_set_urls(tag))
+                .collect();
+            if visible.is_empty() {
+                Vec::new()
+            } else if remote_rule_sets {
+                vec![json!({"rule_set": visible})]
+            } else {
+                // `minimal` may never name a rule CDN, so the inline twin takes
+                // over the verdict — that is the whole point of `minimal_twin`.
+                twin.map(|twin| sing_box_matchers(spec, twin, None, false))
+                    .unwrap_or_default()
+            }
+        }
+    }
+}
 
 /// The full sing-box client configuration for one version profile: log, DNS
 /// (fake-ip with a direct resolver and a proxied DoH fallback), the tun
@@ -45,30 +154,53 @@ pub(crate) fn sing_box_full(
     }
     let nodes = &compatible_nodes;
     let spec = TemplateSpec::for_template(config, config.client_template.clone());
+    let remote_rule_sets = config.client_rule_profile == ClientRuleProfile::Standard;
     let node_tags: Vec<&str> = nodes.iter().map(CanonicalNode::tag).collect();
     let mut outbounds = client_outbounds(config, nodes);
-    let mut selector_members: Vec<&str> = vec![AUTO_TAG, DIRECT_TAG];
-    selector_members.extend(node_tags.iter().copied());
-    for group in &spec.groups {
+    for group in spec
+        .groups
+        .iter()
+        .filter(|group| group.renderers.includes_sing_box())
+    {
+        let tag = sing_box_tag(group.tag);
+        let members = group_members(group, &node_tags);
         match group.role {
             GroupRole::Selector => outbounds.push(json!({
                 "type": "selector",
-                "tag": SELECTOR_TAG,
-                "outbounds": selector_members,
+                "tag": tag,
+                "outbounds": members,
                 "interrupt_exist_connections": false
             })),
             GroupRole::UrlTest => outbounds.push(json!({
                 "type": "urltest",
-                "tag": AUTO_TAG,
-                "outbounds": node_tags,
+                "tag": tag,
+                "outbounds": members,
                 "url": config.client_latency_probe_url,
                 "interval": "5m",
                 "tolerance": 50,
                 "idle_timeout": "30m"
             })),
-            GroupRole::Direct => outbounds.push(json!({"type": "direct", "tag": DIRECT_TAG})),
+            GroupRole::Direct => {
+                // A sing-box `direct` outbound takes no members: the template's
+                // member list is the clash group's `DIRECT` + node list.
+                outbounds.push(json!({"type": "direct", "tag": tag}));
+            }
+            GroupRole::Fallback => {
+                // sing-box has no failover outbound type, and quietly rendering
+                // the template's fallback group as a second urltest would give
+                // the artifact a group that does not behave like its name. The
+                // catalog declares this group clash-only; nothing to emit here.
+            }
         }
     }
+    // A reject verdict on a pre-1.11 core needs the block outbound to exist;
+    // counted after the loop because only the emitted rules know.
+    let needs_block_outbound = !profile.route_rule_actions
+        && spec
+            .inline_rules
+            .iter()
+            .filter(|rule| rule.renderers.includes_sing_box())
+            .any(|rule| rule.outbound == GroupTag::Reject);
 
     let fake_ip = config.client_dns_mode == crate::config::ClientDnsMode::FakeIp;
     let dns_spec = &spec.dns;
@@ -117,9 +249,7 @@ pub(crate) fn sing_box_full(
     }
     dns_rules.push(json!({"clash_mode": "Direct", "server": dns_spec.direct_tag}));
     dns_rules.push(json!({"clash_mode": "Global", "server": dns_spec.proxy_tag}));
-    if config.client_rule_profile == crate::config::ClientRuleProfile::Standard
-        && let Some(rule_set) = dns_spec.direct_rule_set
-    {
+    if remote_rule_sets && let Some(rule_set) = dns_spec.direct_rule_set {
         dns_rules.push(json!({"rule_set": [rule_set], "server": dns_spec.direct_tag}));
     }
     dns_rules.push(json!({
@@ -169,23 +299,22 @@ pub(crate) fn sing_box_full(
         .iter()
         .filter(|rule| rule.renderers.includes_sing_box())
     {
-        let outbound = match rule.outbound {
-            OutboundRole::Selector => SELECTOR_TAG,
-            OutboundRole::Direct => DIRECT_TAG,
-        };
-        match rule.matcher {
-            RuleMatcher::Private => {
-                route_rules.push(json!({"ip_is_private": true, "outbound": outbound}))
+        let verdict = sing_box_verdict(rule.outbound, legacy_route);
+        for mut fields in
+            sing_box_matchers(&spec, rule.matcher, rule.minimal_twin, remote_rule_sets)
+        {
+            // Matchers first, verdict last: the key order the goldens pin.
+            let object = fields
+                .as_object_mut()
+                .expect("a matcher expands into a JSON object");
+            for (key, value) in verdict.clone() {
+                object.insert(key, value);
             }
-            RuleMatcher::AiDomains => route_rules.push(json!({
-                "domain_suffix": AI_DOMAIN_SUFFIXES,
-                "outbound": outbound
-            })),
+            route_rules.push(fields);
         }
     }
     let mut rule_sets: Vec<Value> = Vec::new();
-    if config.client_rule_profile == crate::config::ClientRuleProfile::Standard {
-        let mut cn_rule_set_tags: Vec<&str> = Vec::new();
+    if remote_rule_sets {
         for entry in spec
             .rule_sets
             .iter()
@@ -196,18 +325,15 @@ pub(crate) fn sing_box_full(
                 .as_deref()
                 .expect("a sing-box rule-set carries a URL");
             rule_sets.push(remote_rule_set(entry.tag, url));
-            cn_rule_set_tags.push(entry.tag);
         }
-        route_rules.push(json!({"rule_set": cn_rule_set_tags, "outbound": DIRECT_TAG}));
     }
     if legacy_route {
         outbounds.push(json!({"type": "dns", "tag": "dns-out"}));
     }
-    let final_group = match spec.final_group {
-        GroupRole::Selector => SELECTOR_TAG,
-        GroupRole::UrlTest => AUTO_TAG,
-        GroupRole::Direct => DIRECT_TAG,
-    };
+    if needs_block_outbound {
+        outbounds.push(json!({"type": "block", "tag": LEGACY_BLOCK_TAG}));
+    }
+    let final_group = sing_box_tag(spec.final_group);
     let mut route = json!({
         "rules": route_rules,
         "rule_set": rule_sets,

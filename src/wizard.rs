@@ -480,6 +480,16 @@ pub fn run_topic<C: Prompts>(
             // this topic mutates them directly and returns before the shared
             // apply_options path so an unchanged deployment still detects.
             let mut new = existing.clone();
+            // Asked first because it is the axis the rest of the answers feed:
+            // the template decides which groups, rule-sets and routing verdicts
+            // exist, and only then does `client_rule_profile` decide whether the
+            // external rule-sets are reachable (ADR-0022).
+            new.client_template = ask_required(
+                prompts,
+                "客户端内容模板（1 standard 历史结构 / 2 global 全局代理，仅局域网直连 / 3 split 分流，CN 与局域网直连、广告阻断）",
+                Some(new.client_template.to_string()),
+                parse_client_template,
+            )?;
             new.client_dns_mode = ask_required(
                 prompts,
                 "客户端 DNS 模式（1 fake-ip / 2 redir-host）",
@@ -873,6 +883,19 @@ fn parse_rule_profile(value: &str) -> Result<crate::config::ClientRuleProfile, S
     }
 }
 
+/// The client content template axis (ADR-0022). This is the only place an
+/// administrator can reach `global` / `split`: the flag-free surface is the
+/// wizard and the `sbctl menu` 客户端模板 entry that drives it.
+fn parse_client_template(value: &str) -> Result<crate::subscription::ClientTemplate, String> {
+    use crate::subscription::ClientTemplate;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "standard" | "1" => Ok(ClientTemplate::Standard),
+        "global" | "2" => Ok(ClientTemplate::Global),
+        "split" | "3" => Ok(ClientTemplate::Split),
+        _ => Err("内容模板必须是 standard、global 或 split".to_owned()),
+    }
+}
+
 fn parse_http_url(value: &str) -> Result<String, String> {
     let value = value.trim().to_owned();
     if value.starts_with("http://") || value.starts_with("https://") {
@@ -944,6 +967,69 @@ mod tests {
 
     fn empty_answers(count: usize) -> Vec<&'static str> {
         vec![""; count]
+    }
+
+    /// The template axis is only real if an administrator can move it: this
+    /// topic used to ask about everything *except* `client_template`.
+    #[test]
+    fn the_client_template_topic_moves_the_template_axis_and_nothing_else() {
+        use crate::config::{ClientDnsMode, ClientRuleProfile};
+        use crate::subscription::ClientTemplate;
+
+        let config = ip_fallback_config();
+        // One answer per question, in prompt order: template, DNS mode, rule
+        // profile, rule-set base URL, latency probe URL.
+        let answers = ["3", "", "", "", ""];
+        let mut prompts = ScriptPrompts::new(&answers, &[true]);
+
+        let outcome = run_topic(&config, ConfigurationTopic::ClientTemplate, &mut prompts)
+            .expect("the client template topic completes");
+
+        let WizardOutcome::Changed(updated) = outcome else {
+            panic!("selecting split must produce a new configuration");
+        };
+        assert_eq!(updated.client_template, ClientTemplate::Split);
+        // The control: the answer that moved is the only one that moved.
+        assert_eq!(updated.client_dns_mode, ClientDnsMode::FakeIp);
+        assert_eq!(updated.client_rule_profile, ClientRuleProfile::Standard);
+        assert_eq!(
+            updated.client_rule_set_base_url,
+            config.client_rule_set_base_url
+        );
+        assert_eq!(
+            updated.client_latency_probe_url,
+            config.client_latency_probe_url
+        );
+        assert!(
+            updated.summary().contains("client content template: split"),
+            "the preview must show which template was selected"
+        );
+    }
+
+    /// A typed answer is validated, and a bad one re-prompts instead of
+    /// silently keeping the previous template.
+    #[test]
+    fn an_unknown_template_answer_is_rejected_and_re_prompted() {
+        use crate::subscription::ClientTemplate;
+
+        let config = ip_fallback_config();
+        let answers = ["nope", "2", "", "", "", ""];
+        let mut prompts = ScriptPrompts::new(&answers, &[true]);
+
+        let outcome = run_topic(&config, ConfigurationTopic::ClientTemplate, &mut prompts)
+            .expect("the wizard recovers from a bad template answer");
+
+        let WizardOutcome::Changed(updated) = outcome else {
+            panic!("a corrected template answer must produce a new configuration");
+        };
+        assert_eq!(updated.client_template, ClientTemplate::Global);
+        assert!(
+            prompts
+                .reports()
+                .iter()
+                .any(|message| message.contains("内容模板必须是 standard、global 或 split")),
+            "the rejected answer has to say what it expected"
+        );
     }
 
     #[test]

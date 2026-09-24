@@ -806,50 +806,560 @@ mod tests {
         assert_eq!(default_artifacts, explicit_artifacts);
     }
 
-    /// `Global` and `Split` are declared on the axis but not implemented yet:
-    /// until PR(c) they must render exactly the `Standard` bytes. The four
-    /// frozen artifacts (bare sing-box, URI, base64 URI, Shadowrocket) must be
-    /// byte-identical across all three templates regardless, because they never
-    /// pass through `sing_box_full`/`clash` (ADR-0022).
+    /// Every template, rendered through the same pinned config.
+    fn all_templates() -> [ClientTemplate; 3] {
+        [
+            ClientTemplate::Standard,
+            ClientTemplate::Global,
+            ClientTemplate::Split,
+        ]
+    }
+
+    fn render(
+        fixture: &TempDir,
+        template: ClientTemplate,
+        rule_profile: crate::config::ClientRuleProfile,
+    ) -> Vec<(String, String)> {
+        let mut config = pinned_five_protocol_config();
+        config.client_template = template;
+        config.client_rule_profile = rule_profile;
+        generated_artifacts(&config, fixture.path()).expect("artifacts generate")
+    }
+
+    fn artifact_text(artifacts: &[(String, String)], name: &str) -> String {
+        artifacts
+            .iter()
+            .find(|(artifact, _)| artifact == name)
+            .map(|(_, contents)| contents.clone())
+            .unwrap_or_else(|| panic!("missing artifact {name}"))
+    }
+
+    fn artifact_json(artifacts: &[(String, String)], name: &str) -> serde_json::Value {
+        let contents = artifact_text(artifacts, name);
+        serde_json::from_str(&contents).unwrap_or_else(|error| panic!("{name} is JSON: {error}"))
+    }
+
+    fn artifact_yaml(artifacts: &[(String, String)], name: &str) -> serde_yaml::Value {
+        let contents = artifact_text(artifacts, name);
+        serde_yaml::from_str(&contents).unwrap_or_else(|error| panic!("{name} is YAML: {error}"))
+    }
+
+    /// A template changes routing content, not the node list: the bare sing-box
+    /// profile and the three link formats are frozen across all three (ADR-0022).
+    /// The control assertions at the end are what make this falsifiable — without
+    /// them the test would also pass while `for_template` ignored its argument.
     #[test]
-    fn global_and_split_templates_are_the_standard_seam_until_pr_c() {
+    fn the_node_list_artifacts_are_byte_identical_across_templates() {
         let fixture = TempDir::new().expect("temporary root is created");
-        let mut global = pinned_five_protocol_config();
-        global.client_template = ClientTemplate::Global;
-        let mut split = pinned_five_protocol_config();
-        split.client_template = ClientTemplate::Split;
-        let standard = generated_artifacts(&pinned_five_protocol_config(), fixture.path())
-            .expect("standard artifacts generate");
-        let global =
-            generated_artifacts(&global, fixture.path()).expect("global artifacts generate");
-        let split = generated_artifacts(&split, fixture.path()).expect("split artifacts generate");
+        let standard = render(
+            &fixture,
+            ClientTemplate::Standard,
+            crate::config::ClientRuleProfile::Standard,
+        );
+        for template in [ClientTemplate::Global, ClientTemplate::Split] {
+            let artifacts = render(
+                &fixture,
+                template.clone(),
+                crate::config::ClientRuleProfile::Standard,
+            );
+            for name in [
+                "subscription-sing-box.json",
+                "subscription-uri.txt",
+                "subscription-base64-uri.txt",
+                "subscription-shadowrocket.txt",
+            ] {
+                assert_eq!(
+                    artifact_text(&standard, name),
+                    artifact_text(&artifacts, name),
+                    "{name} must stay frozen under the {template} template"
+                );
+            }
+            for name in [
+                "subscription-sing-box-full.json",
+                "subscription-clash.yaml",
+                "subscription-clash-1.18.yaml",
+            ] {
+                assert_ne!(
+                    artifact_text(&standard, name),
+                    artifact_text(&artifacts, name),
+                    "{name} is where a template is allowed to differ; equal bytes mean \
+                     the template argument is being ignored"
+                );
+            }
+        }
+    }
 
-        assert_eq!(standard, global, "Global must equal Standard until PR(c)");
-        assert_eq!(standard, split, "Split must equal Standard until PR(c)");
-
-        let artifact = |artifacts: &[(String, String)], name: &str| -> String {
-            artifacts
-                .iter()
-                .find(|(artifact, _)| artifact == name)
-                .map(|(_, contents)| contents.clone())
-                .unwrap_or_else(|| panic!("missing artifact {name}"))
+    /// The richer templates have to actually be richer: more groups, more rule
+    /// sets, and a CN verdict that is theirs rather than `Standard`'s. Asserting
+    /// on counts *and* on named tags is what keeps a catalog that grew one entry
+    /// and renamed nothing honest.
+    #[test]
+    fn the_richer_templates_add_groups_rule_sets_and_their_own_cn_verdict() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let standard = render(
+            &fixture,
+            ClientTemplate::Standard,
+            crate::config::ClientRuleProfile::Standard,
+        );
+        let full = |artifacts: &[(String, String)]| {
+            artifact_json(artifacts, "subscription-sing-box-full.json")
         };
-        for name in [
-            "subscription-sing-box.json",
-            "subscription-uri.txt",
-            "subscription-base64-uri.txt",
-            "subscription-shadowrocket.txt",
-        ] {
-            assert_eq!(
-                artifact(&standard, name),
-                artifact(&global, name),
-                "{name} must stay frozen across templates"
+        let groups = |value: &serde_json::Value| -> Vec<String> {
+            value["outbounds"]
+                .as_array()
+                .expect("outbounds is an array")
+                .iter()
+                .filter(|outbound| {
+                    matches!(
+                        outbound["type"].as_str(),
+                        Some("selector") | Some("urltest")
+                    )
+                })
+                .map(|outbound| {
+                    outbound["tag"]
+                        .as_str()
+                        .expect("a group has a tag")
+                        .to_owned()
+                })
+                .collect()
+        };
+        let rule_sets = |value: &serde_json::Value| -> Vec<String> {
+            value["route"]["rule_set"]
+                .as_array()
+                .expect("rule_set is an array")
+                .iter()
+                .map(|entry| {
+                    entry["tag"]
+                        .as_str()
+                        .expect("a rule-set has a tag")
+                        .to_owned()
+                })
+                .collect()
+        };
+
+        let standard_value = full(&standard);
+        let standard_groups = groups(&standard_value);
+        let standard_rule_sets = rule_sets(&standard_value);
+        assert_eq!(
+            standard_groups.len(),
+            2,
+            "standard ships exactly the manual and automatic groups"
+        );
+        assert_eq!(standard_rule_sets.len(), 2);
+
+        for template in [ClientTemplate::Global, ClientTemplate::Split] {
+            let artifacts = render(
+                &fixture,
+                template.clone(),
+                crate::config::ClientRuleProfile::Standard,
             );
-            assert_eq!(
-                artifact(&standard, name),
-                artifact(&split, name),
-                "{name} must stay frozen across templates"
+            let value = full(&artifacts);
+            let tags = groups(&value);
+            let sets = rule_sets(&value);
+            assert!(
+                tags.len() > standard_groups.len(),
+                "{template} must declare more groups than standard: {tags:?}"
             );
+            assert!(
+                sets.len() > standard_rule_sets.len(),
+                "{template} must reference more rule-sets than standard: {sets:?}"
+            );
+            for expected in [
+                "🚀节点选择",
+                "♻️自动选择",
+                "🔰代理分组",
+                "🤖AI服务",
+                "🎬流媒体",
+                "📲Telegram",
+            ] {
+                assert!(
+                    tags.iter().any(|tag| tag == expected),
+                    "{template} must keep {expected} reachable as a group; got {tags:?}"
+                );
+            }
+            for expected in [
+                "geosite-ads",
+                "geosite-openai",
+                "geosite-netflix",
+                "geosite-telegram",
+            ] {
+                assert!(
+                    sets.iter().any(|tag| tag == expected),
+                    "{template} must download {expected}; got {sets:?}"
+                );
+            }
+            // The clash-only fallback group is a real difference between the
+            // formats, not an oversight: sing-box has no such outbound type.
+            let clash = artifact_yaml(&artifacts, "subscription-clash.yaml");
+            let clash_groups: Vec<&str> = clash["proxy-groups"]
+                .as_sequence()
+                .expect("proxy-groups is a sequence")
+                .iter()
+                .map(|group| group["name"].as_str().expect("a group has a name"))
+                .collect();
+            assert!(
+                clash_groups.len() > 3,
+                "{template} must grow the clash groups too: {clash_groups:?}"
+            );
+            assert!(clash_groups.contains(&"⚠️故障转移"));
+            assert!(
+                !artifact_text(&artifacts, "subscription-sing-box-full.json")
+                    .contains("⚠️故障转移"),
+                "sing-box must not be handed a group it cannot build"
+            );
+        }
+
+        // And the two templates disagree where the spec says they must: `split`
+        // sends China direct, `global` sends it to the proxy group.
+        let global = full(&render(
+            &fixture,
+            ClientTemplate::Global,
+            crate::config::ClientRuleProfile::Standard,
+        ));
+        let split = full(&render(
+            &fixture,
+            ClientTemplate::Split,
+            crate::config::ClientRuleProfile::Standard,
+        ));
+        let cn_verdict = |value: &serde_json::Value| -> Vec<String> {
+            value["route"]["rules"]
+                .as_array()
+                .expect("rules is an array")
+                .iter()
+                .filter(|rule| {
+                    rule.get("rule_set").is_some_and(|sets| {
+                        sets.as_array()
+                            .expect("rule_set is an array")
+                            .iter()
+                            .any(|set| set == "geosite-cn" || set == "geoip-cn")
+                    })
+                })
+                .map(|rule| {
+                    rule.get("outbound")
+                        .map(|outbound| outbound.to_string())
+                        .unwrap_or_else(|| format!("action:{:?}", rule["action"]))
+                })
+                .collect()
+        };
+        assert_eq!(cn_verdict(&standard_value), vec!["\"direct\"".to_owned()]);
+        assert_eq!(cn_verdict(&split), vec!["\"direct\"".to_owned()]);
+        assert_eq!(cn_verdict(&global), vec!["\"🔰代理分组\"".to_owned()]);
+    }
+
+    /// The ADR-0022 regression this phase exists to close: `minimal` may never
+    /// contact a rule CDN, but it must keep routing. Under every template, no
+    /// artifact may name a rule-set URL, and every verdict has to survive as an
+    /// inline rule.
+    #[test]
+    fn minimal_rule_profile_names_no_rule_cdn_under_any_template() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let base_url = pinned_five_protocol_config().client_rule_set_base_url;
+        for template in all_templates() {
+            let artifacts = render(
+                &fixture,
+                template.clone(),
+                crate::config::ClientRuleProfile::Minimal,
+            );
+            for (name, contents) in &artifacts {
+                for forbidden in [&base_url, "@sing/geo", "@meta/geo", ".srs", ".mrs"] {
+                    assert!(
+                        !contents.contains(forbidden),
+                        "{template}/minimal wrote a rule CDN reference into {name}: {forbidden}"
+                    );
+                }
+            }
+            let full = artifact_json(&artifacts, "subscription-sing-box-full.json");
+            assert!(
+                full["route"]["rule_set"]
+                    .as_array()
+                    .expect("rule_set is an array")
+                    .is_empty(),
+                "{template}/minimal must download no rule-set"
+            );
+            for section in [
+                full["route"]["rules"].as_array().expect("route rules"),
+                full["dns"]["rules"].as_array().expect("dns rules"),
+            ] {
+                for rule in section {
+                    assert!(
+                        rule.get("rule_set").is_none(),
+                        "{template}/minimal left a rule_set matcher in place: {rule}"
+                    );
+                }
+            }
+            // Routing still works: LAN stays direct, the ads verdict is still a
+            // verdict, and CN still has a twin instead of falling through.
+            let rules = full["route"]["rules"].as_array().expect("route rules");
+            let direct_rules: Vec<&serde_json::Value> = rules
+                .iter()
+                .filter(|rule| rule["outbound"] == "direct")
+                .collect();
+            assert!(
+                direct_rules
+                    .iter()
+                    .any(|rule| rule["ip_is_private"] == true),
+                "{template}/minimal must still send private addresses direct"
+            );
+            let text = artifact_text(&artifacts, "subscription-sing-box-full.json");
+            // The regression this closes: with no rule-set and no twin, every CN
+            // destination used to fall through to the proxy group.
+            assert!(
+                text.contains("baidu.com"),
+                "{template}/minimal must still name the CN domains inline"
+            );
+            assert!(
+                text.contains("doubleclick.net") || template == ClientTemplate::Standard,
+                "{template}/minimal must still block ads inline"
+            );
+            assert!(
+                text.contains("27.192.0.0/11") || template == ClientTemplate::Global,
+                "{template}/minimal must still carry the coarse CN addresses"
+            );
+            for name in ["subscription-clash.yaml", "subscription-clash-1.18.yaml"] {
+                let clash = artifact_text(&artifacts, name);
+                assert!(
+                    !clash.contains("RULE-SET,") && !clash.contains("rule-providers:"),
+                    "{name} under {template}/minimal must not reference a rule-set"
+                );
+                assert!(
+                    clash.contains("DOMAIN-SUFFIX,doubleclick.net,REJECT")
+                        || template == ClientTemplate::Standard,
+                    "{name} under {template}/minimal must keep the ads verdict inline"
+                );
+                assert!(
+                    clash.contains("GEOIP,CN,DIRECT") || template == ClientTemplate::Global,
+                    "{name} under {template}/minimal must keep the CN verdict inline"
+                );
+                assert!(
+                    clash.contains("DOMAIN-SUFFIX,baidu.com") || template != ClientTemplate::Global,
+                    "{name} under global/minimal routes CN to the proxy group by name"
+                );
+                assert!(clash.contains("MATCH,"), "{name} must keep a final verdict");
+            }
+        }
+    }
+
+    /// Every structural claim the per-minor tests already make, re-made for the
+    /// two new templates — plus the referential integrity a real `sing-box check`
+    /// would fail on and no test here can run: a rule that names an outbound or
+    /// rule-set that the artifact does not declare, an empty matcher list (which
+    /// matches *everything*), and a rule that mixes domain and IP matchers.
+    #[test]
+    fn every_template_and_minor_renders_a_referentially_sound_profile() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        for template in all_templates() {
+            for rule_profile in [
+                crate::config::ClientRuleProfile::Standard,
+                crate::config::ClientRuleProfile::Minimal,
+            ] {
+                let artifacts = render(&fixture, template.clone(), rule_profile.clone());
+                for profile in SING_BOX_VERSION_PROFILES {
+                    let name = format!("subscription-sing-box-{}.json", profile.version);
+                    let value = artifact_json(&artifacts, &name);
+                    let declared: Vec<&str> = value["outbounds"]
+                        .as_array()
+                        .expect("outbounds is an array")
+                        .iter()
+                        .map(|outbound| outbound["tag"].as_str().expect("an outbound has a tag"))
+                        .collect();
+                    let sets: Vec<&str> = value["route"]["rule_set"]
+                        .as_array()
+                        .expect("rule_set is an array")
+                        .iter()
+                        .map(|entry| entry["tag"].as_str().expect("a rule-set has a tag"))
+                        .collect();
+                    assert!(
+                        declared.contains(&value["route"]["final"].as_str().expect("route.final")),
+                        "{name}: route.final must name a declared outbound"
+                    );
+                    for outbound in value["outbounds"].as_array().expect("outbounds") {
+                        if !matches!(
+                            outbound["type"].as_str(),
+                            Some("selector") | Some("urltest")
+                        ) {
+                            continue;
+                        }
+                        for member in outbound["outbounds"].as_array().expect("group members") {
+                            assert!(
+                                declared
+                                    .contains(&member.as_str().expect("a member is a tag string")),
+                                "{name}: group {} names {}, which is not an outbound",
+                                outbound["tag"],
+                                member
+                            );
+                        }
+                    }
+                    for rule in value["route"]["rules"].as_array().expect("route rules") {
+                        if let Some(outbound) = rule.get("outbound") {
+                            assert!(
+                                declared
+                                    .contains(&outbound.as_str().expect("an outbound is a tag")),
+                                "{name}: a rule routes to {outbound}, which is not declared"
+                            );
+                        }
+                        for key in ["rule_set", "domain_suffix", "ip_cidr"] {
+                            if let Some(list) = rule.get(key) {
+                                assert!(
+                                    !list
+                                        .as_array()
+                                        .expect("a matcher list is an array")
+                                        .is_empty(),
+                                    "{name}: an empty {key} list matches every destination"
+                                );
+                            }
+                        }
+                        for set in rule
+                            .get("rule_set")
+                            .and_then(|value| value.as_array())
+                            .into_iter()
+                            .flatten()
+                        {
+                            assert!(
+                                sets.contains(&set.as_str().expect("a rule-set tag is a string")),
+                                "{name}: a rule uses {set}, which route.rule_set never downloads"
+                            );
+                        }
+                        assert!(
+                            !(rule.get("domain_suffix").is_some() && rule.get("ip_cidr").is_some()),
+                            "{name}: sing-box refuses a rule mixing domain and IP matchers"
+                        );
+                        if rule["action"] == "reject" {
+                            assert!(
+                                profile.route_rule_actions,
+                                "{name}: reject is a rule action only from 1.11.0"
+                            );
+                        } else {
+                            assert!(
+                                !declared.contains(&"block-out") || !profile.route_rule_actions,
+                                "{name}: only a pre-1.11 core carries a block outbound"
+                            );
+                        }
+                    }
+                    for rule in value["dns"]["rules"].as_array().expect("dns rules") {
+                        for set in rule
+                            .get("rule_set")
+                            .and_then(|value| value.as_array())
+                            .into_iter()
+                            .flatten()
+                        {
+                            assert!(
+                                sets.contains(&set.as_str().expect("a rule-set tag is a string")),
+                                "{name}: a DNS rule uses {set}, which is not downloaded"
+                            );
+                        }
+                    }
+                    // The version mechanics the existing tests pin, re-checked
+                    // through the new templates so a new rule cannot smuggle a
+                    // field past a minor that removed it.
+                    let has_node = value["outbounds"]
+                        .as_array()
+                        .expect("outbounds")
+                        .iter()
+                        .any(|outbound| outbound["tag"] == "sbctl-anytls");
+                    assert_eq!(has_node, profile.supports_anytls, "{name}: AnyTLS gating");
+                    assert_eq!(
+                        value["inbounds"][0].get("stack").and_then(|v| v.as_str()),
+                        profile.tun_stack,
+                        "{name}: tun stack"
+                    );
+                    assert_eq!(
+                        value["inbounds"][0]["sniff"] == true,
+                        !profile.route_rule_actions,
+                        "{name}: inbound sniff is the 1.10 form only"
+                    );
+                    assert_eq!(
+                        value["experimental"]["cache_file"]
+                            .get("store_dns")
+                            .is_some(),
+                        profile.supports_store_dns,
+                        "{name}: store_dns gating"
+                    );
+                    assert_eq!(
+                        value["route"].get("default_domain_resolver").is_some(),
+                        profile.typed_dns,
+                        "{name}: default_domain_resolver gating"
+                    );
+                    if profile.typed_dns {
+                        assert!(
+                            value["dns"]["servers"]
+                                .as_array()
+                                .expect("dns servers")
+                                .iter()
+                                .all(|server| server.get("type").is_some())
+                        );
+                    }
+                }
+                // The clash side: every rule target has to exist as far as mihomo
+                // is concerned, or the whole configuration is rejected at load.
+                for name in ["subscription-clash.yaml", "subscription-clash-1.18.yaml"] {
+                    let clash = artifact_yaml(&artifacts, name);
+                    let mut known: Vec<String> = clash["proxies"]
+                        .as_sequence()
+                        .expect("proxies")
+                        .iter()
+                        .map(|node| {
+                            node["name"]
+                                .as_str()
+                                .expect("a proxy has a name")
+                                .to_owned()
+                        })
+                        .collect();
+                    known.extend(
+                        clash["proxy-groups"]
+                            .as_sequence()
+                            .expect("proxy-groups")
+                            .iter()
+                            .map(|group| {
+                                group["name"]
+                                    .as_str()
+                                    .expect("a group has a name")
+                                    .to_owned()
+                            }),
+                    );
+                    for group in clash["proxy-groups"].as_sequence().expect("proxy-groups") {
+                        for member in group["proxies"].as_sequence().expect("a group has members") {
+                            let member = member.as_str().expect("a member is a name");
+                            assert!(
+                                known.contains(&member.to_owned()) || member == "DIRECT",
+                                "{name}: group {group:?} offers {member}, which does not exist",
+                                group = group["name"]
+                            );
+                        }
+                    }
+                    let provider_tags: Vec<String> = clash["rule-providers"]
+                        .as_mapping()
+                        .cloned()
+                        .unwrap_or_default()
+                        .keys()
+                        .map(|key| key.as_str().expect("a provider key is a string").to_owned())
+                        .collect();
+                    for rule in clash["rules"].as_sequence().expect("rules") {
+                        let rule = rule.as_str().expect("a clash rule is a string");
+                        // `IP-CIDR,<cidr>,<target>,no-resolve` carries a trailing
+                        // option, so its target is not the last field.
+                        let target = if rule.starts_with("IP-CIDR,") {
+                            rule.split(',').nth(2)
+                        } else {
+                            rule.split(',').next_back()
+                        };
+                        let Some(target) = target else { continue };
+                        assert!(
+                            known.contains(&target.to_owned())
+                                || matches!(target, "DIRECT" | "REJECT" | "PASS"),
+                            "{name}: rule `{rule}` targets a group that does not exist"
+                        );
+                        if let Some(tag) = rule
+                            .strip_prefix("RULE-SET,")
+                            .and_then(|rest| rest.split(',').next())
+                        {
+                            assert!(
+                                provider_tags.iter().any(|provider| provider == tag),
+                                "{name}: rule references {tag}, which rule-providers omits"
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 

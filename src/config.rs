@@ -80,8 +80,10 @@ pub struct DeploymentConfig {
     #[serde(default = "default_client_rule_profile")]
     pub client_rule_profile: ClientRuleProfile,
     /// Client content template (ADR-0022): `standard` reproduces the historical
-    /// artifact structure; `global` and `split` are declared and will gain
-    /// richer content in PR(c).
+    /// artifact structure byte-for-byte, `global` proxies everything but private
+    /// destinations, `split` sends CN and private destinations direct and blocks
+    /// ads. The default stays `standard`, because a flipped default rewrites
+    /// every client artifact and restarts the managed core on upgrade.
     #[serde(default = "default_client_template")]
     pub client_template: ClientTemplate,
     /// Base URL for remote rule-set downloads (jsDelivr + MetaCubeX by
@@ -877,6 +879,11 @@ impl DeploymentConfig {
             format!("accounting policy: {}", self.accounting_policy),
             format!("VPS refresh timezone: {}", self.accounting_timezone),
             format!("client display timezone: {}", self.client_display_timezone),
+            // Which content template generated the client artifacts, so the
+            // wizard preview and `sbctl status` show the axis the administrator
+            // just moved rather than leaving them to diff the artifacts.
+            format!("client content template: {}", self.client_template),
+            format!("client rule profile: {}", self.client_rule_profile),
             format!("enabled protocols: {protocols}"),
             "subscription credential: [redacted]".to_owned(),
         ];

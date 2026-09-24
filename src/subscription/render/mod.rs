@@ -113,6 +113,18 @@ pub const SELECTOR_TAG: &str = "🚀节点选择";
 pub const AUTO_TAG: &str = "♻️自动选择";
 pub(super) const DIRECT_TAG: &str = "direct";
 
+/// The tags the richer templates add. Unlike the three above, a group's name is
+/// identical in both formats — nothing historical has to stay compatible, and
+/// two spellings for one group is how a client ends up showing a group the user
+/// cannot find in their own screenshot. `client-core` discovers the manual group
+/// through `route.final`, so a new selector never breaks it as long as `final`
+/// keeps naming an existing tag.
+pub(super) const PROXY_TAG: &str = "🔰代理分组";
+pub(super) const AI_TAG: &str = "🤖AI服务";
+pub(super) const STREAM_TAG: &str = "🎬流媒体";
+pub(super) const TELEGRAM_TAG: &str = "📲Telegram";
+pub(super) const FALLBACK_TAG: &str = "⚠️故障转移";
+
 /// Domains that must never be routed through the selector, kept in one place
 /// for the sing-box full profile, the clash artifact, and their overrides.
 pub const AI_DOMAIN_SUFFIXES: &[&str] = &[
