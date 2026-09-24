@@ -77,14 +77,19 @@ SBCTL_UPSTREAM_LATEST=v1.14.1 \
 MIHOMO_BIN=~/bin/mihomo cargo test --test clash_mihomo -- --ignored --nocapture
 ```
 
-注意 `clash_mihomo` 这条**依赖外网**：`mihomo -t` 会去 GitHub 下 `geoip.metadb` 来评估内联
-`GEOIP` 规则，网络不通时报的是 `context deadline exceeded`，看起来像"工件被内核拒绝"。
-判断是不是回归，先比对该工件字节与金标准是否一致。
+`clash_mihomo` 现在覆盖 3 模板 × 2 规则档 × 2 工件 = 12 次真核运行；`version_profiles` 覆盖
+5 个内核 × 3 模板 = 15 种组合。两条腿都不再只跑默认模板（R13 之前的"这一腿证不了什么"已作废）。
+
+`minimal` 那 6 种组合已不依赖外网：工件里没有 `GEOIP`/`GEOSITE`，`mihomo -t` 0 秒返回。
+`standard` 那 6 种**今天在网络不通的情况下也通过了**，这与本文件早前"网络不通会报
+`context deadline exceeded`"的记录相矛盾，尚未解释：用一个只含 `GEOIP,CN` 的裸配置在同一个
+mihomo 上复测，确实卡在 `Can't find MMDB, start download` 并超时（45 秒被 kill），
+而换成内联 `IP-CIDR` 立刻成功。也就是说"下载 geo 库"这条路径真实存在，只是它在工件门上
+没有阻塞 `-t` 的退出。结论要分开看：`minimal` 的离线性是**用裸配置 A/B 证出来的**，不是这条门证出来的；
+这条门只回答"工件能否被真核解析"。排查线索：`.scratch/probe-mihomo-geo.sh`（裸配置对照）
+与 `.scratch/probe-mihomo-gate.sh`（门的计时）。
 
 CI 固定版本：sing-box `1.10.7 / 1.11.15 / 1.12.25 / 1.13.21 / 1.14.1`，mihomo `v1.19.30`。
-
-**这一腿今天证不了什么**：两个真核测试**只渲染默认模板**，所以 `Global`/`Split` 的工件
-从未过真核检查；把它们按模板参数化是待办（见 [code-review-2026-09-24.md](code-review-2026-09-24.md) R13）。
 
 
 ## 3. L3 — Docker 验收

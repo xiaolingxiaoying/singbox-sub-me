@@ -458,7 +458,30 @@ R17 第 5 条的猜测（两个界面接不住新错误）不成立：只读复�
 顺带确认**不是** bug 的一点：JSON 分支（`subscription.rs:272-274`）在列表带 `inbounds`/`clash_api`/`selector`
 时提前返回、绕过空节点 `bail`。整份 sing-box 客户端配置本来就没有"节点"概念，0 节点是正常结果，不是漏判。
 
-## 提交对应关系
+## R20 — `minimal` 的 Clash 工件不再要求 mihomo 下载任何东西（R17 #1 已闭）
+
+`render/clash.rs` 的注释原本写着"`GEOIP,LAN`/`GEOIP,CN` 由内核自带数据库回答，因此不涉及 CDN，
+也不涉及编译期内联列表"。前一半对、后一半错：mihomo 的 geo 数据库在文件缺失时**是网络下载的**。
+于是 `client_rule_profile = minimal`（文档承诺"只改获取方式、不访问规则 CDN"）在 Clash 侧
+自相矛盾——它换了 rule-set 的获取方式，却留着两条需要开机下载的规则。
+
+现在 `minimal` 下这两条判定改用编译期列表，和 sing-box 侧同源：私有域名 + RFC1918/回环/链路本地/
+CGNAT/ULA 段，CN 常用后缀 + 粗粒度 /10–/11 网段。IPv6 走 `IP-CIDR6`（Shadowrocket 不认裸
+`IP-CIDR,::1/128`）。`standard` 一字未动，仍用紧凑的数据库代码。代价写进了 `subscription-guide.md`：
+内联 CN 网段比完整数据库粗——这是"零下载"档位本身的取舍，不是以后才发现的 bug。
+
+门：`clash_mihomo` 从 3 组合扩到 **3 模板 × 2 规则档 × 2 工件 = 12 次真核运行**，L2 全绿
+（0.42s）。改之前这条门**从未渲染过 minimal 的 Clash 工件**，也就是说"minimal 只改获取方式"
+这句话恰好在最该被验的地方没有测试。另外两处：引用完整性检查器学会了 `IP-CIDR6` 的尾部
+`no-resolve`；两条把 `GEOIP` 钉在 minimal 下的断言改成钉"完全不许出现 `GEOIP`/`GEOSITE`"。
+
+**顺手抓到一个没解决的矛盾**（记下来，别让它被"门绿了"掩盖）：`.scratch/probe-mihomo-geo.sh`
+用只含 `GEOIP,CN` 的裸配置在同一台机器上复测，网络全断时 mihomo 打印
+`Can't find MMDB, start download` 并卡满 45 秒被 kill；换成内联 `IP-CIDR` 立刻 0 秒成功。
+但真实工件门上那 6 个 `standard` 组合同样含 `GEOIP`，却照样 0.4 秒全过——两件事不能同时成立。
+所以：`minimal` 的"零下载"是**裸配置 A/B 证出来的**，不是这条门证出来的；这条门只回答
+"工件能否被真核解析"。为什么它在断网时不挂，未解，已记入 `verification-and-build-flow.md`。
+
 
 - `feat(winvm)`：R1
 - `fix(client-core)` ×2：R3–R7 与 L2 抓到的 unix 编译错误（R14）
@@ -474,6 +497,7 @@ R17 第 5 条的猜测（两个界面接不住新错误）不成立：只读复�
 - `fix(clients)`：R19（`parse_uri_list` 的拒绝文案 + 三道新门）
 - `chore(dev)`：R18 的 `SRC_REV` 模式与已知坑 #10
 - `docs(clients)`：ADR-0023、`PRODUCT.md` 的覆写边界、R18/R19 本文
+- `feat(server)`：R20（Clash `minimal` 去 GeoDB + 12 组真核门）
 
 
 
