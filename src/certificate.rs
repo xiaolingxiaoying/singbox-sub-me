@@ -33,9 +33,6 @@ use crate::runtime::Runtime;
 /// the sbctl daemon and the sing-box data plane are members.
 pub const CERTIFICATE_GROUP: &str = "sbctl-cert";
 
-/// Certbot's own ceiling on each ACME HTTP request (`--http-timeout`).
-const HTTP_TIMEOUT_SECONDS: &str = "30";
-
 #[derive(Debug, Error)]
 pub enum CertificateError {
     #[error("certificates are managed only in direct subscription mode")]
@@ -335,16 +332,7 @@ pub fn obtain_with_runtime<C: crate::runtime::Clock>(
         }
         None => args.push("--register-unsafely-without-email"),
     }
-    args.extend_from_slice(&[
-        "--agree-tos",
-        "--non-interactive",
-        "--keep-until-expiring",
-        // Bound the ACME round trips: sbctl calls certbot synchronously from
-        // the menu and from the update path, and an unreachable ACME endpoint
-        // must not sit there until systemd kills the unit.
-        "--http-timeout",
-        HTTP_TIMEOUT_SECONDS,
-    ]);
+    args.extend_from_slice(&["--agree-tos", "--non-interactive", "--keep-until-expiring"]);
     let (status, output) = runtime
         .run_command_output("certbot", &args)
         .map_err(|error| CertificateError::Certbot(error.to_string()))?;
@@ -376,8 +364,6 @@ pub fn renew_with_runtime<C: crate::runtime::Clock>(
                 "--cert-name",
                 &config.subscription_host,
                 "--non-interactive",
-                "--http-timeout",
-                HTTP_TIMEOUT_SECONDS,
             ],
         )
         .map_err(|error| CertificateError::Certbot(error.to_string()))?;
