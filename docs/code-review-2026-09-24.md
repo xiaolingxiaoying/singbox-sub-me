@@ -167,8 +167,15 @@ Shadowrocket 里会显示成巨额"上传"。
 因此这一条不属于"照清单修"，属于**翻一个已文档化的线上契约**：改动波及
 `serve.rs` 两处测试常量、`tests/cli/subscription_formats.rs:1278`、`tests/acceptance/verify.sh:104`。
 
+**改之前先查过有没有"反向补偿"**：`crates/client-core/src/subscription.rs:128-133` 的
+`parse_userinfo` 把 `upload=` 直接写进 `info.upload`、`download=` 写进 `info.download`，
+**没有任何倒置**；连接页的 `connection.upload/download` 走的是 clash_api 另一条数据路径，与此无关。
+所以服务端这一改不会被客户端二次翻转。`subscription.rs` 里那两条 `upload=71; download=36`
+只是解析器的任意数字，不声明方向语义，因此无需跟着改。
+
 本轮我按消费方语义（客户端视角）改了实现与全部锚点，并在代码注释里写清两个视角；
 **若维护者判定要保持服务端视角，回退就是还原这 4 处**，本文件与提交信息都足以定位。
+（2026-09-24 维护者已确认：采用客户端视角。）
 
 ## R9（新发现）— `regenerate` 不清理被取代的工件；external-proxy 模式自我限流
 
