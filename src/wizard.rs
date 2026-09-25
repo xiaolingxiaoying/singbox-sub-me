@@ -81,14 +81,14 @@ pub fn run<C: Prompts>(
 
     let subscription_host = ask_required(
         prompts,
-        "Subscription host",
+        "订阅主机名（域名或 IP）",
         existing.map(|config| config.subscription_host.clone()),
         parse_host,
     )?;
 
     let proxy_host = ask_value(
         prompts,
-        "Proxy host（留空 = 使用 Subscription host）",
+        "代理节点地址（留空则与订阅主机相同）",
         existing.and_then(|config| config.proxy_host.clone()),
         parse_optional_host,
     )?;

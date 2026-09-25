@@ -13,6 +13,7 @@ pub(crate) fn install(root: &Path, options: InstallOptions) -> ExitCode {
         && options.reality_decoy_sni.is_none()
         && options.sing_box_bin.is_none()
         && options.manifest.is_none()
+        && !options.guided
         && !io::stdin().is_terminal()
     {
         return match sbctl::preflight::preflight(root) {
@@ -26,6 +27,10 @@ pub(crate) fn install(root: &Path, options: InstallOptions) -> ExitCode {
             }
         };
     }
+    if options.guided && has_manual_configuration(&options) {
+        eprintln!("--guided 不能与单项安装配置参数同时使用");
+        return ExitCode::from(2);
+    }
     let mut installation_started = false;
     // Snapshot before anything is written: a failed install must not delete
     // persistent state it did not create.
@@ -34,48 +39,91 @@ pub(crate) fn install(root: &Path, options: InstallOptions) -> ExitCode {
         return ExitCode::from(2);
     }
     let state_before_install = sbctl::lifecycle::preexisting_state(root);
-    let result = (|| {
-        sbctl::preflight::preflight_install(
+    if options.guided
+        && let Err(error) = sbctl::preflight::preflight(root)
+    {
+        eprintln!("install preflight failed: {error}");
+        return ExitCode::from(2);
+    }
+    if !options.guided
+        && let Err(error) = sbctl::preflight::preflight_install(
             root,
             matches!(&options.mode, crate::cli::args::CliSubscriptionMode::Direct),
         )
-        .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
-        let subscription_host =
-            required_install_value(options.subscription_host, "Subscription host")?;
-        let interface = options.interface.map(Ok).unwrap_or_else(|| {
-            sbctl::traffic::detect_default_route_interface(root).map_err(|error| {
-                sbctl::config::ConfigError::StateContent(format!(
-                    "could not detect a default-route interface ({error}); specify --interface"
-                ))
-            })
-        })?;
-        let protocols = select_protocols(&options.disable_protocol)?;
-        let needs_reality_sni = protocols.contains(&sbctl::config::ManagedProtocol::VlessReality);
-        let reality_decoy_sni = if needs_reality_sni {
-            Some(required_install_value(
-                options.reality_decoy_sni,
-                "Reality decoy SNI",
-            )?)
+    {
+        eprintln!("install preflight failed: {error}");
+        return ExitCode::from(2);
+    }
+    let guided_config = if options.guided {
+        let default_interface = sbctl::traffic::detect_default_route_interface(root).ok();
+        let mut prompts = crate::cli::prompt::ConsolePrompts;
+        match sbctl::wizard::run(None, default_interface, &mut prompts) {
+            Ok(sbctl::wizard::WizardOutcome::Changed(config)) => Some(config),
+            Ok(sbctl::wizard::WizardOutcome::Cancelled) => {
+                println!("installation cancelled; the host was not changed");
+                return ExitCode::SUCCESS;
+            }
+            Ok(sbctl::wizard::WizardOutcome::Unchanged) => {
+                unreachable!("a fresh installation has no prior configuration")
+            }
+            Err(error) => {
+                eprintln!("installation wizard failed: {error}");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        None
+    };
+    let result = (|| {
+        let config = if let Some(config) = guided_config {
+            config
         } else {
-            None
+            let subscription_host =
+                required_install_value(options.subscription_host, "订阅主机名（域名或 IP）")?;
+            let interface = options.interface.map(Ok).unwrap_or_else(|| {
+                sbctl::traffic::detect_default_route_interface(root).map_err(|error| {
+                    sbctl::config::ConfigError::StateContent(format!(
+                        "could not detect a default-route interface ({error}); specify --interface"
+                    ))
+                })
+            })?;
+            let protocols = select_protocols(&options.disable_protocol)?;
+            let needs_reality_sni =
+                protocols.contains(&sbctl::config::ManagedProtocol::VlessReality);
+            let reality_decoy_sni = if needs_reality_sni {
+                Some(required_install_value(
+                    options.reality_decoy_sni,
+                    "Reality 伪装域名",
+                )?)
+            } else {
+                None
+            };
+            let mut config = sbctl::config::DeploymentConfig::new_with_ports(
+                options.mode.into(),
+                subscription_host,
+                options.proxy_host,
+                options.http_port,
+                interface,
+                protocols,
+                reality_decoy_sni,
+                protocol_ports(
+                    options.vless_port,
+                    options.vmess_port,
+                    options.hysteria2_port,
+                    options.tuic_port,
+                    options.anytls_port,
+                ),
+            )?;
+            config.protocol_sni = options.protocol_sni;
+            config
         };
-        let mut config = sbctl::config::DeploymentConfig::new_with_ports(
-            options.mode.into(),
-            subscription_host,
-            options.proxy_host,
-            options.http_port,
-            interface,
-            protocols,
-            reality_decoy_sni,
-            protocol_ports(
-                options.vless_port,
-                options.vmess_port,
-                options.hysteria2_port,
-                options.tuic_port,
-                options.anytls_port,
-            ),
-        )?;
-        config.protocol_sni = options.protocol_sni;
+        if options.guided {
+            sbctl::preflight::preflight_install(
+                root,
+                config.subscription_mode == sbctl::config::SubscriptionMode::Direct,
+            )
+            .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+        }
         config.validate()?;
         if options.sing_box_bin.is_some() && options.manifest.is_some() {
             return Err(sbctl::config::ConfigError::InvalidValue(
@@ -182,6 +230,21 @@ pub(crate) fn install(root: &Path, options: InstallOptions) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn has_manual_configuration(options: &InstallOptions) -> bool {
+    options.subscription_host.is_some()
+        || options.proxy_host.is_some()
+        || options.http_port.is_some()
+        || options.interface.is_some()
+        || options.reality_decoy_sni.is_some()
+        || options.protocol_sni.is_some()
+        || !options.disable_protocol.is_empty()
+        || options.vless_port.is_some()
+        || options.vmess_port.is_some()
+        || options.hysteria2_port.is_some()
+        || options.tuic_port.is_some()
+        || options.anytls_port.is_some()
 }
 
 /// The step-by-step checklist printed after a successful install. sbctl never

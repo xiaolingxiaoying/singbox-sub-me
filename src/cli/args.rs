@@ -148,8 +148,17 @@ pub(crate) enum Command {
 /// of destructuring sixteen fields on both sides.
 #[derive(Debug, Args)]
 pub(crate) struct InstallOptions {
-    #[arg(long, value_enum, default_value_t = CliSubscriptionMode::Direct)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = CliSubscriptionMode::Direct,
+        conflicts_with = "guided"
+    )]
     pub(crate) mode: CliSubscriptionMode,
+    /// Collect all installation settings in the configuration wizard before
+    /// creating services or persistent state.
+    #[arg(long)]
+    pub(crate) guided: bool,
     #[arg(long)]
     pub(crate) subscription_host: Option<String>,
     #[arg(long)]

@@ -180,8 +180,8 @@ fn menu_deployment(root: &Path) {
             println!("1. 重新生成并校验现有配置工件");
             println!("2. 完整配置向导");
         } else {
-            println!("1. 安装 sbctl");
-            println!("2. 安装并进入完整配置向导");
+            println!("1. 快速安装（默认配置）");
+            println!("2. 引导式安装（完整配置向导）");
         }
         println!("0. 返回");
         match read_menu_choice("请选择 [0]: ").as_deref() {
@@ -190,12 +190,10 @@ fn menu_deployment(root: &Path) {
                 regenerate(root, None);
             }
             Some("1") => {
-                menu_install(root);
+                menu_install(root, false);
             }
             Some("2") if !installed => {
-                if menu_install(root) == ExitCode::SUCCESS {
-                    run_config_wizard(root, None);
-                }
+                menu_install(root, true);
             }
             Some("2") => {
                 run_config_wizard(root, None);
@@ -536,7 +534,7 @@ fn menu_direction_traffic_correction(root: &Path) {
     }
 }
 
-fn menu_install(root: &Path) -> ExitCode {
+fn menu_install(root: &Path, guided: bool) -> ExitCode {
     match sbctl::config::DeploymentStore::new(root).load() {
         Ok(_) => {
             eprintln!("已安装。请返回上级菜单选择完整配置向导或重新生成配置工件。");
@@ -546,6 +544,7 @@ fn menu_install(root: &Path) -> ExitCode {
             root,
             InstallOptions {
                 mode: CliSubscriptionMode::Direct,
+                guided,
                 subscription_host: None,
                 proxy_host: None,
                 http_port: None,
