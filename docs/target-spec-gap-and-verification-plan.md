@@ -667,7 +667,8 @@ scripts 那条腿要放到 L2（WSL）或容器里跑。当前宿主 L1 结果�
   index 区块折叠状态。
 - 当前验证：`cargo test -p sbctl --features test-signing --test cli subscription_formats::`
   （17 passed）、`cargo clippy -p sbctl --all-targets --features test-signing -- -D warnings`
-  与 `cargo fmt --all -- --check` 均通过。提交及对应 Actions 结果待完成。
+  与 `cargo fmt --all -- --check` 均通过；提交 `c54bda3` 的完整 CI run
+  [36129918694](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36129918694) 全绿。
 
 ### Phase 2 PR(e)：G6 `profile-update-interval`（已完成）
 

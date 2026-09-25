@@ -38,4 +38,5 @@ Blocked by: 01
 - TDD red：更新无限额精确等式后，旧实现失败，实际仍打印 `total=112`。
 - `cargo test -p sbctl --features test-signing the_userinfo_header_locks_its_key_order_and_names`：通过。
 - `cargo test -p sbctl --features test-signing --test cli subscription_userinfo_total_reflects_a_total_only_correction`：通过。
-- 完整套件与 CI 仍在当前验证轮次运行。
+- `cargo test -p sbctl --features test-signing`：202 个库测试、93 个 CLI 测试与版本 profile 测试通过。
+- 初次全 workflow run `36131353579` 的 server-acceptance 发现旧验收脚本仍要求无限额返回 `total=0`；现已更新它与新语义一致，要求不输出 `total` 并显式拒绝伪额度。修复后的全量 Actions 结果待复跑。

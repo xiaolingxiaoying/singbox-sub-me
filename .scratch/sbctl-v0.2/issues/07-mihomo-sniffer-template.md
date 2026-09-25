@@ -31,4 +31,4 @@ mihomo 两份 YAML 没有任何 `sniffer` 配置（全仓 `rg sniffer src` 仅�
 
 两份 Clash 工件共享 `clash_sniffer()`；单测锁定嗅探只出现一次、两个文件字段一致。`mihomo-profiles` CI job 用固定真核加载所有 Clash 工件通过。订阅指南记录受支持字段和探针结论。
 
-验证证据：`cargo test -p sbctl --features test-signing` 的单测（202 passed）；真实 Mihomo CI job 通过（run [36125841380](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36125841380)）。当前提交的完整 CI run [36129918694](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36129918694) 仍在运行，另含相同 Mihomo 真核 job。
+验证证据：`cargo test -p sbctl --features test-signing` 的单测（202 passed）；真实 Mihomo CI job 通过（runs [36125841380](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36125841380)、[36129918694](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36129918694)）。
