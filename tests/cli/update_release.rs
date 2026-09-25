@@ -43,6 +43,135 @@ fn update_check_reads_a_verified_release_manifest_without_changing_the_host() {
     assert_eq!(filesystem_snapshot(fixture.path()), before);
 }
 
+#[cfg(unix)]
+#[test]
+fn successful_signed_update_installs_both_candidates_and_keeps_a_rollback_point() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = TempDir::new().expect("temporary root is created");
+    initialize_update_fixture(&fixture);
+    let manifest = fixture.path().join("release-manifest.json");
+    let candidate_sbctl = command_fixture(&fixture, "candidate-sbctl", true, &[]);
+    let candidate_sing_box = sing_box_check_fixture(&fixture, true, &["vless"]);
+    let candidate_sbctl_bytes = fs::read(&candidate_sbctl).expect("candidate sbctl is readable");
+    let candidate_sing_box_bytes =
+        fs::read(&candidate_sing_box).expect("candidate sing-box is readable");
+    write_release_manifest(&manifest, &candidate_sbctl_bytes, &candidate_sing_box_bytes);
+
+    let old_sbctl = b"known-good sbctl";
+    let old_sing_box = b"known-good sing-box";
+    write_managed_file(&fixture, "usr/local/bin/sbctl", old_sbctl);
+    write_managed_file(&fixture, "usr/local/bin/sing-box", old_sing_box);
+    write_managed_file(
+        &fixture,
+        "var/lib/sbctl/state.json",
+        b"known-good accounting state",
+    );
+    let config_path = fixture.path().join("etc/sbctl/config.toml");
+    let state_path = fixture.path().join("var/lib/sbctl/state.json");
+    let server_artifact_path = fixture
+        .path()
+        .join("var/lib/sbctl/artifacts/sing-box-server.json");
+    let old_config = fs::read(&config_path).expect("configuration is readable");
+    let old_state = fs::read(&state_path).expect("accounting state is readable");
+    let old_server_artifact = fs::read(&server_artifact_path).expect("server artifact is readable");
+    write_systemctl_fixture_recording_calls(&fixture);
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "update",
+            "--manifest",
+            manifest.to_str().expect("manifest path is UTF-8"),
+            "--sbctl-artifact",
+            candidate_sbctl.to_str().expect("candidate path is UTF-8"),
+            "--sing-box-artifact",
+            candidate_sing_box
+                .to_str()
+                .expect("candidate path is UTF-8"),
+        ])
+        .assert()
+        .success();
+
+    let installed_sbctl = fixture.path().join("usr/local/bin/sbctl");
+    let installed_sing_box = fixture.path().join("usr/local/bin/sing-box");
+    assert_eq!(
+        fs::read(&installed_sbctl).expect("updated sbctl is readable"),
+        candidate_sbctl_bytes
+    );
+    assert_eq!(
+        fs::read(&installed_sing_box).expect("updated sing-box is readable"),
+        candidate_sing_box_bytes
+    );
+    assert_eq!(
+        fs::read(&config_path).expect("configuration remains readable"),
+        old_config
+    );
+    assert_eq!(
+        fs::read(&state_path).expect("accounting state remains readable"),
+        old_state
+    );
+    assert_eq!(
+        fs::read(&server_artifact_path).expect("server artifact remains readable"),
+        old_server_artifact
+    );
+    assert_eq!(
+        fs::metadata(&installed_sbctl)
+            .expect("updated sbctl metadata is readable")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+    assert_eq!(
+        fs::metadata(&installed_sing_box)
+            .expect("updated sing-box metadata is readable")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+
+    let rollback_root = fixture.path().join(ROLLBACK_ROOT);
+    let rollback_point = fs::read_dir(&rollback_root)
+        .expect("rollback directory is readable")
+        .next()
+        .expect("a successful update keeps a rollback point")
+        .expect("rollback entry is readable")
+        .path();
+    assert_eq!(
+        fs::read(rollback_point.join("usr/local/bin/sbctl")).expect("sbctl is backed up"),
+        old_sbctl
+    );
+    assert_eq!(
+        fs::read(rollback_point.join("usr/local/bin/sing-box")).expect("sing-box is backed up"),
+        old_sing_box
+    );
+    let systemctl_calls = fs::read_to_string(fixture.path().join(".systemctl-calls"))
+        .expect("service restart calls are recorded");
+    assert!(systemctl_calls.contains("restart sing-box.service sbctl.service"));
+    assert!(systemctl_calls.contains("is-active --quiet sing-box.service"));
+    assert!(systemctl_calls.contains("is-active --quiet sbctl.service"));
+}
+
+#[cfg(unix)]
+fn write_systemctl_fixture_recording_calls(fixture: &TempDir) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = fixture.path().join("usr/bin/systemctl");
+    fs::create_dir_all(path.parent().expect("systemctl has a parent"))
+        .expect("systemctl directory is created");
+    fs::write(
+        &path,
+        "#!/bin/sh\nroot=$(CDPATH= cd -- \"$(dirname -- \"$0\")/../..\" && pwd)\nprintf '%s\\n' \"$*\" >> \"$root/.systemctl-calls\"\nexit 0\n",
+    )
+    .expect("systemctl fixture is written");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+        .expect("systemctl fixture is executable");
+}
+
 #[test]
 fn update_rejects_an_artifact_that_does_not_match_the_fixed_manifest() {
     let fixture = TempDir::new().expect("temporary root is created");
