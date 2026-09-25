@@ -32,7 +32,7 @@
 | --- | --- | --- |
 | 1. 改进入口 | `sbctl install --guided` 先运行安装前检查，再一次收集完整配置、显示脱敏摘要并确认后执行事务；取消时不创建部署状态。新鲜安装菜单直接进入同一向导。配置向导提交后重印当前订阅与全部已启用协议的 UFW 放行命令，供管理员核对；不自动修改防火墙。 | 已实现；首次向导、配置变更、取消与凭据脱敏测试通过。 |
 | 2. 自动门禁 | CI 构建生产 Linux amd64 二进制；真实 systemd 验收使用隔离的 test-signing 工件，不把测试签名带入生产工件。验收覆盖 Debian 12、Ubuntu 22.04、Ubuntu 24.04。 | `test`、生产构建、Windows 静态检查、`server-acceptance` 均通过。验收辅助二进制改由 Ubuntu 22.04 构建，兼容 Debian 12 的 glibc。 |
-| 3. 候选安装 | 用 Actions 构建产物在现有 Direct 部署上升级 sbctl；执行重启、配置检查、节点与订阅检查。 | 通过。当前安装候选 SHA-256：`48e2a566e587264e380164442b502ea0cb0c7196927c2b2cf291910793fb4efd`。 |
+| 3. 候选安装 | 用 Actions 构建产物在现有 Direct 部署上升级 sbctl；执行重启、配置检查、节点与订阅检查。 | 通过。CI run `36108915661` 构建的生产 Linux amd64 工件 SHA-256 为 `3dd2d829b39d00812baee6c0f48002f64c78fbe1a2d19a0757f9d68bd1a69dce`，已在 VPS 上校验摘要后原子替换旧版；旧二进制另存 root-only 回滚副本，摘要为 `48e2a566e587264e380164442b502ea0cb0c7196927c2b2cf291910793fb4efd`。新程序报告 `sbctl 0.2.0`；`sbctl status` 正常，`sing-box.service` 和 `sbctl.service` 均为 active。替换 CLI 二进制无需重启代理服务。 |
 | 4. Direct | 检查 80/443 socket activation、HTTPS 订阅、索引和 QR、全部订阅格式、错误凭据和 query 边界、HTTP-01 webroot、证书状态及服务账户。 | 通过。真实公网 HTTPS 返回 200 和 `subscription-userinfo`；坏凭据和带 query 的路径返回 404。 |
 | 5. External proxy | 用配置向导切换到 loopback 监听，并临时安装 Nginx 验证 TLS 反代到 sbctl；完成后移除 Nginx 及测试配置。 | 通过。loopback 监听未占用公网 80/443；真实 HTTPS 反代订阅返回 200 和流量头。Nginx 已卸载。 |
 | 6. IP fallback | 向导切换到高位 HTTP 端口，从 VPS 和外部测试机分别请求订阅。 | 通过。公网端口返回 200；坏凭据和 query 返回 404。 |
@@ -50,12 +50,13 @@
 - Server/UI 验收提交：`fa0b31b`；[GitHub Actions run 36094245350](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36094245350) 全部通过，包括生产 Linux 构建、`test`、Windows 静态检查、macOS `sbtui`、三发行版 `server-acceptance`、sing-box/Mihomo profiles 和 prototype。
 - 该运行也确认补充的 `tab-4-macos.snap` 与 macOS runner 实际渲染一致，先前 47 passed、1 failed 的 macOS 快照失败已修复。
 - 签名更新与续期测试提交：`021a694`；[GitHub Actions run 36100576893](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36100576893) 全部通过。`tests/cli/update_release.rs` 验证签名更新成功事务，`tests/cli/certificate.rs` 验证 Certbot 续期成功后固定新证书，以及坏 SAN 续期不覆盖旧证书。
+- UFW 指引和孤儿进程守卫测试修正：生产 CLI 在配置提交后会再次显示当前协议所需的防火墙命令（仅提示，不自动更改防火墙）；Actions run `36107274280` 暴露了客户端孤儿进程测试桩问题，修复后 [GitHub Actions run 36108915661](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36108915661) 全部通过。成功工件已部署到 VPS，见阶段 3。
 
 ## 尚未完成的发布级与端到端验证
 
 1. 仓库没有配置生产 release 公钥和签名私钥。生产候选的 `sbctl update --check` 按预期 fail-closed，未执行 signed manifest 更新；不得把 test-signing 密钥用于生产发布。
 2. 本轮 Certbot `renew` 未实际更换尚未到期的生产证书；staging dry-run 通过。未进行新的 production ACME 签发，以免在真实域名上消耗签发额度。
-3. Clash Party 导入订阅后的超时已定位到 VPS UFW：默认拒绝入站，仅放行 VLESS 当前端口；内核记录到 VMess 62892/TCP SYN 被丢弃。现已补齐 VMess、AnyTLS、Hysteria2、TUIC 当前端口的 UFW 规则；操作者工作站确认所有 TCP 节点端口可连接，用户确认 Ubuntu VM 的 Clash Party 五节点测速均通过（目标为 HTTPS 端口 443）。普通浏览器访问任意站点尚未单独验证。
+3. Clash Party 导入订阅后的节点测速超时已定位到 VPS UFW：默认拒绝入站，仅放行 VLESS 当前端口；内核记录到 VMess 62892/TCP SYN 被丢弃。现已补齐 VMess、AnyTLS、Hysteria2、TUIC 当前端口的 UFW 规则；操作者工作站确认所有 TCP 节点端口可连接，用户随后确认 Ubuntu VM 的 Clash Party 中 VLESS、VMess、Hysteria2、TUIC、AnyTLS 五个节点测速全部通过（目标为 HTTPS 端口 443）。普通浏览器访问任意站点尚未单独验证。
 4. 仓库尚未配置受控的生产签名环境，生产签名发行与 VPS 上的生产 signed update 路径未验证。
 5. 因此本轮证明了服务端候选的广泛功能和 VPS 兼容性，不构成“绝无缺陷”的保证，也不等同于可发布的 signed release。完成生产发布还需配置受控签名环境，并在产生同一版本 manifest 后验签和实测更新路径。
 
