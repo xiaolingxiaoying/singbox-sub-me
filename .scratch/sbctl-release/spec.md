@@ -73,7 +73,7 @@ Status: ready-for-agent
 ### 1. 领域模型与持久化
 
 - `DeploymentConfig` 必须持久化 `subscription_mode`、主机字段、接口、五种协议选择与凭据、端口、monthly traffic limit、accounting policy、accounting timezone、anchored reset 配置和证书引用。
-- accounting timezone 默认固定为 `UTC`；显式配置必须是有效 IANA timezone，不能修改 VPS 操作系统时区。
+- 新部署的 VPS refresh timezone 默认固定为 `America/Los_Angeles`，client display timezone 默认固定为 `Asia/Shanghai`；两者必须是有效 IANA timezone，且不能修改 VPS 操作系统时区。
 - `anchored_reset_at` 使用 `YYYY-MM-DDTHH:MM`。锚定日允许 1–31；短月按当月最后一天计算。
 - `TrafficState` 必须带 schema version、cycle key、interface、baseline RX/TX、accumulated RX/TX、boot ID 和独立的手工修正记录。Total traffic adjustment 不得写成伪造的方向计数。
 - 状态缺失或损坏是可诊断的存储错误；Pending first reset 是合法状态，不是错误。
