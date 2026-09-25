@@ -27,7 +27,7 @@ Blocked by: 01
 - 三个消费方（代码、测试、文档）表述一致。
 - `cargo test -p sbctl --features test-signing` 相关用例通过。
 
-## Answer
+## Comments
 
 采纳决策建议：`total` 代表管理员设置的月度额度；`monthly_traffic_limit == 0` 时完全省略 `total`，而不是输出当前用量。这样客户端不会把已用量误当作总量或额度；`upload`、`download`、`expire` 与 `profile-update-interval` 仍正常输出。有额度的分支保持 `total=<configured limit>`。
 

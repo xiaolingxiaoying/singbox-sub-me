@@ -25,7 +25,7 @@ mihomo 两份 YAML 没有任何 `sniffer` 配置（全仓 `rg sniffer src` 仅�
 - 文档 `docs/subscription-guide.md` 更新嗅探说明。
 - 单测/真核 CI 全绿。
 
-## Answer
+## Comments
 
 已实现并按真实 mihomo 接受的配置语法收敛。最初提议的 `sniff: { HTTP/TLS/QUIC: ... }`、`override-destination` 以及错误示例中的 `domain`/`dns` 不能直接照搬：用 CI 固定的 mihomo v1.19.30 真核探针验证后，工件采用 `sniffer: { enable: true, sniffing: [http, tls, quic] }`；不设置 `override-destination`，也不从订阅覆盖客户端自己的 `tun` / `dns-hijack`。
 
