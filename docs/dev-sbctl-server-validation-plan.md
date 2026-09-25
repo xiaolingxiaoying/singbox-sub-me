@@ -47,8 +47,8 @@
 
 - 代码改进：`de5efaa`；Actions `36085917092` 的 Linux 构建和 sbctl 测试通过。该运行的 macOS `sbtui` 快照检查失败。
 - systemd 验收 CI：`d5fd927` 首次引入；其验收辅助程序在 Debian 12 上遇到 glibc 基线不兼容后，将验收 job 改为 Ubuntu 22.04 构建。
-- 最新工作流提交：`8f3ce55`；[GitHub Actions run 36092692279](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36092692279)。生产 Linux 构建、`test`、Windows 静态检查、三种 Linux 的 `server-acceptance`、sing-box/Mihomo profiles、prototype 均通过。
-- `36092692279` 的整体 CI 因 `sbtui-macos` 的 `tab-4-macos` 快照失败（47 passed、1 failed）。失败日志显示仓库缺少 macOS Settings 快照；现已按 CI 实际渲染帧补齐 `tab-4-macos.snap`，需由后续 macOS Actions 运行确认该基线并复验全工作流。
+- Server/UI 验收提交：`fa0b31b`；[GitHub Actions run 36094245350](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36094245350) 全部通过，包括生产 Linux 构建、`test`、Windows 静态检查、macOS `sbtui`、三发行版 `server-acceptance`、sing-box/Mihomo profiles 和 prototype。
+- 该运行也确认补充的 `tab-4-macos.snap` 与 macOS runner 实际渲染一致，先前 47 passed、1 failed 的 macOS 快照失败已修复。
 
 ## 尚未完成的发布级验证
 
