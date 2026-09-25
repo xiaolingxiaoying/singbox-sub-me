@@ -514,6 +514,7 @@ pub(crate) fn commit_config_change(
     match result {
         Ok(()) => {
             println!("deployment configuration committed\n{}", new.summary());
+            super::install::print_firewall_review(new);
             ExitCode::SUCCESS
         }
         Err(error) => {

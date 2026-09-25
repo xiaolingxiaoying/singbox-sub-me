@@ -708,7 +708,9 @@ fn config_wizard_commits_a_timezone_change_and_establishes_new_accounting_state(
         .success()
         .stdout(predicate::str::contains(
             "deployment configuration committed",
-        ));
+        ))
+        .stdout(predicate::str::contains("防火墙端口核对"))
+        .stdout(predicate::str::contains("sudo ufw allow 2080/tcp"));
 
     let config = fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
         .expect("configuration is committed");
@@ -761,7 +763,15 @@ fn config_wizard_creates_a_new_deployment_with_secure_defaults() {
         .success()
         .stdout(predicate::str::contains(
             "deployment configuration committed",
-        ));
+        ))
+        .stdout(predicate::str::contains("防火墙端口核对"))
+        .stdout(predicate::str::contains("sudo ufw allow 80/tcp"))
+        .stdout(predicate::str::contains("sudo ufw allow 443/tcp"))
+        .stdout(predicate::str::contains("# vless-reality"))
+        .stdout(predicate::str::contains("# vmess-websocket"))
+        .stdout(predicate::str::contains("# hysteria2"))
+        .stdout(predicate::str::contains("# tuic"))
+        .stdout(predicate::str::contains("# anytls"));
 
     let config = fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
         .expect("a fresh wizard deployment is committed");

@@ -335,3 +335,26 @@ fn firewall_port_commands(config: &sbctl::config::DeploymentConfig) -> Vec<Strin
     }
     commands
 }
+
+/// Reprint copy-paste-ready firewall guidance after an existing deployment's
+/// ports or subscription mode change. sbctl deliberately leaves host firewall
+/// policy under the administrator's control.
+pub(crate) fn print_firewall_review(config: &sbctl::config::DeploymentConfig) {
+    use sbctl::config::SubscriptionMode;
+
+    println!();
+    println!("防火墙端口核对（sbctl 不会自动修改防火墙；若使用 UFW，请检查并执行所需命令）:");
+    match config.subscription_mode {
+        SubscriptionMode::Direct => {
+            println!("  sudo ufw allow 80/tcp");
+            println!("  sudo ufw allow 443/tcp");
+        }
+        SubscriptionMode::ExternalProxy => {}
+        SubscriptionMode::IpFallback => {
+            println!("  sudo ufw allow {}/tcp", config.http_port.unwrap_or(2080));
+        }
+    }
+    for command in firewall_port_commands(config) {
+        println!("  {command}");
+    }
+}
