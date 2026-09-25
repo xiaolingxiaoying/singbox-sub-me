@@ -360,7 +360,7 @@ sh tests/acceptance/run.sh
 唯一能证明：ACME / Direct HTTPS 在公网 80/443 端到端（ADR-0009 / 0011）、真实网络下从 GitHub 装最新稳定内核、规则 CDN 对目标人群的可达性（G3，**含国内可达性——VPS 本身可能并不代表国内**）、手机导入 `shadowrocket.txt` / `sing-box-full.json` / index 二维码。
 遵循 `release-readiness-and-vps-test-plan.md:20-24` 的原则：VPS 是确认环境，不是调试环境——**先在 L1–L3 跑干净再上机**。
 复用 `subscription-modes-testing.md` 的三模式 runbook（Direct 回归 `:16-32`、external-proxy `:33-69`、ip-fallback 自签五协议 `:71-95`，每模式 6 项通用清单 `:99-106`），不要另写一套。
-> 现有 VPS 已在承载生产（`64.81.29.67`，Ubuntu 22.04，sbctl 占公网 80/443，见 `.scratch/vps-connectivity-hardening/spec.md`）。**任何变更前先 `sbctl status` 并备份 `/etc/sbctl`，确认回滚路径后才动手。**
+> 现有生产 VPS（Ubuntu 22.04，sbctl 占公网 80/443，见 `.scratch/vps-connectivity-hardening/spec.md`）。**任何变更前先 `sbctl status` 并备份 `/etc/sbctl`，确认回滚路径后才动手。**
 
 ### 关于"不影响 Windows 宿主"
 

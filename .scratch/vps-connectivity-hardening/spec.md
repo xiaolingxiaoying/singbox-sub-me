@@ -3,7 +3,7 @@
 Status: ready-for-agent
 
 日期：2026-09-13  
-范围：对 `64.81.29.67` 上由 `sbctl` 管理的 sing-box 部署进行可回滚的连通性修复、出口可用性验证和主机安全加固。本文是执行计划，不包含未经确认的线上变更。
+范围：对由 `sbctl` 管理的 sing-box 生产 VPS 部署进行可回滚的连通性修复、出口可用性验证和主机安全加固。本文是执行计划，不包含未经确认的线上变更。
 
 ## 1. 背景与已验证事实
 
@@ -13,7 +13,7 @@ Status: ready-for-agent
 
 | 事项 | 证据 | 结论 |
 | --- | --- | --- |
-| IPv4 出口 | `64.81.29.67`，AS3257/GTT，洛杉矶 | IPv4 路由和 DNS 可用。 |
+| IPv4 出口 | 生产 VPS（洛杉矶区域） | IPv4 路由和 DNS 可用。 |
 | X | `https://x.com` 返回 HTTP 200；sing-box 日志中 `api.x.com:443` 有成功直连 | VPS 到 X 不存在普遍性网络阻断。 |
 | ChatGPT | `https://chatgpt.com` 和 `/api/auth/session` 完成 TLS 后返回 Cloudflare HTTP 403，`cf-mitigated: challenge` | 不是 TCP/DNS 断连；需把 IP/反爬风控与代理配置问题分开。 |
 | IPv6 | 主机没有 IPv6 地址或默认路由；sing-box 多次尝试连接 Google IPv6 地址并报 `cannot assign requested address` | 已确认的配置缺陷，会造成部分 AAAA 目标失败或明显卡顿。 |
