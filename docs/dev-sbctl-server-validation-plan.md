@@ -2,7 +2,7 @@
 
 更新日期：2026-09-25  
 工作分支：`dev-sbctl`  
-服务端代码验证提交：`496aa6b0c8f3316b35bc29aec922495160b08d00`
+服务端代码验证提交：`bd7b60d9fd4d6b1bea62770f8d3f937f960e441b`
 
 ## 目标
 
@@ -40,6 +40,8 @@
 | 8. 服务端操作 | 运行配置向导改模式、配置重生成、状态/节点、override 校验、系统状态、BBR、QR、流量校正、账期 timer、凭据轮换和交互主菜单。 | 通过。VPS 上 BBR/FQ 已启用时再次运行 `sbctl system bbr` 成功，输出和持久化 drop-in 正确；测试前的 drop-in 已还原，运行值保持 BBR/FQ。凭据轮换后新凭据可用，旧凭据立即返回 404。 |
 | 9. 故障与卸载 | 用 `check=0`、`run=1` 的 sing-box 故障桩验证回滚；测试默认卸载、purge 和独立 sing-box 删除；再完成真实 guided 全新安装。隔离 CLI 测试覆盖已签名更新同时替换 sbctl 与 sing-box，并保留回滚点。 | 坏候选被拒绝、旧二进制摘要恢复、服务稳定；卸载保留/清除语义正确。guided 取消无写入，guided 安装及公网订阅、五种协议通过。signed update 成功路径在 `test-signing` 隔离工件上验证通过；未证明生产签名发行流程。 |
 | 10. 证书和恢复 | Direct 证书 verify、renew、status；Certbot staging dry-run；恢复快照和候选 sbctl，复核公网订阅与 systemd。 | 通过。VPS 上 `renew` 因现有证书未到续期窗口未重新签发；staging dry-run 通过。隔离 CLI 测试验证 Certbot 替换有效证书后新证书与私钥被固定；SAN 不匹配时续期失败且旧固定副本不变。快照保留，最终运行状态为健康 Direct。 |
+
+2026-09-25 的 S11 验收修复已由 Actions run `36133020517` 全部通过（workspace tests、Clippy、Windows/macOS 检查、生产 Linux amd64 构建、sing-box/Mihomo 真核验证、Debian/Ubuntu systemd acceptance）。VPS 当前运行 `sbctl 0.2.0`，SHA-256 `45dacacda646d9b433a6a41455ee7c596accfceb2a23830db0bf59a66776793f`；该生产二进制由 run `36131353579` 构建，后续 `bd7b60d` 仅改验收脚本和文档，未改生产二进制源码。root-only 回滚副本 `/root/sbctl.pre-bd7b60d` 的 SHA-256 为 `3dd2d829b39d00812baee6c0f48002f64c78fbe1a2d19a0757f9d68bd1a69dce`。更新后 `sbctl.service` 与 `sing-box.service` 均 active、`NRestarts=0`、`sbctl config validate` 通过；节点清单有五条，`sing-box-full` HTTPS 订阅返回 200，userinfo 含配置额度 `536870912000` 和 `profile-update-interval=24`。本轮部署未修改 sing-box 配置、UFW 或证书。
 
 订阅矩阵包括 sing-box、版本化 sing-box、Clash、版本化 Clash、URI、Base64 URI、Shadowrocket、索引页和 QR。客户端流量测试使用一次性 root-only 配置；测试后已删除临时配置和客户端进程。
 

@@ -39,4 +39,4 @@ Blocked by: 01
 - `cargo test -p sbctl --features test-signing the_userinfo_header_locks_its_key_order_and_names`：通过。
 - `cargo test -p sbctl --features test-signing --test cli subscription_userinfo_total_reflects_a_total_only_correction`：通过。
 - `cargo test -p sbctl --features test-signing`：202 个库测试、93 个 CLI 测试与版本 profile 测试通过。
-- 初次全 workflow run `36131353579` 的 server-acceptance 发现旧验收脚本仍要求无限额返回 `total=0`；现已更新它与新语义一致，要求不输出 `total` 并显式拒绝伪额度。修复后的全量 Actions 结果待复跑。
+- 初次全 workflow run `36131353579` 的 server-acceptance 发现旧验收脚本仍要求无限额返回 `total=0`；现已更新它与新语义一致，要求不输出 `total` 并显式拒绝伪额度。修复后的全量 Actions run `36133020517` 全部通过。VPS 当前生产二进制摘要 `45dacacda646d9b433a6a41455ee7c596accfceb2a23830db0bf59a66776793f`，由 run `36131353579` 构建；部署后的 HTTPS 订阅返回 200，实际配置额度分支仍正确输出 `total=536870912000`。
