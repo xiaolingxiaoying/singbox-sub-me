@@ -93,6 +93,9 @@ sbctl config override clear     # 删除并重新生成
 
 `sbctl` 菜单「订阅中心 → 12. 客户端模板配置」（或向导主题）可调：
 
+每项都会显示当前值作为默认答案；保存前预览会列出模板、DNS 模式、规则档位、规则镜像和测速 URL，
+订阅凭据仍保持脱敏。URL 选项仅接受 `http://` 或 `https://` 地址。
+
 - `client_dns_mode`：fake-ip（默认）/ redir-host
 - `client_template`：**standard（默认）/ global / split** —— 编译期内置的内容目录（ADR-0022），
   决定订阅里的策略组、规则集、内联分流规则、DNS 与最终出口，不是磁盘上的管理员模板文件。

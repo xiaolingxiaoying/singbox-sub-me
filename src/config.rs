@@ -892,11 +892,19 @@ impl DeploymentConfig {
             format!("accounting policy: {}", self.accounting_policy),
             format!("VPS refresh timezone: {}", self.accounting_timezone),
             format!("client display timezone: {}", self.client_display_timezone),
-            // Which content template generated the client artifacts, so the
-            // wizard preview and `sbctl status` show the axis the administrator
-            // just moved rather than leaving them to diff the artifacts.
+            // Keep all supported client-generation knobs together so the
+            // wizard preview and `sbctl status` explain the effective output.
             format!("client content template: {}", self.client_template),
+            format!("client DNS mode: {}", self.client_dns_mode),
             format!("client rule profile: {}", self.client_rule_profile),
+            format!(
+                "client rule-set base URL: {}",
+                self.client_rule_set_base_url
+            ),
+            format!(
+                "client latency probe URL: {}",
+                self.client_latency_probe_url
+            ),
             format!("enabled protocols: {protocols}"),
             "subscription credential: [redacted]".to_owned(),
         ];

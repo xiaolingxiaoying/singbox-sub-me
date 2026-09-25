@@ -486,31 +486,31 @@ pub fn run_topic<C: Prompts>(
             // external rule-sets are reachable (ADR-0022).
             new.client_template = ask_required(
                 prompts,
-                "客户端内容模板（1 standard 历史结构 / 2 global 全局代理，仅局域网直连 / 3 split 分流，CN 与局域网直连、广告阻断）",
+                "客户端内容模板（1 standard 历史结构 / 2 global 除私有地址外走代理 / 3 split 按规则分流，广告阻断）",
                 Some(new.client_template.to_string()),
                 parse_client_template,
             )?;
             new.client_dns_mode = ask_required(
                 prompts,
-                "客户端 DNS 模式（1 fake-ip / 2 redir-host）",
+                "客户端 DNS 模式（1 fake-ip：便于 TUN 按域名分流 / 2 redir-host：返回真实 IP）",
                 Some(new.client_dns_mode.to_string()),
                 parse_dns_mode,
             )?;
             new.client_rule_profile = ask_required(
                 prompts,
-                "分流规则档位（1 standard 远程规则集 / 2 minimal 内置规则）",
+                "规则来源（1 standard：远程规则集，客户端需能访问规则源 / 2 minimal：内置规则，不下载规则集）",
                 Some(new.client_rule_profile.to_string()),
                 parse_rule_profile,
             )?;
             new.client_rule_set_base_url = ask_required(
                 prompts,
-                "规则集下载源根目录（不含分支；@sing/@meta 由 sbctl 附加）",
+                "规则集镜像根 URL（standard 使用；不要加分支或末尾斜杠，sbctl 会补全路径）",
                 Some(new.client_rule_set_base_url.clone()),
                 parse_http_url,
             )?;
             new.client_latency_probe_url = ask_required(
                 prompts,
-                "选择组延迟探测 URL",
+                "节点测速 URL（客户端必须可访问；选择组含 DIRECT，请用直连也能访问的地址）",
                 Some(new.client_latency_probe_url.clone()),
                 parse_http_url,
             )?;
@@ -1003,6 +1003,52 @@ mod tests {
         assert!(
             updated.summary().contains("client content template: split"),
             "the preview must show which template was selected"
+        );
+        assert!(
+            updated.summary().contains("client DNS mode: fake-ip")
+                && updated.summary().contains("client rule profile: standard")
+                && updated.summary().contains(&format!(
+                    "client rule-set base URL: {}",
+                    config.client_rule_set_base_url
+                ))
+                && updated.summary().contains(&format!(
+                    "client latency probe URL: {}",
+                    config.client_latency_probe_url
+                )),
+            "the preview must show the other client settings affected by this topic"
+        );
+    }
+
+    #[test]
+    fn the_client_template_topic_reprompts_for_an_invalid_rule_mirror_url() {
+        let config = ip_fallback_config();
+        let answers = [
+            "",
+            "",
+            "",
+            "ftp://mirror.example/rules",
+            "https://mirror.example/rules/",
+            "",
+            "",
+        ];
+        let mut prompts = ScriptPrompts::new(&answers, &[true]);
+
+        let outcome = run_topic(&config, ConfigurationTopic::ClientTemplate, &mut prompts)
+            .expect("the wizard recovers from an invalid mirror URL");
+
+        let WizardOutcome::Changed(updated) = outcome else {
+            panic!("a valid replacement URL must produce a configuration change");
+        };
+        assert_eq!(
+            updated.client_rule_set_base_url,
+            "https://mirror.example/rules"
+        );
+        assert!(
+            prompts
+                .reports()
+                .iter()
+                .any(|message| message == "必须是 http:// 或 https:// 开头的 URL"),
+            "the wizard must explain why the rejected URL cannot be used"
         );
     }
 

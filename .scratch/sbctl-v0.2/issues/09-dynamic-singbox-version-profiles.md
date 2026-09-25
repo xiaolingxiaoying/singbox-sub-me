@@ -1,26 +1,37 @@
-# S10：sing-box 版本 profile 动态化
+# S10：sing-box 版本 profile 覆盖策略
 
-Status: ready-for-agent
+Status: needs-triage
 Type: task
 Blocked by: 01
 
-## 现状
+## 现状（2026-09-25 复核）
 
-`src/subscription/profile.rs:136-189` 是常量注册表（1.10–1.14），
-`sing-box-full.json` 固定取最后一项；内核升到 1.15 时不会新增 `sing-box-1.15.json`，
-也不会更新 full 的版本语义。CI 真核矩阵同样手工枚举（`.github/workflows/ci.yml:83-96`）。
+- `SING_BOX_VERSION_PROFILES` 仍是编译期注册表，当前覆盖 1.10–1.14；版本链接、生成工件、
+  profile notes 与字段差异均从这份注册表派生。
+- `sing-box-full.json` 并非始终固定取最后一项：重生成时会探测已安装 sing-box，按注册表
+  从新到旧选择该内核实际通过 `sing-box check` 的最高档；不可用或都不接受时才回退最新注册档。
+- `sbctl status` 会提示已安装内核高于注册表上限，但不会中断服务。
+- `sing-box-profiles` CI 从 GitHub `releases/latest` 读取稳定版，并将其与注册表顶部比较；
+  每个注册档都必须有真实内核校验，少一个环境变量就失败。上游发布新 minor 时 CI 会阻止
+  漂移，但注册表和历史 core 版本仍需维护者显式更新。
+- 截至本次复核，上游最新稳定版为 1.14.x，与注册表上限一致。
 
-## 动作
+## 尚未决定的范围
 
-1. 引入「最新稳定 minor」来源：配置项 + 安装/更新时探测（`src/update.rs::fetch_latest_official_sing_box_version` 已有）。
-2. profile 集合 = `[latest-4 ..= latest]`，按字段差异开关（`typed_dns`、`route_rule_actions`、
-   `supports_anytls`、`supports_store_dns`）从模板派生；无法确认字段差异的新 minor 默认按最新模板生成并标注。
-3. 当安装的内核版本高于注册表时，`sing-box-full.json` 取实际内核 minor，其余 4 个保留。
-4. CI 真核矩阵改为脚本从 `profile.rs` 导出的版本列表生成，避免手工枚举漂移。
-5. 测试：1.15 出现时的派生单测（模拟版本）；现有 1.10–1.14 逐字节回归不变。
+自动把注册表滚动到 `[latest-4 ..= latest]`，并为未研究过的新 minor 复用上一档字段，
+会把“CI 验证后发布”改成“按版本号推断字段后先对外发布”。ADR-0020 要求 profile 差异
+来自经上游 changelog 核实的字段；因此不能在没有明确决策的情况下直接实施自动猜测。
 
-## 验收
+需要维护者选择：
 
-- `cargo test --test version_profiles -- --ignored` 仍通过全部五个真核。
-- 单测证明 latest 变化时 profile 集合与 full 路由同步变化。
-- 文档 `docs/research/sing-box-client-version-differences.md` 记录动态化规则。
+1. **保持人工维护、CI 硬门禁**：只在确认新 minor 的字段差异并下载真实核心校验后，加入新档；
+   CI 已解决静默漂移，但不承诺自动滚动版本带。
+2. **改为自动滚动五档**：定义新版本发布到订阅生效之间的审查门、失败回退方式、字段未知时的
+   用户标注与兼容承诺，再修订 ADR-0020 和安装/重生成流程。
+
+## 验收（选项 2 时）
+
+- 模拟上游出现 1.15 时，新五档、链接矩阵与 `sing-box-full` 目标同步更新。
+- 最新五个 profile 全部用真实核心校验；未知字段不会绕过发布门禁。
+- 旧版本移出五档后的兼容行为和迁移说明明确。
+- `docs/research/sing-box-client-version-differences.md` 与 ADR-0020 更新。
