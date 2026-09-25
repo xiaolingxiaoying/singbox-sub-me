@@ -146,7 +146,7 @@ upload=<已用上行字节>; download=<已用下行字节>; total=<额度>; expi
   但表头标签站在订阅用户那一边——v2rayN、Clash Verge、Shadowrocket 都把这两个键显示成
   "我上传/我下载了多少"。早先的实现按服务端视角打标签，于是下载为主的月份在客户端里显示成巨额"上传"。
   （`docs/implementation-plan.md` 里那行 `download=RX、upload=TX` 是当年有意的写法，现已按消费方语义纠正。）
-- `total=` 是配置的月度额度；没有配额度时它退化为"已用字节"，不是"无限"。
+- `total=` 只在配置了月度额度时发送，值是额度本身；无限额时省略 `total`，避免客户端把当前已用量误显示成总额度。`upload` / `download` 与 `expire` 仍照常发送。
 - `expire=` 承担"刷新/重置日期"语义：本项目没有账号到期概念，它就是账期的下次重置时刻。
   因此**不设** `refresh=` 键（各客户端渲染重置日期用的就是 `expire`）。
 - `profile-update-interval=24` 是对客户端的**策略声明**（"一天拉一次就够"），不描述服务端行为：

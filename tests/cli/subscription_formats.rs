@@ -1428,7 +1428,11 @@ fn subscription_userinfo_total_reflects_a_total_only_correction() {
     assert!(
         // The interface counted rx=30 / tx=60 over the period; from the client's
         // side those are upload=30 and download=60.
-        response.contains("subscription-userinfo: upload=30; download=60; total=5000; expire=")
+        response.contains("subscription-userinfo: upload=30; download=60; expire=")
+    );
+    assert!(
+        !response.contains("subscription-userinfo: upload=30; download=60; total="),
+        "unlimited subscriptions must not advertise used traffic as a quota"
     );
     assert!(server.wait().expect("server exits").success());
 }

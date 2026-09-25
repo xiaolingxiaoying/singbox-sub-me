@@ -586,22 +586,16 @@ const PROFILE_UPDATE_INTERVAL_HOURS: u32 = 24;
 
 /// The `subscription-userinfo` header value.
 ///
-/// subscription-userinfo follows the common client convention: upload and
-/// download are the bytes used in the current period, while `total` is the
-/// configured monthly allowance. Keep the historical used-total value when no
-/// allowance is configured so unlimited deployments remain informative.
+/// `upload` and `download` are the bytes used in the current period. `total`
+/// is only present when an actual monthly allowance is configured; omitting it
+/// avoids presenting current usage as a quota in client subscription cards.
 ///
 /// The key order is the wire contract: client apps parse the four traffic keys
 /// by position-insensitive name but display them in this order, so a new key
 /// goes last and never between the existing ones.
 fn subscription_userinfo(traffic: &crate::traffic::TrafficReport) -> String {
-    let quota = if traffic.monthly_traffic_limit > 0 {
-        traffic.monthly_traffic_limit
-    } else {
-        traffic.total()
-    };
-    format!(
-        "upload={}; download={}; total={}; expire={}; profile-update-interval={}",
+    let usage = format!(
+        "upload={}; download={}",
         // The two counters are the VPS network interface's own rx/tx
         // (`traffic.rs` reads `statistics/rx_bytes` and `tx_bytes`), while this
         // header is read from the CLIENT's side: every consumer app labels
@@ -612,10 +606,21 @@ fn subscription_userinfo(traffic: &crate::traffic::TrafficReport) -> String {
         // Shadowrocket alike.
         traffic.received,
         traffic.transmitted,
-        quota,
-        traffic.next_reset.timestamp(),
-        PROFILE_UPDATE_INTERVAL_HOURS
-    )
+    );
+    if traffic.monthly_traffic_limit > 0 {
+        format!(
+            "{usage}; total={}; expire={}; profile-update-interval={}",
+            traffic.monthly_traffic_limit,
+            traffic.next_reset.timestamp(),
+            PROFILE_UPDATE_INTERVAL_HOURS
+        )
+    } else {
+        format!(
+            "{usage}; expire={}; profile-update-interval={}",
+            traffic.next_reset.timestamp(),
+            PROFILE_UPDATE_INTERVAL_HOURS
+        )
+    }
 }
 
 /// A scannable SVG QR code of the given format's subscription URL. The QR
@@ -1335,8 +1340,8 @@ mod tests {
         };
         assert_eq!(
             super::subscription_userinfo(&unlimited),
-            "upload=36; download=71; total=112; expire=1767225600; profile-update-interval=24",
-            "without an allowance `total` keeps reporting the bytes used"
+            "upload=36; download=71; expire=1767225600; profile-update-interval=24",
+            "without an allowance the header must not invent a quota from bytes used"
         );
     }
 

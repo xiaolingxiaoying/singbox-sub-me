@@ -673,8 +673,8 @@ scripts 那条腿要放到 L2（WSL）或容器里跑。当前宿主 L1 结果�
 
 - `subscription-userinfo` 现在是 `upload/download/total/expire/profile-update-interval`，
   新键**追加在末尾**；构造逻辑抽成 `serve.rs::subscription_userinfo(&TrafficReport)`，键序由
-  U 测试 `the_userinfo_header_locks_its_key_order_and_names` 用**整串等式**锁死（含无额度时
-  `total` 回落为已用字节这条分支）。
+  U 测试 `the_userinfo_header_locks_its_key_order_and_names` 用**整串等式**锁死。配置额度时
+  输出 `total=<额度>`；无限额时省略 `total`，不再把已用量冒充总额度。
 - 值是**对客户端的策略声明**（24 小时），不是服务端行为的描述：仓库里**没有**任何"订阅自动刷新
   间隔"配置字段（`grep interval src/config.rs` 为空），所以它不是"读一个已有旋钮"，而是一句
   "客户端一天拉一次就够"。这一点写进了常量文档注释，避免以后有人以为它反映服务端节奏。

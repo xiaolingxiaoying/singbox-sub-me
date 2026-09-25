@@ -1,6 +1,6 @@
 # S8：mihomo 订阅补嗅探模板
 
-Status: ready-for-agent
+Status: resolved
 Type: task
 Blocked by: 01
 
@@ -24,3 +24,11 @@ mihomo 两份 YAML 没有任何 `sniffer` 配置（全仓 `rg sniffer src` 仅�
 - `sbctl sub --format clash` 与 `clash-1.18` 产物在 mihomo `-t` 下通过。
 - 文档 `docs/subscription-guide.md` 更新嗅探说明。
 - 单测/真核 CI 全绿。
+
+## Answer
+
+已实现并按真实 mihomo 接受的配置语法收敛。最初提议的 `sniff: { HTTP/TLS/QUIC: ... }`、`override-destination` 以及错误示例中的 `domain`/`dns` 不能直接照搬：用 CI 固定的 mihomo v1.19.30 真核探针验证后，工件采用 `sniffer: { enable: true, sniffing: [http, tls, quic] }`；不设置 `override-destination`，也不从订阅覆盖客户端自己的 `tun` / `dns-hijack`。
+
+两份 Clash 工件共享 `clash_sniffer()`；单测锁定嗅探只出现一次、两个文件字段一致。`mihomo-profiles` CI job 用固定真核加载所有 Clash 工件通过。订阅指南记录受支持字段和探针结论。
+
+验证证据：`cargo test -p sbctl --features test-signing` 的单测（202 passed）；真实 Mihomo CI job 通过（run [36125841380](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36125841380)）。当前提交的完整 CI run [36129918694](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36129918694) 仍在运行，另含相同 Mihomo 真核 job。
