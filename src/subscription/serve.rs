@@ -1053,6 +1053,136 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn acme_listener_rejects_oversized_request_headers() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral listener is available");
+        let port = listener.local_addr().expect("listener address").port();
+        let handler = tokio::spawn(super::serve_acme_listener(
+            listener,
+            Arc::new(DeploymentStore::new(fixture.path())),
+            None,
+        ));
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("the service accepts the connection");
+        let request = format!(
+            "GET /.well-known/acme-challenge/missing HTTP/1.1\r\nHost: localhost\r\nX-Large: {}\r\n\r\n",
+            "x".repeat(20 * 1024)
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("the oversized request is sent");
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut response))
+            .await
+            .expect("the bounded parser closes an oversized request promptly")
+            .expect("the response socket closes cleanly");
+        assert!(
+            !response.starts_with(b"HTTP/1.1 200 OK"),
+            "oversized headers must never reach a successful route"
+        );
+        handler.abort();
+    }
+
+    #[tokio::test]
+    async fn acme_listener_closes_a_client_that_sends_headers_too_slowly() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral listener is available");
+        let port = listener.local_addr().expect("listener address").port();
+        let handler = tokio::spawn(super::serve_acme_listener(
+            listener,
+            Arc::new(DeploymentStore::new(fixture.path())),
+            None,
+        ));
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("the service accepts the connection");
+        stream
+            .write_all(
+                b"GET /.well-known/acme-challenge/missing HTTP/1.1\r\nHost: localhost\r\nX-Slow: ",
+            )
+            .await
+            .expect("the incomplete request header is sent");
+        tokio::time::sleep(Duration::from_secs(6)).await;
+
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut response))
+            .await
+            .expect("the slow-header timeout closes the connection")
+            .expect("the response socket closes cleanly");
+        assert!(
+            !response.starts_with(b"HTTP/1.1 200 OK"),
+            "an incomplete request must never reach a successful route"
+        );
+        handler.abort();
+    }
+
+    #[tokio::test]
+    async fn acme_listener_drops_connections_beyond_its_concurrency_limit() {
+        const MAX_EXPECTED_OPEN_CONNECTIONS: usize = 32;
+
+        let fixture = TempDir::new().expect("temporary root is created");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral listener is available");
+        let port = listener.local_addr().expect("listener address").port();
+        let handler = tokio::spawn(super::serve_acme_listener(
+            listener,
+            Arc::new(DeploymentStore::new(fixture.path())),
+            None,
+        ));
+
+        let mut clients = Vec::new();
+        for _ in 0..=MAX_EXPECTED_OPEN_CONNECTIONS {
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("the service accepts a connection attempt");
+            stream
+                .write_all(
+                    b"GET /.well-known/acme-challenge/missing HTTP/1.1\r\nHost: localhost\r\nX-Hold: ",
+                )
+                .await
+                .expect("the incomplete request header is sent");
+            clients.push(stream);
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let (open, rejected) = loop {
+            let mut open = 0;
+            let mut rejected = 0;
+            for stream in &mut clients {
+                let mut byte = [0; 1];
+                match stream.try_read(&mut byte) {
+                    Ok(0) => rejected += 1,
+                    Ok(_) => open += 1,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => open += 1,
+                    Err(_) => rejected += 1,
+                }
+            }
+            if rejected > 0 || tokio::time::Instant::now() >= deadline {
+                break (open, rejected);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(
+            open > 0 && open <= MAX_EXPECTED_OPEN_CONNECTIONS,
+            "the listener should keep no more than 32 of 33 incomplete requests open (observed {open})"
+        );
+        assert!(
+            rejected > 0,
+            "the listener must close at least one of 33 simultaneous incomplete requests"
+        );
+        handler.abort();
+    }
+
+    #[tokio::test]
     async fn direct_tls_listener_serves_the_subscription_after_a_real_handshake() {
         let fixture = TempDir::new().expect("temporary root is created");
         let (store, config, credential) = seed_direct_subscription(&fixture);
