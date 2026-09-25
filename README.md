@@ -280,7 +280,7 @@ sbctl uninstall --purge
 /sub/<subscription-credential>/index                # 中文总览页（按客户端速查 + 全链接 + 标注 + 二维码 + 导入步骤）
 ```
 
-sing-box 完整配置包含 DNS（fake-ip、分流解析）、tun 入站、🚀节点选择/♻️自动选择代理组、geosite-cn/geoip-cn 分流、AI 域名（ChatGPT/OpenAI/X.com）分流与 clash_api；服务端运行的 sing-box 内核始终是最新稳定版（直接从官方 [SagerNet/sing-box](https://github.com/SagerNet/sing-box) 仓库下载）。客户端版本适配覆盖最新 5 个稳定 minor 版本，每个版本字段差异见 `docs/research/sing-box-client-version-differences.md`。需要注意的客户端兼容性在订阅矩阵和总览页中逐一标注：
+sing-box 完整配置包含 DNS（fake-ip、分流解析）、tun 入站、🚀节点选择/♻️自动选择代理组、geosite-cn/geoip-cn 分流、AI 域名（ChatGPT/OpenAI/X.com）分流与 clash_api；服务端运行的 sing-box 内核始终是最新稳定版（直接从官方 [SagerNet/sing-box](https://github.com/SagerNet/sing-box) 仓库下载）。直接官方下载安装会校验 GitHub Release API 为对应资产提供的 SHA-256；上游未提供摘要时会显式告警并继续兼容性检查。此摘要不是发布者签名；要求发布者签名验证时请使用签名 release manifest（ADR-0010、ADR-0024）。客户端版本适配覆盖最新 5 个稳定 minor 版本，每个版本字段差异见 `docs/research/sing-box-client-version-differences.md`。需要注意的客户端兼容性在订阅矩阵和总览页中逐一标注：
 
 - **1.10 / 1.11 客户端不支持 AnyTLS 节点**（1.12.0 才加入该协议）；AnyTLS-only 部署不会生成这两个版本的工件，其余格式不受影响。
 - 1.10 / 1.11 / 1.12 / 1.13 的工件**不含 `cache_file.store_dns` 乐观 DNS 缓存**（1.14.0 才加入）。

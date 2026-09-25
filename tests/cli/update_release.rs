@@ -45,6 +45,69 @@ fn update_check_reads_a_verified_release_manifest_without_changing_the_host() {
 
 #[cfg(unix)]
 #[test]
+fn official_sing_box_digest_mismatch_aborts_before_changing_the_host() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = TempDir::new().expect("temporary root is created");
+    initialize_update_fixture(&fixture);
+    let curl = fixture.path().join("usr/bin/curl");
+    fs::create_dir_all(curl.parent().expect("curl has a parent"))
+        .expect("fake curl directory is created");
+    fs::write(
+        &curl,
+        r##"#!/bin/sh
+set -eu
+output=
+url=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --output) output=$2; shift 2 ;;
+        *) url=$1; shift ;;
+    esac
+done
+case "$url" in
+    */releases/latest) printf '%s' '{"tag_name":"v1.14.1"}' > "$output" ;;
+    */releases/tags/v1.14.1) printf '%s' '{"assets":[{"name":"sing-box-1.14.1-linux-amd64.tar.gz","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}]}' > "$output" ;;
+    */sing-box-1.14.1-linux-amd64.tar.gz) printf '%s' 'tampered archive' > "$output" ;;
+    *) echo "unexpected URL: $url" >&2; exit 1 ;;
+esac
+"##,
+    )
+    .expect("fake curl is written");
+    fs::set_permissions(&curl, fs::Permissions::from_mode(0o700)).expect("fake curl is executable");
+
+    write_managed_file(&fixture, "usr/local/bin/sbctl", b"known-good sbctl");
+    write_managed_file(&fixture, "usr/local/bin/sing-box", b"known-good sing-box");
+    write_systemctl_fixture_recording_calls(&fixture);
+    let before = filesystem_snapshot(fixture.path());
+    let path = format!(
+        "{}:{}",
+        fixture.path().join("usr/bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "sing-box",
+            "update",
+        ])
+        .env("PATH", path)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "official sing-box archive does not match GitHub's SHA-256 digest",
+        ));
+
+    assert_eq!(filesystem_snapshot(fixture.path()), before);
+    assert!(!fixture.path().join(ROLLBACK_ROOT).exists());
+    assert!(!fixture.path().join(".systemctl-calls").exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn successful_signed_update_installs_both_candidates_and_keeps_a_rollback_point() {
     use std::os::unix::fs::PermissionsExt;
 

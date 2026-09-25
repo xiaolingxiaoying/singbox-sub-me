@@ -1,37 +1,36 @@
 # S5/S6：内核版本一致性与官方下载校验
 
-Status: ready-for-agent
+Status: in-progress
 Type: task
 Blocked by: 01
 
-## 现状
+## 现状（2026-09-25 复核）
 
-- 一键安装（release `install.sh`）与完整 `sbctl update` 走签名 manifest，
-  sing-box 版本被钉为 release 打包版本（默认 1.12.0，`release.yml:151`，
-  `scripts/generate-manifest.sh:25`）；README 却承诺「始终最新稳定版」（`README.md:281`）。
-- `sbctl install` / `sbctl sing-box update`（无 manifest）走官方最新稳定版，但
-  `src/update.rs:231-236,311-328` 只依赖 HTTPS + `sing-box version` 自检，无 SHA/签名。
+- release `install.sh` 和 manifest 更新路径使用固定版本签名 manifest；独立的
+  `sbctl install` / `sbctl sing-box update` 无 manifest 路径解析官方最新稳定版。
+- README 的最新稳定版表述与无 manifest 安装路径一致；原先关于 `release.yml`
+  固定默认 1.12.0 的判断已过时，不再作为本任务前提。
+- GitHub Releases API 为部分资产提供 `digest` 字段，但不保证每个版本都有值。
+  调查记录见 `docs/research/sing-box-official-release-digest.md`。
+- `src/update.rs` 已增加按精确资产名读取 SHA-256、下载后校验的实现；摘要缺失或
+  为 null 时明确告警并继续旧的兼容性检查；格式异常、资产缺失或哈希不符时拒绝。
 
-## 决策点
+## 决策
 
-二选一并写入 ADR：
-
-- A：一键安装改为「安装 release manifest 固定的内核，随后 `sbctl sing-box update` 到最新稳定版」，
-  README 修正为两段式描述；
-- B：保持 manifest 携带固定内核，README 删除「始终最新稳定版」表述。
-
-推荐 A（更接近目标文档「使用最新的稳定版内核」）。
+保留两条有意区分的信任路径：签名 manifest 固定版本并验证发布者签名；无 manifest
+官方直连路径取最新稳定版并使用 GitHub asset digest 做字节完整性检查。GitHub digest
+不是发布者签名。此边界写入 ADR-0024 与 README。
 
 ## 动作
 
-1. 按选定方案改 `scripts/install.sh` / `sbctl update` / README。
-2. 官方路径增加完整性校验：优先 GitHub Release API 提供的官方 SHA-256 摘要并在无摘要时显式警告；
-   把「无签名」风险写入 ADR 与 README 安全边界。
-3. 测试：manifest 安装 + 官方更新两条路径各有 CLI 集成用例（可用假内核桩）；
-   新增「官方路径失败时回滚」用例。
+1. 完成 digest 解析与 SHA-256 校验单测，补充官方更新 CLI 集成失败用例；当前新增的
+   归档摘要不匹配用例需由 Linux CI 执行，本机 Windows 按平台条件跳过。
+2. 检查 GitHub Actions 中全量 CLI 集成测试确实运行该用例，并验证工作树不变、无回滚点、
+   无服务重启。
+3. 确认成功下载校验用例与摘要缺失/null、格式错误、资产缺失的分支覆盖。
 
 ## 验收
 
 - README 与服务端实际行为逐条一致。
-- 两条更新路径都有失败回滚测试。
-- ADR 记录官方路径的信任边界。
+- 两条更新路径都有失败回滚测试，官方摘要校验失败不会改动主机。
+- ADR-0024 记录官方路径的信任边界。
