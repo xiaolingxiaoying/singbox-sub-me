@@ -267,6 +267,25 @@ fn default_client_latency_probe_url() -> String {
     "http://aliyun.com/generate_204".to_owned()
 }
 
+/// Keeps endpoint locations useful in previews while ensuring credentials and
+/// opaque query/fragment values never land in status output or logs.
+fn client_url_summary(value: &str) -> String {
+    let Ok(mut url) = url::Url::parse(value) else {
+        return "[invalid URL]".to_owned();
+    };
+    if !url.username().is_empty() || url.password().is_some() {
+        let _ = url.set_username("redacted");
+        let _ = url.set_password(Some("redacted"));
+    }
+    if url.query().is_some() {
+        url.set_query(Some("redacted"));
+    }
+    if url.fragment().is_some() {
+        url.set_fragment(Some("redacted"));
+    }
+    url.to_string()
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SubscriptionMode {
@@ -899,11 +918,11 @@ impl DeploymentConfig {
             format!("client rule profile: {}", self.client_rule_profile),
             format!(
                 "client rule-set base URL: {}",
-                self.client_rule_set_base_url
+                client_url_summary(&self.client_rule_set_base_url)
             ),
             format!(
                 "client latency probe URL: {}",
-                self.client_latency_probe_url
+                client_url_summary(&self.client_latency_probe_url)
             ),
             format!("enabled protocols: {protocols}"),
             "subscription credential: [redacted]".to_owned(),
@@ -1711,6 +1730,35 @@ mod tests {
         AccountingPolicy, CertificateMode, DeploymentConfig, DeploymentOptions, DeploymentStore,
         ManagedProtocol, ProtocolPorts, SubscriptionMode,
     };
+
+    #[test]
+    fn client_settings_summary_redacts_url_credentials_queries_and_fragments() {
+        let mut config = DeploymentConfig::new(
+            SubscriptionMode::IpFallback,
+            "203.0.113.7".into(),
+            None,
+            Some(2080),
+            "ens3".into(),
+            vec![ManagedProtocol::VlessReality],
+            Some("www.cloudflare.com".into()),
+        )
+        .expect("a base deployment is valid");
+        config.client_rule_set_base_url =
+            "https://alice:credential-secret@rules.example/base?token=query-secret#fragment-secret"
+                .into();
+
+        let summary = config.summary();
+
+        assert!(summary.contains("https://redacted:redacted@rules.example/base?redacted#redacted"));
+        for secret in [
+            "alice",
+            "credential-secret",
+            "query-secret",
+            "fragment-secret",
+        ] {
+            assert!(!summary.contains(secret), "summary exposed {secret}");
+        }
+    }
 
     #[test]
     fn read_state_returns_the_complete_version_or_none_without_writing() {
