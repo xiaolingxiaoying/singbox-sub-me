@@ -1,5 +1,7 @@
 # 发布就绪与 Ubuntu VPS 测试计划
 
+> **dev-sbctl 最新状态（2026-09-25）：** 服务端交互改进、CI systemd 验收和三种订阅模式的 VPS 实测已完成；生产签名发布仍未就绪。详见[dev-sbctl 服务端验证计划与结果](dev-sbctl-server-validation-plan.md)。本文件下方的 `master` 基线和 TODO 是 2026-09-22 的历史记录，不代表当前分支状态。
+
 > 2026-09-22 UTC 已在 Ubuntu 22.04 VPS 上执行当前提交 `a5fe586` 的 Direct 模式端到端
 > 测试，结论为 **No-Go**。独立 sing-box 更新会错误提交快速崩溃的候选且不自动回滚。
 > 完整记录见 [Ubuntu 22.04 VPS 端到端测试报告](ubuntu-22-vps-e2e-report-2026-09-22.md)。
