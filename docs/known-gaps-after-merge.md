@@ -7,8 +7,7 @@
 [target-spec-gap-and-verification-plan.md](target-spec-gap-and-verification-plan.md)（它列的是更完整的目标差距清单，本文只汇总合并后仍开放、且与三端目标直接相关的项）。
 
 构建与验证命令见 [verification-and-build-flow.md](verification-and-build-flow.md)。
-2026-09-24 的全项目审查与修复过程（含**本文若干建议被撤回**的证据）见
-[code-review-2026-09-24.md](code-review-2026-09-24.md)。
+2026-09-24 的审查记录属于阶段性工作材料；当前状态和后续行动以本文、相关工单及 Git 提交为准。
 
 ## 状态总表
 
@@ -57,7 +56,7 @@
 ## G3 — 订阅模板 `ClientTemplate::{Global,Split}` 是空壳
 
 > **2026-09-24 更新**：本条已落地，见 `feat(subscription): give Global and Split real content` 与
-> [code-review-2026-09-24.md](code-review-2026-09-24.md) R13。`for_template` 不再丢弃参数，
+> 此前代码审查记录中的 R13。`for_template` 不再丢弃参数，
 > 三档目录各自成立且 `standard` 逐字节未变；`minimal` 恢复"有分流但不碰 CDN"。
 > **仍欠**：新模板从未过真核 `sing-box check`/`mihomo -t`——那两个测试只渲染默认模板，
 > 把它们按模板参数化才是本条真正的收尾。下面原文保留作为背景。
@@ -180,4 +179,4 @@ ls .scratch/winvm 2>/dev/null || echo 'G8: no real-machine evidence collected ye
 echo "$WINVM_VMX"; ls .scratch/win11-vm/../../.scratch/reshoot-override.sh 2>/dev/null
 ```
 
-2026-09-24 的实测结果与逐条修复过程见 [code-review-2026-09-24.md](code-review-2026-09-24.md)。
+2026-09-24 的实测结果和修复过程已由相关工单与 Git 提交记录承接。

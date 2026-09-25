@@ -1,432 +1,61 @@
 # sbctl
 
-[![CI](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/workflows/ci.yml/badge.svg)](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/xiaolingxiaoying/singbox-sub-me/blob/master/Cargo.toml)
+`sbctl` 是 sing-box 服务端管理工具，用于在 Debian/Ubuntu VPS 上安装和管理 sing-box、启用代理协议并生成私有订阅。
 
-`sbctl` 是一个使用 Rust 编写的 sing-box 控制面工具，用于在单台 VPS 上部署和管理 sing-box，并生成私有订阅。
+## 功能
 
-项目的目标是保留 sing-box 作为数据面，将协议配置、订阅生成、证书生命周期、流量统计、服务管理和安全更新集中到一个可验证、可回滚的原生程序中。
-
-当前版本已具备从签名发布工件安装、配置五种协议、提供订阅、管理 systemd 服务以及安全更新/卸载的完整闭环。sing-box 内核默认从官方 [SagerNet/sing-box](https://github.com/SagerNet/sing-box) 仓库下载最新稳定版，也可通过签名 manifest 固定版本。项目面向有 Linux VPS 和 systemd 运维能力的用户；它不会替用户修改防火墙、接管现有代理或管理反向代理。
-
-## 功能概览
-
-- 支持五种 Managed protocol：
-  - VLESS Reality Vision
-  - VMess WebSocket
-  - Hysteria 2
-  - TUIC v5
-  - AnyTLS
-- 每个启用协议使用独立的 Proxy credential 和 Protocol listener port。
-- 端口支持手动指定，也支持自动分配。
-- 自动端口范围为 `10000–65535`，并统一检查 TCP/UDP 冲突和系统占用。
-- 生成多种订阅格式（完整矩阵见 `sbctl sub` 或 [docs/subscription-guide.md](docs/subscription-guide.md)）：
-  - sing-box JSON（精简/完整配置，1.10 → 最新稳定版逐版本适配）
-  - Clash/Mihomo YAML（现行稳定版 + 1.18 兼容版）
-  - URI 文本 / Base64 URI 文本（V2rayN 等）
-  - Shadowrocket 适配 Base64 URI
-  - 每条链接对应的二维码（SVG）与中文总览页
-- 按客户端速查：Clash Party、Clash Verge、sing-box、V2rayN、Shadowrocket 各有对应的推荐订阅链接（`sbctl sub` 与订阅总览页）。
-- 订阅凭据与协议凭据分离，只接受路径凭据，不接受 query 参数认证。
-- 支持 Direct、External proxy、IP fallback 三种订阅模式。
-- 支持 VPS 流量统计、自然月/锚定月账期和 `subscription-userinfo`。
-- 支持 sing-box 配置检查、原子提交、服务健康检查、更新回滚和可恢复卸载。
-- 安装前检测 Existing deployment，不自动接管已有的 sing-box 或 sing-box-yg 部署。
-
-## 五种协议
-
-| 协议 | 传输 | 端口类型 | 主要参数 |
-| --- | --- | --- | --- |
-| VLESS Reality | TCP | TCP | UUID、Reality key、short ID、SNI、fingerprint |
-| VMess WebSocket | WebSocket + TLS | TCP | UUID、WebSocket path、Host、TLS SNI |
-| Hysteria 2 | QUIC | UDP | password、TLS SNI |
-| TUIC v5 | QUIC | UDP | UUID、password、TLS SNI、`h3` |
-| AnyTLS | TCP + TLS | TCP | password、TLS SNI |
-
-高级参数暂时使用 sing-box 的安全默认值，不开放 Argo、Cloudflare 隧道、Psiphon/WARP 分流或复杂的协议调优选项。
+- 管理 VLESS Reality、VMess WebSocket、Hysteria 2、TUIC 和 AnyTLS。
+- 提供 sing-box、Clash/Mihomo、URI 等客户端订阅。
+- 管理 systemd 服务、TLS 证书、流量统计和签名更新，并在更新失败时回滚。
+- 安装和运行时需要 sing-box；服务端发布包包含签名校验所需的程序、运行时和安装文件。未完成的 TUI/GUI 客户端不包含在服务端 Release 中。
 
 ## 系统要求
 
-当前 V0.1 目标平台：
+- Debian 12 或 Ubuntu 22.04 及以上版本
+- amd64 或 arm64 VPS，使用 systemd
+- root 权限
+- 推荐准备解析到 VPS 的域名。Direct 模式需要公网 TCP 80/443；协议端口须按 `sbctl node` 输出自行在云防火墙和系统防火墙中放行。
 
-- Debian 12 或 Ubuntu 22.04+
-- systemd
-- amd64；发布流程同时准备 arm64 工件
-- 已安装或可从签名 manifest 下载经过校验的 sing-box
+## 安装
 
-当前版本不会自动支持 Alpine、非 systemd 系统、容器环境或 Windows/macOS 服务器。Docker/WSL2 仅用于开发和验收，不是生产部署目标。
-
-## 构建
-
-需要 Rust stable toolchain：
+在 VPS 上下载经过签名校验的安装脚本并运行：
 
 ```bash
-cargo build --release
-```
-
-生成的二进制位于：
-
-```text
-target/release/sbctl
-```
-
-## 一键安装
-
-在 Debian/Ubuntu VPS 上首次安装只需两条命令；脚本会先校验发布 manifest 和两个
-二进制，再以中文菜单引导选择订阅模式、域名/IP、网卡和协议：
-
-```bash
-curl -fL -o /tmp/sbctl-install.sh \
+curl -fL --retry 3 -o /tmp/sbctl-install.sh \
   https://github.com/xiaolingxiaoying/singbox-sub-me/releases/latest/download/install.sh
+test -s /tmp/sbctl-install.sh && sudo bash /tmp/sbctl-install.sh
+```
+
+如果已登录为 `root`，可将最后一行改成：
+
+```bash
 test -s /tmp/sbctl-install.sh && bash /tmp/sbctl-install.sh
 ```
 
-不要写成 `bash <(wget -qO- …)`：`wget -q` 在 404 时输出空内容，`bash` 读完空输入
-以 0 退出，安装看起来成功其实什么都没发生。先落盘再 `test -s` 才能把取不到脚本
-和取到空脚本都变成显式失败。`install.sh` 从带生产密钥的那个 release 起才作为资产
-发布；更早的 release 没有它，上面的 `curl -fL` 会直接报错。
+安装向导会询问订阅模式、域名或 IP、出口网卡和启用的协议。Direct 模式适用于域名已解析到 VPS 的情况；已有 Nginx/Caddy 时选择 External proxy；没有域名时可选择安全性较低的 IP fallback。安装程序不会自动修改防火墙，也不会接管现有 sing-box 或反向代理。
 
-脚本默认从最新 GitHub Release 取得与系统架构匹配的 manifest；可通过
-`SBCTL_MANIFEST_URL` 固定到指定版本。保留传递 `sbctl install` 参数的非交互入口，适合
-自动化部署；交互式安装不会修改防火墙，也不会接管已有 sing-box、sing-box-yg、Nginx 或 Caddy。
-
-安装完成后会安装快捷方式命令 `ly`。直接运行 `ly`（等价 `sbctl menu`，简写 `sbctl m`）
-进入 sing-box-yg 风格的全屏彩色菜单，以任务分组选择驱动：
-
-```
- 1. 安装与部署
- 2. 节点与协议
- 3. 订阅中心
- 4. 流量与账期
- 5. 服务与诊断
- 6. 更新与卸载
- 0. 退出
-```
-
-已安装部署进入主题配置后，回车会保持当前值；流量与账期主题覆盖每月流量上限、本周期流量修正、VPS 刷新时区、客户端显示时区、刷新规则、出口网卡以及对应的订阅服务端口。
-
-首次部署时，菜单提供快速安装和引导式安装。引导式安装会在写入服务与配置前展示脱敏摘要，确认后一次完成部署；也可运行 `sbctl install --guided` 直接打开向导。
-
-命令行方式检查服务并获取订阅地址：
-
-```bash
-systemctl status sbctl.service sing-box.service
-sbctl status
-sbctl sub          # 订阅 URL
-sbctl qr           # 订阅 URL 二维码
-```
-
-升级 sbctl 与 sing-box（自动拉取并校验最新签名 manifest）：
-
-```bash
-sbctl update --check   # 仅显示可用版本
-sbctl update           # 实际升级（含回滚点）
-sbctl sing-box update  # 从官方 SagerNet/sing-box 仓库升级到最新稳定版内核
-```
-
-卸载（保留备份与配置，`--purge` 连数据一起清除）：
-
-```bash
-sbctl uninstall
-```
-
-选择 `external-proxy` 时，sbctl 默认监听 `127.0.0.1:2080`，请在 Nginx/Caddy 中将 `/sub/` 反代到该地址。
-五个协议端口用 `sbctl node` 查看，并在 VPS 安全组/防火墙中放行；sbctl 不会自动修改防火墙。
-
-## 配置初始化
-
-如果需要先生成配置而不立即安装服务，可以使用 `config init`：
-
-```bash
-sbctl config init \
-  --mode direct \
-  --subscription-host sub.example.com \
-  --interface eth0 \
-  --protocol vless-reality \
-  --protocol vmess-websocket \
-  --protocol hysteria2 \
-  --protocol tuic \
-  --protocol anytls \
-  --reality-decoy-sni www.cloudflare.com \
-  --vless-port 12001 \
-  --vmess-port 12002 \
-  --hysteria2-port 12003 \
-  --tuic-port 12004 \
-  --anytls-port 12005 \
-  --sing-box-bin /usr/local/bin/sing-box
-```
-
-IP fallback 示例（无域名，启用全部五种协议）：
-
-```bash
-sbctl config init \
-  --mode ip-fallback \
-  --subscription-host 203.0.113.7 \
-  --http-port 2080 \
-  --interface eth0 \
-  --protocol vless-reality \
-  --protocol vmess-websocket \
-  --protocol hysteria2 \
-  --protocol tuic \
-  --protocol anytls \
-  --reality-decoy-sni www.cloudflare.com \
-  --protocol-sni www.bing.com
-```
-
-IP fallback 使用明文 HTTP 分发订阅，仅推荐在没有可用域名时使用。无域名时通过自签证书 + 协议伪装域名（`protocol_sni`，默认 `www.bing.com`）启用全部五种协议（VLESS Reality / VMess WebSocket / Hysteria2 / TUIC / AnyTLS），证书类协议客户端自动跳过证书校验。
-
-安装完成后，可使用配置向导修改已有部署。向导会先展示脱敏摘要，确认后才执行原子配置更新；直接回车会保留当前值：
-
-```bash
-sbctl config wizard
-sbctl config show
-sbctl config validate
-sbctl config switch-mode --mode external-proxy --listen-port 2080
-```
-
-向导还可设置协议监听证书模式（`domain` 或 `self-signed`）、账期策略、IANA 时区、首次锚定重置时间和每月流量上限。`self-signed` 证书只用于协议监听；Direct 订阅入口仍使用 Certbot/ACME 证书。
-
-## 订阅模式
-
-### Direct
-
-sbctl 直接提供 HTTPS 订阅并使用 Certbot/ACME 管理域名证书。该模式需要域名；公网 TCP `80/443` 由 systemd 的 `sbctl-http.socket` 持有，并通过 `LISTEN_FDS` 交给非 root 的 `sbctl` 服务进程按本地端口区分 HTTP-01 与 TLS 订阅。`sbctl` 与 `sing-box` 分别使用独立的无登录服务账户。
-
-证书在加载前校验有效期、SAN、私钥匹配与 SNI；安装时写入 Certbot 的 renewal deploy hook（`sbctl certificate verify`），续期后重新校验并把证书固定到 `sbctl`/`sing-box` 两个服务账户可读的私有副本，下一次 TLS 连接自动使用新证书。续期由 Debian/Ubuntu 的 `certbot.timer`（或手动 `sbctl certificate renew`）触发，首次用 `sbctl certificate obtain --email <EMAIL>` 签发。
-
-Direct 模式需要域名解析到 VPS，且公网 TCP `80/443` 可供 ACME 和订阅入口使用。首次部署后，先完成 Certbot 签发并验证证书，再确认 `sbctl.service` 与 `sbctl-http.socket` 均正常运行。
-
-### External proxy
-
-sbctl 只监听 loopback，由管理员维护的 Nginx、Caddy 或其他反向代理负责公网入口、TLS 和证书。sbctl 不会生成、修改或接管反向代理配置。
-
-### IP fallback
-
-sbctl 在配置的高位 HTTP 端口提供低安全性的 IP 订阅。该模式不使用 IP HTTPS 证书；证书类协议（VMess WebSocket、Hysteria2、TUIC、AnyTLS）需与 `self-signed` 证书模式配合，并为其指定一个协议伪装域名（`protocol_sni`），客户端会跳过证书校验。
+更多安装细节见 [`docs/installation.md`](docs/installation.md)。
 
 ## 常用命令
 
 ```bash
-# 查看部署状态和 VPS 流量
-sbctl status
-sbctl status --json
-sbctl traffic
-
-# 查看协议监听端口，不显示凭据
-sbctl node
-
-# 查看、校验配置
-sbctl config show
-sbctl config validate
-
-# 服务端覆写模板（统一追加分流规则，见 docs/subscription-guide.md）
-sbctl config override show
-sbctl config override edit clash
-sbctl config override validate
-
-# 输出订阅地址
-sbctl sub          # 全部链接矩阵（链接 + 二维码 + 标注 + 总览页）
-sbctl sub --format sing-box-full        # 单条链接（脚本友好）
-sbctl sub --format sing-box-1.12        # 指定 sing-box 版本适配
-sbctl sub --format clash / clash-1.18 / uri / base64-uri / shadowrocket
-
-# 二维码（终端渲染；默认 sing-box-full）
-sbctl qr
-sbctl qr shadowrocket   # 指定格式（位置参数）
-sbctl qr --all          # 渲染矩阵中全部格式的二维码
-
-# 轮换订阅凭据（旧订阅 URL 立即失效）
-sbctl credential rotate
-
-# Direct 模式证书
-sbctl certificate obtain --email admin@example.com
-sbctl certificate obtain --no-email        # 免邮箱（--register-unsafely-without-email，需二次确认）
-sbctl certificate renew
-sbctl certificate verify
-sbctl certificate status   # 有效期、SAN、剩余天数、deploy hook
-
-# 校验配置并重启服务
-sbctl restart --sing-box-bin /usr/local/bin/sing-box
-
-# 管理 sing-box 工件
-sbctl sing-box download --manifest /path/to/manifest.json --output /tmp/sing-box
-sbctl sing-box install --manifest /path/to/manifest.json --artifact /tmp/sing-box
-sbctl sing-box update           # 从官方 SagerNet/sing-box 仓库升级到最新稳定版（默认）
-sbctl sing-box update --manifest /path/to/manifest.json   # 签名 manifest 固定流程
-sbctl sing-box remove
-sbctl sing-box remove
-
-# 检查并执行经过校验的更新
-sbctl update --check --manifest /path/to/manifest.json
-sbctl update --manifest /path/to/manifest.json
-
-# 卸载；默认保留备份，--purge 才清理 sbctl 持久化数据
-sbctl uninstall
-sbctl uninstall --purge
+sbctl menu             # 交互式管理菜单（也可运行 ly）
+sbctl status           # 服务状态
+sbctl node             # 节点和协议端口
+sbctl sub              # 订阅地址
+sbctl update           # 更新 sbctl
+sbctl sing-box update  # 更新 sing-box 内核
+sbctl uninstall        # 卸载并保留备份
 ```
 
-订阅地址格式为（完整矩阵、按客户端速查、版本差异与导入说明见 [docs/subscription-guide.md](docs/subscription-guide.md)）：
-
-```text
-/sub/<subscription-credential>/sing-box.json        # 精简配置（历史格式，逐字节稳定）
-/sub/<subscription-credential>/sing-box-full.json   # 最新稳定版完整客户端配置
-/sub/<subscription-credential>/sing-box-1.10.json   # sing-box 1.10.x 适配（1.11/1.12/1.13/1.14 同理）
-/sub/<subscription-credential>/clash.yaml           # mihomo 现行稳定版（rule-set 分流）
-/sub/<subscription-credential>/clash-1.18.yaml      # mihomo 1.18.x 兼容（内置 GEOIP 规则）
-/sub/<subscription-credential>/uri                  # 明文分享 URI
-/sub/<subscription-credential>/uri.txt              # Base64 URI（V2rayN 等）
-/sub/<subscription-credential>/shadowrocket.txt     # Shadowrocket 适配
-/sub/<subscription-credential>/qr/<格式>            # 对应链接的二维码（SVG，扫码即导入）
-/sub/<subscription-credential>/index                # 中文总览页（按客户端速查 + 全链接 + 标注 + 二维码 + 导入步骤）
-```
-
-sing-box 完整配置包含 DNS（fake-ip、分流解析）、tun 入站、🚀节点选择/♻️自动选择代理组、geosite-cn/geoip-cn 分流、AI 域名（ChatGPT/OpenAI/X.com）分流与 clash_api；服务端运行的 sing-box 内核始终是最新稳定版（直接从官方 [SagerNet/sing-box](https://github.com/SagerNet/sing-box) 仓库下载）。直接官方下载安装会校验 GitHub Release API 为对应资产提供的 SHA-256；上游未提供摘要时会显式告警并继续兼容性检查。此摘要不是发布者签名；要求发布者签名验证时请使用签名 release manifest（ADR-0010、ADR-0024）。客户端版本适配覆盖最新 5 个稳定 minor 版本，每个版本字段差异见 `docs/research/sing-box-client-version-differences.md`。需要注意的客户端兼容性在订阅矩阵和总览页中逐一标注：
-
-- **1.10 / 1.11 客户端不支持 AnyTLS 节点**（1.12.0 才加入该协议）；AnyTLS-only 部署不会生成这两个版本的工件，其余格式不受影响。
-- 1.10 / 1.11 / 1.12 / 1.13 的工件**不含 `cache_file.store_dns` 乐观 DNS 缓存**（1.14.0 才加入）。
-- 1.10 / 1.11 使用旧版 DNS 服务器格式（1.14 已移除的写法），1.10 还使用旧版 sniff/hijack-dns 写法。
-
-覆写模板（`sbctl config override`）可在服务端统一追加规则，见 ADR-0021。
-
-### 主流客户端对应订阅链接
-
-| 客户端 | 推荐订阅链接 | 说明 |
-| --- | --- | --- |
-| Clash Party | `clash.yaml` | mihomo 内核，导入后自动更新节点 |
-| Clash Verge | `clash.yaml` | 内置内核较旧时可改用 `clash-1.18.yaml` |
-| sing-box | `sing-box-full.json`，或按内核版本选 `sing-box-<版本>.json` | 1.10/1.11 不支持 AnyTLS 节点 |
-| V2rayN | `uri.txt`（Base64 URI）；6.6+ 也可导入 `sing-box-full.json` | 双内核按导入方式二选一 |
-| Shadowrocket | `shadowrocket.txt` | 五协议均支持，需 ≥ 对应协议最低版本 |
-
-`subscription-credential` 与任何协议的 UUID、password 都不同。订阅响应会包含动态生成的 `subscription-userinfo`，其中的流量统计是整张配置网卡的 VPS traffic，不代表单个协议或用户的流量。
-
-新部署默认使用 America/Los_Angeles 作为 VPS 刷新时区、Asia/Shanghai 作为客户端参考显示时区；流量向导可快捷选择美西、美东（America/New_York）和中国时区，也接受任意 IANA 时区。需要自定义周期时，可在配置向导中选择 `anchored-month`，并设置首次重置时间。菜单中的流量输入按 GiB 处理（兼容 `GB` 后缀，按 1024³ bytes 换算），内部保存精确 byte 数。流量上限目前用于展示和订阅元数据，不会主动阻断 sing-box 数据面。
-
-## 性能调优（可选）
-
-`sbctl` 自身不修改内核。若 VPS 内核为 4.9+，可用 BBR（Google 的 TCP 拥塞控制算法）提升
-TCP 类协议（VLESS Reality / VMess WebSocket / AnyTLS）在长距离或丢包链路上的吞吐与延迟。
-该命令需要 root，只写内核 sysctl 并持久化到 `/etc/sysctl.d/`，不触碰 sing-box 配置：
+## 从源码构建
 
 ```bash
-# 查看当前内核拥塞控制与队列调度
-sudo sbctl system status
-
-# 启用 BBR + FQ（幂等；已是 bbr/fq 则不重复写入）并持久化
-sudo sbctl system bbr
+cargo build --release --locked -p sbctl --no-default-features
 ```
 
-> 说明：TUIC 的 QUIC 拥塞控制（`congestion_control=bbr`）属于协议层，客户端与服务端均支持时即生效，与上述内核级 BBR 无关。BBR 需内核支持；若内核过低，`sysctl -w` 会报错并中止，不会改动其他设置。
-
-## 客户端：sbtui（终端 TUI）与 sbgui（桌面 GUI）
-
-仓库提供两个共享同一控制面（`crates/client-core`）的客户端，消费 sbctl 的订阅：
-
-```bash
-cargo build --release -p sbtui   # 终端 TUI：Windows / macOS / Linux（另含 ly 短启动名）
-cargo build --release -p sbgui   # 桌面 GUI：Windows；Linux 需 X11 开发库（见下）
-```
-
-Linux 上构建 `sbgui` 会启用 GPUI 的 X11 后端（Wayland 桌面经 XWayland 也可运行），需要
-`libfontconfig1-dev`、`libfreetype6-dev`、`libx11-dev`、`libxcb1-dev`、`libxkbcommon-dev`、
-`libxkbcommon-x11-dev`、`libgl1-mesa-dev`、`libegl1-mesa-dev`、`libvulkan-dev`、`libasound2-dev`。
-只构建服务端（`-p sbctl`）或终端客户端（`-p sbtui`）不需要这些库。
-
-功能（两个客户端基本一致，规则视图的呈现方式不同）：订阅导入与自动归一化、代理组节点
-切换与延迟测试（含内核上报的节点延迟）、系统代理开关、TUN 模式、实时速率、内核内存与
-运行版本、连接表、日志查看、入站与分流规则查看（`sbtui` 为独立「入站」页）、内核下载与版本管理。
-控制通道在每次启动时改写为独立的本机 clash_api 端口和随机认证秘密，避免控制其他代理实例。
-
-详见 [sbtui 说明](crates/sbtui/README.md) 与 [sbgui 说明](crates/sbgui/README.md)；
-客户端功能全解见 [客户端功能与作用说明](docs/client-description.md)。
-
-## 安全边界
-
-- 不自动接管已有 sing-box、sing-box-yg、Caddy、Nginx 或防火墙配置。
-- 不使用远程未校验的 `curl | bash` 作为核心运行逻辑。
-- sing-box 工件必须经过固定 manifest 的 SHA-256 校验。
-- 订阅凭据只放在 URL path 中，拒绝 query 参数凭据。
-- 每个协议使用独立凭据，避免共享 UUID 导致权限范围扩大。
-- 配置、状态和订阅工件采用原子替换，并在失败时保留已知良好版本。
-- 默认卸载保留 root 可读备份；`--purge` 只删除 sbctl 明确拥有的数据。
-
-## 测试
-
-运行 Rust 测试和 Clippy：
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --features sbctl/test-signing
-cargo test -p sbctl --no-default-features --test release_trust
-```
-
-Debian/Ubuntu 黑盒验收脚本位于 [`tests/acceptance/run.sh`](tests/acceptance/run.sh)，需要
-Docker daemon 和 Linux 发布二进制。脚本会分别启动 Debian 12、Ubuntu 22.04、Ubuntu 24.04 的
-systemd 容器，因此 Docker 运行环境必须允许 `--privileged` 和 cgroup 挂载：
-
-```bash
-cargo build --release -p sbctl --features test-signing --target-dir target-fixtures
-SBCTL_ARTIFACT=/path/to/sbctl-linux-amd64 SBCTL_TEST_ARTIFACT=./target-fixtures/release/sbctl tests/acceptance/run.sh
-```
-
-验收 fixture 的边界和可复用 helper 见 [`tests/acceptance/README.md`](tests/acceptance/README.md)。
-WSL2 只属于 Development host，可用于编译、Rust 单测和隔离 root 的 CLI 检查；真实
-systemd Debian/Ubuntu VM 或等价环境才属于 Production host 验收依据。
-
-验收使用本地注入的 `sbctl` 发布二进制和容器内的 fake sing-box，不依赖 GitHub
-Release 或公网域名；容器仅用于验收，不代表 sbctl 支持容器作为生产部署环境。
-
-也可以使用仓库提供的 Compose 配置启动单个 systemd 验收容器（默认 Debian 12）：
-
-```bash
-SBCTL_ARTIFACT=./target/release/sbctl docker compose -f docker-compose.acceptance.yml up -d --build
-docker exec sbctl-acceptance systemctl is-system-running
-docker exec sbctl-acceptance /usr/local/lib/sbctl-acceptance/verify-bootstrap.sh
-docker compose -f docker-compose.acceptance.yml down
-```
-
-可通过 `BASE_IMAGE=ubuntu:22.04` 或 `BASE_IMAGE=ubuntu:24.04` 切换验收发行版。
-该配置需要 Docker Desktop/Engine 开启 Linux 容器、特权容器和 cgroup 挂载权限；Windows
-路径建议使用 WSL 路径执行。生产部署仍应使用 Debian/Ubuntu VPS 上的 systemd。
-
-把上述各条腿排成分层验证阶梯（L1 宿主 → L2 WSL → L3 Docker 验收 → L4 Xvfb 截图 → L5
-Windows 真机 → L6 VPS），并逐条写明每腿不能证明什么，见
-[`docs/target-spec-gap-and-verification-plan.md`](docs/target-spec-gap-and-verification-plan.md)
-第 6 节；同一文档第 5 节给出每个改动应在哪条腿上被证伪。
-
-## 发布与更新
-
-首次发布前必须完成[生产密钥配置与旧版本迁移](docs/release-signing.md)。公开开发密钥已从普通构建的信任根移除；缺少生产密钥时不会发布。
-
-推送 `v*` 标签会触发 GitHub Actions 发布流程，为 `amd64` 和 `arm64` 构建 sbctl，运行 Debian/Ubuntu systemd 验收，并上传 sing-box 工件和按架构区分的签名 manifest。安装器和运行时都会先验证 Ed25519 manifest 签名，再验证每个二进制的 SHA-256；不会信任 manifest 中的未固定 URL 或摘要。
-
-发布后的主机更新会保留回滚点，并在替换前执行候选 sing-box 的配置检查和服务健康检查：
-
-```bash
-sbctl update --check
-sbctl update
-sbctl sing-box update
-```
-
-完整的安装、systemd 单元和真实主机验收说明见 [`docs/installation.md`](docs/installation.md) 与 [`docs/release-readiness-and-vps-test-plan.md`](docs/release-readiness-and-vps-test-plan.md)。
-
-## 参考项目
-
-- [sing-box-yg](https://github.com/yonggekkk/sing-box-yg)：五协议配置、端口和节点输出的行为参考
-- [vps-sub-meter](https://github.com/xiaolingxiaoying/vps-sub-meter)：sing-box JSON、Clash Meta YAML、订阅服务和流量统计的参考
-- [sing-box](https://github.com/SagerNet/sing-box)：实际代理数据面
-
-本项目借鉴参考项目的协议和客户端兼容逻辑，但使用独立的 Rust 控制面、安全凭据模型和可回滚生命周期，不自动导入或接管参考项目的现有部署。
-
-## 当前限制
-
-- 暂不支持 Argo 临时/固定隧道。
-- 暂不支持 Cloudflare/CDN 优选 IP 自动化。
-- 暂不支持 Psiphon、WARP 分流。
-- 暂不提供旧 sing-box-yg 配置自动迁移。
-- 暂不提供 Web 管理面板、数据库或多管理员模型。
+生成的程序为 `target/release/sbctl`。生产 Release 使用 GitHub Actions 构建和签名；不要直接运行仓库里的 `scripts/install.sh`，它没有生产公钥。开发和验收说明见 [`docs/release-signing.md`](docs/release-signing.md) 与 [`tests/acceptance/README.md`](tests/acceptance/README.md)。
 
 ## 许可证
 
-当前 Cargo 包声明为 `MIT OR Apache-2.0`，详见 [`Cargo.toml`](Cargo.toml)。
+MIT OR Apache-2.0，详见 [`Cargo.toml`](Cargo.toml)。

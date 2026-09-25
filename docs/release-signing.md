@@ -4,9 +4,9 @@
 
 ## 配置一次新的生产密钥
 
-1. 在可信维护设备上运行 `cargo run -p sbctl -- release keygen --output <仓库外的私有目录>`。命令输出公钥，私钥写入该目录；不要把私钥提交到 Git、聊天、日志或发布工件。
+1. 在可信维护设备上运行 `cargo run -p sbctl -- release keygen --output <仓库外的私有目录>`。命令输出公钥，私钥写入该目录；不要把私钥提交到 Git、聊天、日志或发布工件。已有密钥可以继续使用，但更换公钥会使旧二进制无法验证新 manifest。
 2. 在 GitHub 仓库 Actions Variables 中设置 `SBCTL_RELEASE_PUBLIC_KEY_HEX`，值为命令输出的 64 位十六进制公钥。
-3. 创建 GitHub Environment `release`，在其 Secrets 中设置 `SBCTL_SIGNING_SEED`，值为新私钥文件的十六进制内容。建议限制可发布标签及允许使用该环境的维护者。
+3. 创建 GitHub Environment `release`，在其 Secrets 中设置 `SBCTL_SIGNING_SEED`，值为私钥文件中的 32 字节十六进制 seed。发布工作流只从此 Environment 读取 seed；不要将它设置为公开变量或写入仓库。
 4. 推送发布标签。构建 job 将公钥编译进普通 `sbctl`，package job 用私钥签名并由该二进制验签。公私钥不匹配、缺少密钥或仍使用公开开发密钥时，流程必须在上传发布工件前失败。
 
 `scripts/prepare-installer.py` 将同一个生产公钥写入发布工件 `install.sh`。仓库里的 `scripts/install.sh` 是未配置的模板，直接执行会失败。README 的安装入口已改为 GitHub Release 的 `install.sh` 工件。
@@ -34,4 +34,4 @@ cargo test -p sbctl --no-default-features --test release_trust
 
 systemd 验收分别传入 `SBCTL_ARTIFACT`（生产构建）和 `SBCTL_TEST_ARTIFACT`（独立目录中的测试签名构建）。公开测试签名的回滚场景使用后者；真实服务安装、非 root 启动和卸载使用前者。测试安装器只在验收容器的临时目录注入测试公钥，不会进入发布工件。
 
-本次修复没有生成或配置生产私钥，也没有触发发布；维护者完成上面的密钥配置后才能发布。
+v0.0.1 服务端 Release 只发布 `sbctl`、它管理的 sing-box 运行时、签名 manifest 和安装脚本；未完成的 TUI/GUI 不参与服务端发布。正式发布前仍须确认 `release` Environment 已配置上述 seed，并验证 Actions 的签名、安装和 systemd 验收全部通过。
