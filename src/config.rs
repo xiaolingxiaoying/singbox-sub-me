@@ -328,6 +328,16 @@ impl fmt::Display for ManagedProtocol {
 }
 
 impl ManagedProtocol {
+    pub fn label_zh(&self) -> &'static str {
+        match self {
+            Self::VlessReality => "VLESS Reality 节点",
+            Self::VmessWebsocket => "VMess WebSocket 节点",
+            Self::Hysteria2 => "Hysteria2 节点",
+            Self::Tuic => "TUIC 节点",
+            Self::Anytls => "AnyTLS 节点",
+        }
+    }
+
     pub fn has_generated_subscription_artifacts(&self) -> bool {
         matches!(
             self,

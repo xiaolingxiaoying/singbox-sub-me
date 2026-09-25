@@ -31,6 +31,8 @@ sbctl 在同一份节点模型上生成多种订阅格式。所有链接都在 `
 
 `sbctl sub` 会先输出以上按客户端速查，再输出完整矩阵；`index` 总览页顶部同样提供该速查表。
 
+管理员可以在服务器终端运行 `sbctl node --links` 查看各协议原生分享链接；链接含 Proxy credential，因此默认的 `sbctl node` 不会显示。可以用 `--protocol vless-reality` 等协议名筛选，`--qr` 会在终端渲染对应链接的二维码（需要同时指定 `--links`）。旧参数 `--uri` 仍可作为 `--links` 的兼容别名。订阅总览页中的节点链接默认折叠，展开后才显示；不要截图或转发这些链接。
+
 ## 完整客户端配置包含什么
 
 `sing-box-full.json`（及各版本文件）与 `sing-box.json` 的区别：

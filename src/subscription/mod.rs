@@ -37,7 +37,7 @@ pub use template::{
 /// `hysteria2://…`, `tuic://…`, `anytls://…`).
 ///
 /// This is the same string the `uri` artifact carries, exposed so the index page
-/// and `sbctl status nodes --uri` can show a node's parameters without making the
+/// and `sbctl node --links` can show a node's parameters without making the
 /// operator download a credential'd file to see their own configuration. The
 /// returned line keeps its trailing newline, matching the artifact byte-for-byte.
 pub fn node_share_link(

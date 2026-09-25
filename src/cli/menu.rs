@@ -211,19 +211,28 @@ fn menu_protocols(root: &Path) {
         print_menu_section("节点与协议");
         println!("1. 查看节点与监听端口");
         println!("2. 配置协议启停、端口、SNI 和证书");
+        println!("3. 查看节点分享链接（含节点凭据）");
         println!("0. 返回");
         match read_menu_choice("请选择 [0]: ").as_deref() {
             Some("0") | None => return,
             Some("1") => {
-                print_nodes(root, false);
+                print_nodes(root, false, None, false);
                 pause_menu();
             }
             Some("2") => {
                 run_topic_wizard(root, sbctl::wizard::ConfigurationTopic::Protocols);
                 pause_menu();
             }
+            Some("3") => {
+                if confirm_menu_action(
+                    "确认显示节点分享链接？链接包含 Proxy credential，会显示在当前终端",
+                ) {
+                    print_nodes(root, true, None, false);
+                }
+                pause_menu();
+            }
             Some(_) => {
-                eprintln!("无效选择，请输入 0 到 2。");
+                eprintln!("无效选择，请输入 0 到 3。");
                 pause_menu();
             }
         }

@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::{ConfigError, DeploymentConfig, DeploymentStore};
+use crate::config::{ConfigError, DeploymentConfig, DeploymentStore, ManagedProtocol};
 
 const SING_BOX_UNIT: &str = "etc/systemd/system/sing-box.service";
 const SBCTL_UNIT: &str = "etc/systemd/system/sbctl.service";
@@ -686,8 +686,16 @@ pub fn required_firewall_ports(config: &DeploymentConfig) -> Vec<String> {
 }
 
 pub fn enabled_nodes(config: &DeploymentConfig) -> String {
+    enabled_nodes_for_protocol(config, None)
+}
+
+pub fn enabled_nodes_for_protocol(
+    config: &DeploymentConfig,
+    protocol: Option<&ManagedProtocol>,
+) -> String {
     crate::canonical::nodes(config)
         .iter()
+        .filter(|node| protocol.is_none_or(|protocol| &node.protocol() == protocol))
         .map(|node| {
             format!(
                 "{}: {} {}",

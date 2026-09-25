@@ -43,8 +43,14 @@ pub(crate) enum Command {
         /// Also print each node's native share link (`vless://…` and friends).
         /// Those carry the proxy credentials, so they reach this terminal only
         /// and are never written to the journal.
-        #[arg(long)]
-        uri: bool,
+        #[arg(long, alias = "uri")]
+        links: bool,
+        /// Restrict the node list and any share links to one Managed protocol.
+        #[arg(long, value_enum)]
+        protocol: Option<CliManagedProtocol>,
+        /// Render a terminal QR code for each displayed share link.
+        #[arg(long, requires = "links")]
+        qr: bool,
     },
     /// Validate the active sing-box configuration and restart both managed services.
     Restart {
