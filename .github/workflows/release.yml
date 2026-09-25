@@ -70,115 +70,30 @@ jobs:
           name: sbctl-${{ matrix.arch }}
           path: sbctl-linux-${{ matrix.arch }}
 
-  build-sbtui:
+  build-acceptance-client:
     needs: checks
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            artifact: sbtui-windows-amd64.exe
-            shortcut: ly-windows-amd64.exe
-          - os: macos-14
-            artifact: sbtui-macos-arm64
-            shortcut: ly-macos-arm64
-          - os: ubuntu-22.04
-            artifact: sbtui-linux-amd64
-            shortcut: ly-linux-amd64
-    runs-on: ${{ matrix.os }}
+    # Build the client only as a test fixture for server acceptance. It is
+    # deliberately never downloaded by the release packaging job.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux GUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev libfreetype6-dev libx11-dev libxcb1-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libgl1-mesa-dev \
+            libegl1-mesa-dev libvulkan-dev libasound2-dev
       - run: cargo build --release --locked -p sbtui
-      - name: Stage the desktop binary and the ly shortcut
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cp target/release/sbtui.exe "${{ matrix.artifact }}"
-            cp target/release/ly.exe "${{ matrix.shortcut }}"
-          else
-            cp target/release/sbtui "${{ matrix.artifact }}"
-            cp target/release/ly "${{ matrix.shortcut }}"
-            chmod +x "${{ matrix.artifact }}" "${{ matrix.shortcut }}"
-          fi
-          cp crates/sbtui/packaging/install.sh sbtui-install.sh
-          chmod +x sbtui-install.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: sbtui-bin-${{ matrix.os }}
-          path: |
-            ${{ matrix.artifact }}
-            ${{ matrix.shortcut }}
-            sbtui-install.sh
-
-  build-sbgui:
-    needs: checks
-    # The desktop GUI is a separate binary from the TUI and ships in the MSI;
-    # it is Windows-first, so only the AMD64 image is published for now.
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release --locked -p sbgui
-      - name: Stage the GUI binary
-        shell: bash
-        run: |
-          set -euo pipefail
-          cp target/release/sbgui.exe sbgui-windows-amd64.exe
-          ls -l sbgui-windows-amd64.exe
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sbgui-bin-windows-latest
-          path: sbgui-windows-amd64.exe
-
-  build-msi:
-    needs: [build-sbtui, build-sbgui]
-    # WiX v4 packs the three release binaries the manifest declares; the
-    # artifact names and file names match the paths in sbtui.wxs exactly, so a
-    # rename in either place fails this job instead of shipping a broken MSI.
-    runs-on: windows-latest
-    env:
-      # Highest WiX v4 CLI release; sbtui.wxs is v4 markup.
-      WIX_VERSION: 4.0.6
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: sbtui-bin-windows-latest
-          path: staging-tui
-      - uses: actions/download-artifact@v4
-        with:
-          name: sbgui-bin-windows-latest
-          path: staging-gui
-      - name: Place the binaries where the manifest expects them
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p packaging/windows/bin
-          cp staging-tui/sbtui-windows-amd64.exe packaging/windows/bin/sbtui.exe
-          cp staging-tui/ly-windows-amd64.exe packaging/windows/bin/ly.exe
-          cp staging-gui/sbgui-windows-amd64.exe packaging/windows/bin/sbgui.exe
-          ls -l packaging/windows/bin
-      - name: Install the WiX v4 command line
-        shell: pwsh
-        run: dotnet tool install wix --tool-path "$env:RUNNER_TEMP\wix" --version $env:WIX_VERSION
-      - name: Build the MSI
-        shell: pwsh
-        working-directory: packaging/windows
-        run: |
-          $ErrorActionPreference = 'Stop'
-          & "$env:RUNNER_TEMP\wix\wix.exe" build sbtui.wxs -arch x64 -o sbtui-windows-amd64.msi
-          Get-Item sbtui-windows-amd64.msi | Select-Object Name, Length
-      - uses: actions/upload-artifact@v4
-        with:
-          # Deliberately not `sbtui-msi-*`: the package job selects artifact
-          # families by glob, and this keeps the MSI an explicit, separate one.
-          name: msi-windows-latest
-          path: packaging/windows/sbtui-windows-amd64.msi
+          name: acceptance-sbtui-linux-amd64
+          path: target/release/sbtui
+          if-no-files-found: error
 
   acceptance:
-    needs: [build-sbctl, build-sbtui]
+    needs: [build-sbctl, build-acceptance-client]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -191,7 +106,7 @@ jobs:
       # before starting a container and the release publishes unverified bytes.
       - uses: actions/download-artifact@v4
         with:
-          name: sbtui-bin-ubuntu-22.04
+          name: acceptance-sbtui-linux-amd64
       - run: chmod 0755 sbtui-linux-amd64
       - uses: dtolnay/rust-toolchain@stable
       - name: Build isolated fixture verifier (never uploaded)
@@ -200,7 +115,7 @@ jobs:
         run: SBCTL_ARTIFACT="$GITHUB_WORKSPACE/sbctl-linux-amd64" SBCTL_TEST_ARTIFACT="$GITHUB_WORKSPACE/target-fixtures/release/sbctl" SBCTUI_ARTIFACT="$GITHUB_WORKSPACE/sbtui-linux-amd64" sh tests/acceptance/run.sh
 
   package:
-    needs: [build-sbctl, build-sbtui, build-sbgui, build-msi, acceptance]
+    needs: [build-sbctl, acceptance]
     # The only job allowed to create or publish a release.
     permissions:
       contents: write
@@ -213,20 +128,6 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: sbctl-*
-          merge-multiple: true
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: sbtui-*
-          merge-multiple: true
-      # The GUI binary and the MSI are separate artifact families so the TUI
-      # matrix and the Windows installer stay independently selectable.
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: sbgui-*
-          merge-multiple: true
-      - uses: actions/download-artifact@v4
-        with:
-          name: msi-windows-latest
           merge-multiple: true
       - name: Resolve sing-box release version
         id: sing-box-version
@@ -309,9 +210,5 @@ jobs:
           # already-installed host will download and trust.
           gh release upload "$RELEASE_TAG" \
             sbctl-linux-amd64 sbctl-linux-arm64 sing-box-linux-amd64 sing-box-linux-arm64 \
-            sbtui-windows-amd64.exe sbtui-macos-arm64 sbtui-linux-amd64 \
-            ly-windows-amd64.exe ly-macos-arm64 ly-linux-amd64 sbtui-install.sh \
-            sbgui-windows-amd64.exe sbtui-windows-amd64.msi \
-            crates/sbtui/packaging/install.ps1 \
             manifest-amd64.json manifest-arm64.json install.sh \
             --repo "$GITHUB_REPOSITORY"

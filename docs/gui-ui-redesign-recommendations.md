@@ -3,7 +3,7 @@
 > 文档状态：设计建议稿  
 > 审计日期：2026-09-19  
 > 审计范围：概览、订阅、节点、规则、连接、日志、设置及退出确认流程  
-> 截图来源：`/.scratch/gui-screenshots/`
+> 原始桌面截图和自动化脚本是本地验收材料，未纳入仓库；本文保留设计建议。
 
 ## 1. 改版目标
 
@@ -102,7 +102,7 @@
 
 ### 5.1 概览
 
-参考截图：[`01-dashboard.png`](../.scratch/gui-screenshots/01-dashboard.png)、[`02-dashboard-tall.png`](../.scratch/gui-screenshots/02-dashboard-tall.png)
+参考截图：`01-dashboard.png`、`02-dashboard-tall.png`
 
 建议在页面顶部首先显示连接状态卡，内容包括：
 
@@ -124,7 +124,7 @@
 
 ### 5.2 订阅
 
-参考截图：[`03-subscriptions.png`](../.scratch/gui-screenshots/03-subscriptions.png)
+参考截图：`03-subscriptions.png`
 
 “导入订阅地址”属于低频操作，不应长期占据页面顶部的大块空间。建议改为顶部工具栏：
 
@@ -147,7 +147,7 @@
 
 ### 5.3 节点
 
-参考截图：[`04-proxies.png`](../.scratch/gui-screenshots/04-proxies.png)
+参考截图：`04-proxies.png`
 
 节点页是客户端最重要的高频操作页之一，应优先提升操作效率。
 
@@ -167,7 +167,7 @@
 
 ### 5.4 规则
 
-参考截图：[`05-rules.png`](../.scratch/gui-screenshots/05-rules.png)
+参考截图：`05-rules.png`
 
 规则页现有结构已经较为清楚。建议进一步统一为表格：
 
@@ -184,7 +184,7 @@
 
 ### 5.5 连接
 
-参考截图：[`06-connections.png`](../.scratch/gui-screenshots/06-connections.png)
+参考截图：`06-connections.png`
 
 建议将默认重点列调整为：
 
@@ -210,7 +210,7 @@
 
 ### 5.6 日志
 
-参考截图：[`07-logs.png`](../.scratch/gui-screenshots/07-logs.png)
+参考截图：`07-logs.png`
 
 日志页建议采用更接近开发工具的日志查看器设计：
 
@@ -225,7 +225,7 @@
 
 ### 5.7 设置
 
-参考截图：[`08-settings.png`](../.scratch/gui-screenshots/08-settings.png)
+参考截图：`08-settings.png`
 
 设置页是当前最需要重新排版的页面。双列卡片高度不一致，导致阅读顺序不稳定；“输入后按 Enter 保存”也缺乏明确反馈。
 
@@ -262,7 +262,7 @@
 
 ### 5.8 退出确认
 
-参考截图：[`09-exit-confirm.png`](../.scratch/gui-screenshots/09-exit-confirm.png)
+参考截图：`09-exit-confirm.png`
 
 建议文案调整为：
 
@@ -394,15 +394,15 @@ Segoe UI Variable, Microsoft YaHei UI, Noto Sans SC, sans-serif
 
 本次建议基于以下静态截图：
 
-1. [`00-initial.png`](../.scratch/gui-screenshots/00-initial.png)：初始状态。
-2. [`01-dashboard.png`](../.scratch/gui-screenshots/01-dashboard.png)：运行中概览。
-3. [`02-dashboard-tall.png`](../.scratch/gui-screenshots/02-dashboard-tall.png)：高窗口概览。
-4. [`03-subscriptions.png`](../.scratch/gui-screenshots/03-subscriptions.png)：订阅管理。
-5. [`04-proxies.png`](../.scratch/gui-screenshots/04-proxies.png)：节点选择。
-6. [`05-rules.png`](../.scratch/gui-screenshots/05-rules.png)：规则查看。
-7. [`06-connections.png`](../.scratch/gui-screenshots/06-connections.png)：活动连接。
-8. [`07-logs.png`](../.scratch/gui-screenshots/07-logs.png)：日志查看。
-9. [`08-settings.png`](../.scratch/gui-screenshots/08-settings.png)：设置。
-10. [`09-exit-confirm.png`](../.scratch/gui-screenshots/09-exit-confirm.png)：退出确认。
+1. `00-initial.png`：初始状态。
+2. `01-dashboard.png`：运行中概览。
+3. `02-dashboard-tall.png`：高窗口概览。
+4. `03-subscriptions.png`：订阅管理。
+5. `04-proxies.png`：节点选择。
+6. `05-rules.png`：规则查看。
+7. `06-connections.png`：活动连接。
+8. `07-logs.png`：日志查看。
+9. `08-settings.png`：设置。
+10. `09-exit-confirm.png`：退出确认。
 
 静态截图无法验证键盘操作、焦点顺序、悬浮反馈、滚动行为、窗口动态缩放、实际颜色对比度和屏幕阅读器语义。这些内容需要在运行中的 GUI 客户端上继续测试。
