@@ -125,6 +125,7 @@ jobs:
     runs-on: ubuntu-22.04
     environment: release
     env:
+      GH_TOKEN: ${{ github.token }}
       SBCTL_RELEASE_PUBLIC_KEY_HEX: ${{ vars.SBCTL_RELEASE_PUBLIC_KEY_HEX }}
     steps:
       - uses: actions/checkout@v4
