@@ -214,6 +214,117 @@ fn certificate_obtain_runs_certbot_and_pins_the_renewed_certificate() {
     let _ = credential;
 }
 
+#[cfg(unix)]
+#[test]
+fn certificate_renew_pins_the_certificate_written_by_certbot() {
+    let fixture = supported_systemd_host();
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    seed_direct_config(&fixture);
+    seed_live_certificate(&fixture, &["sub.example.test"]);
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "certificate",
+            "verify",
+        ])
+        .assert()
+        .success();
+
+    let renewed = rcgen::generate_simple_self_signed(vec!["sub.example.test".into()])
+        .expect("a replacement certificate is generated");
+    let renewed_fullchain = renewed.cert.pem();
+    let renewed_private_key = renewed.signing_key.serialize_pem();
+    let root = fixture.path();
+    fs::write(
+        root.join("var/lib/sbctl/renewed-fullchain.pem"),
+        &renewed_fullchain,
+    )
+    .expect("replacement fullchain is staged");
+    fs::write(
+        root.join("var/lib/sbctl/renewed-privkey.pem"),
+        &renewed_private_key,
+    )
+    .expect("replacement private key is staged");
+
+    let certbot = root.join("usr/bin/certbot");
+    fs::create_dir_all(certbot.parent().expect("certbot has a parent"))
+        .expect("certbot fixture directory is created");
+    fs::write(
+        &certbot,
+        r#"#!/bin/sh
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+printf '%s\n' "$*" > "$root/.certbot-args"
+cp "$root/var/lib/sbctl/renewed-fullchain.pem" "$root/etc/letsencrypt/live/sub.example.test/fullchain.pem"
+cp "$root/var/lib/sbctl/renewed-privkey.pem" "$root/etc/letsencrypt/live/sub.example.test/privkey.pem"
+"#,
+    )
+    .expect("certbot renewal fixture is written");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&certbot, fs::Permissions::from_mode(0o700))
+            .expect("certbot fixture is executable");
+    }
+
+    let renewal_output = Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            root.to_str().expect("fixture path is UTF-8"),
+            "certificate",
+            "renew",
+        ])
+        .output()
+        .expect("renew output is captured");
+    assert!(
+        renewal_output.status.success(),
+        "a valid renewed certificate is published: {}",
+        String::from_utf8_lossy(&renewal_output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&renewal_output.stdout).contains("certificate operation completed")
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".certbot-args")).expect("Certbot arguments are recorded"),
+        "renew --cert-name sub.example.test --non-interactive\n"
+    );
+
+    let pinned = root.join("var/lib/sbctl/certificates/sub.example.test");
+    assert_eq!(
+        fs::read(pinned.join("fullchain.pem")).expect("renewed fullchain is pinned"),
+        renewed_fullchain.as_bytes()
+    );
+    assert_eq!(
+        fs::read(pinned.join("privkey.pem")).expect("renewed private key is pinned"),
+        renewed_private_key.as_bytes()
+    );
+
+    // `certificate status` reports hook presence as part of the deployment
+    // health summary. Model the hook installed by the real installer.
+    let hook = root.join(sbctl::lifecycle::CERTBOT_DEPLOY_HOOK_RELATIVE_PATH);
+    fs::create_dir_all(hook.parent().expect("deploy hook has a parent"))
+        .expect("deploy hook directory is created");
+    fs::write(&hook, "#!/bin/sh\nexec sbctl certificate verify\n")
+        .expect("deploy hook fixture is written");
+
+    let status = Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            root.to_str().expect("fixture path is UTF-8"),
+            "certificate",
+            "status",
+        ])
+        .output()
+        .expect("certificate status output is captured");
+    assert!(status.status.success());
+    let status = String::from_utf8_lossy(&status.stdout);
+    assert!(status.contains("状态: 有效"));
+    assert!(status.contains("Certbot deploy hook: 已安装"));
+}
+
 #[test]
 fn certificate_commands_refuse_non_direct_modes_without_touching_any_certificate_path() {
     let fixture = supported_systemd_host();
