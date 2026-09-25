@@ -86,10 +86,11 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-dev libgl1-mesa-dev \
             libegl1-mesa-dev libvulkan-dev libasound2-dev
       - run: cargo build --release --locked -p sbtui
+      - run: cp target/release/sbtui sbtui-linux-amd64
       - uses: actions/upload-artifact@v4
         with:
           name: acceptance-sbtui-linux-amd64
-          path: target/release/sbtui
+          path: sbtui-linux-amd64
           if-no-files-found: error
 
   acceptance:
