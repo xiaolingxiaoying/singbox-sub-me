@@ -47,6 +47,30 @@ jobs:
       - run: cargo test --workspace --features sbctl/test-signing
       - run: cargo test -p sbctl --no-default-features --test release_trust
 
+  server-acceptance:
+    needs: [build-sbctl-linux-amd64, test]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sbctl-linux-amd64
+          path: staging-sbctl
+      - run: chmod 0755 staging-sbctl/sbctl
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Build isolated systemd acceptance artifacts
+        run: |
+          cargo build --release --locked -p sbctl --features sbctl/test-signing --target-dir target-fixtures
+          cargo build --release --locked -p sbtui
+      - name: Verify the production artifact on Debian and Ubuntu systemd hosts
+        env:
+          SBCTL_ARTIFACT: ${{ github.workspace }}/staging-sbctl/sbctl
+          SBCTL_TEST_ARTIFACT: ${{ github.workspace }}/target-fixtures/release/sbctl
+          SBCTUI_ARTIFACT: ${{ github.workspace }}/target/release/sbtui
+        run: sh tests/acceptance/run.sh
+
   prototype:
     runs-on: ubuntu-24.04
     defaults:
