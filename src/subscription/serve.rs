@@ -1082,8 +1082,9 @@ mod tests {
             .expect("the bounded parser closes an oversized request promptly")
             .expect("the response socket closes cleanly");
         assert!(
-            !response.starts_with(b"HTTP/1.1 200 OK"),
-            "oversized headers must never reach a successful route"
+            response.starts_with(b"HTTP/1.1 431 "),
+            "oversized headers must be rejected with 431, got: {}",
+            String::from_utf8_lossy(&response)
         );
         handler.abort();
     }
