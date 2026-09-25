@@ -3,10 +3,11 @@
 //! The page opens with a per-client quick-pick table (Clash Party, Clash Verge,
 //! sing-box, V2rayN, Shadowrocket), then lists every subscription link with its
 //! version label, the matching scannable QR code, and per-client import
-//! instructions. It carries no external resources, so it renders offline and a
-//! credential rotation invalidates the whole page together with every link it
-//! shows. A broken accounting state degrades the traffic badges but never the
-//! links themselves.
+//! instructions. Native proxy share links appear in a collapsed disclosure so
+//! credentials are not immediately visible when the overview opens. It carries
+//! no external resources, so it renders offline and a credential rotation
+//! invalidates the whole page together with every link it shows. A broken
+//! accounting state degrades the traffic badges but never the links themselves.
 
 use chrono_tz::Tz;
 
@@ -60,7 +61,7 @@ pub fn render(store: &DeploymentStore, config: &DeploymentConfig) -> Result<Stri
     let mut node_rows = String::new();
     for node in crate::canonical::nodes(config) {
         node_rows.push_str("<tr><th>");
-        node_rows.push_str(&esc(node.tag()));
+        node_rows.push_str(&esc(node.protocol().label_zh()));
         node_rows.push_str(&format!(
             "</th><td><code>{}</code></td></tr>",
             esc(crate::subscription::node_share_link(config, &node).trim())
@@ -120,8 +121,10 @@ code {{ background: #8882; border-radius: .3rem; padding: 0 .3rem; }}\n\
 <h2>按客户端选择</h2>\n\
 <table>\n{client_rows}</table>\n\
 <h2>节点与原生分享链接</h2>\n\
+<details><summary>查看节点分享链接（含节点凭据）</summary>\n\
 <p class=\"note\">下面每条链接与 <code>uri</code> 订阅工件内容一致，含节点凭据；本页本身已受订阅凭据保护，请勿将其截图或转发。</p>\n\
 <table>\n{node_rows}</table>\n\
+</details>\n\
 <h2>全部订阅链接</h2>\n\
 {rows}\n\
 <h2>客户端导入</h2>\n\

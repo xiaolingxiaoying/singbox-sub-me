@@ -35,7 +35,7 @@
 - **G4** 策略组薄：sing-box 固定 1 selector + 1 urltest + direct，Clash 固定 3 组；无 fallback / load-balancing / 区域分组。
 - **G5** 节点原生协议链接**已生成但从不展示**：`sbctl sub` 只打印订阅 URL（`src/cli/commands/serve.rs:52-121`），`sbctl nodes` 只打印 `protocol: TRANSPORT port`（`src/lifecycle.rs:531-544`），index 页根本不碰 `canonical::nodes`（`src/index_page.rs:37-78`）。
 - **G6** `subscription-userinfo` 缺 `profile-update-interval`（Clash/Verge/Shadowrocket 会认这个键）。
-- **G7** "最新稳定版往前 5 个版本"是**写死的 1.10–1.14 固定带，不会滑动**：`SING_BOX_VERSION_PROFILES` 是常量数组（`src/subscription/profile.rs:136-182`），`latest_version_profile()` 返回 `.last()`（`:185-189`），`sing-box-full.json` 就用它（`src/subscription/artifacts.rs:298`）。上游一发 1.15：服务端装 1.15，`sing-box-full.json` 仍指向 1.14，`sing-box-1.15.json` 直接 404。真核校验存在但被 `#[ignore]` 且环境变量缺失时**静默跳过**（`tests/version_profiles.rs:62-65`）。**→ 部分关闭**：静默跳过与 CI 带检查已在 Phase 0.5 解决，"已装内核比表更新"改为只告警并在 `status` / `status --json` 暴露已在 Phase 3(4) 解决；运行期选目标也已在 §Phase 3(3) 落地（`sing-box-full.json` 问内核再选档，公开入口保留不咨询内核的等价包装）。
+- **G7** 版本 profile 注册表当前为经上游字段差异核实的 1.10–1.14 编译期目录，不会自动滚动为“最新五个 minor”。版本化链接和工件从目录派生；`sing-box-full.json` 在服务端重生成时探测已安装内核，并从新到旧选择它实际接受的最高注册档，失败时回退目录顶部。服务状态会提示内核超过目录上限。`sing-box-profiles` CI 会检查注册表顶部是否与上游最新稳定版一致，并要求每个注册档都用真实核心验证；因此新 minor 会使 CI 变红，但加入新 profile 和核心 pin 仍需维护者更新。**→ 部分关闭**：运行时 profile 探测、CI 漂移门禁和人工审查政策已确认；新 minor 的 schema 研究与真实核心 pin 按上游发布逐次更新，见 `.scratch/sbctl-v0.2/issues/09-dynamic-singbox-version-profiles.md`。ADR-0020 当前要求 profile 差异先经上游资料确认，不能把旧描述中的静默跳过或“full 固定落后于已安装内核”当作当前缺陷。
 - **G8** 无按源 IP 限流（只有并发上限）。**→ 2026-09-23 已关闭**，见 §Phase 7 与 §11 的 PR(G8) 小节。
 - **G9** TUI 的"覆写配置文件内容"：客户端侧完全没有查看/编辑能力，唯一的 override 是内部自动的（`crates/client-core/src/core.rs:160-184`、`:549-587`）。
 - **G10** TUI 的"显示入站"：整个客户端树没有任何一处读取 `config["inbounds"]`；规则视图还是藏在 Logs 页里的一个开关（`crates/sbtui/src/view/logs.rs:16-20`）。
@@ -132,7 +132,7 @@ canonical nodes → template（内置）→ client_rule_profile（是否用 CDN�
 - **G2 嗅探**：~~sing-box 把 `:146` 的裸 `{"action":"sniff"}` 换成带 `sniff` 列表与 `override_destination`，两个可选键由新的 profile 布尔门控~~ —— **此路已被 Phase 0.5 的真核探针否决，见 §4.2**。~~Clash 侧补顶层 `sniffers: [domain, http, tls, quic]` + `dns-hijack: any:53`；legacy 分支用 `sniff: true`~~ —— **这条也在 2026-09-23 被真核探针否决，三处皆错，见 §4.3**。实际落地：两份 Clash 工件统一追加
   `sniffer: {enable: true, sniffing: [http, tls, quic]}`；不写 `dns-hijack`（它在 `tun:` 下、默认已是 `0.0.0.0:53`，从订阅里写 `tun:` 块会覆盖客户端自己的 TUN 设置）；不写 `override-destination`（它会让嗅探出的域名替换原始目的地址，属于不该静默代客户做的决定）。sing-box 侧的"嗅探模板"可表达空间只有"有/无"两态，现有写法已经是正确的。
 - **G3 外部资源**：规则集变成模板上的数据（`geosite/{cn,private,ads,proxy,openai,netflix,telegram}`、`geoip/{cn,private,lan}`），每项配一个由编译期内联列表渲染的 `minimal` 孪生。`client_rule_set_base_url` 保持唯一 CDN 旋钮。
-- **G5 节点原生链接展示**：三件事——(a) index 页在客户端矩阵与链接列表之间插入「节点与原生分享链接」区块（该页已在 256-bit credential 之后，暴露面等同 `uri` 工件，**不新增边界**）；(b) 从 `render/uri.rs:120` 抽出 `node_uri(config, node)`，用现有确定性测试（`artifacts.rs:499-534`）证明重构字节中性；(c) `sbctl status nodes --uri` 只输出到运维者自己的 stdout，按 ADR-0013 永不进 journal。**不要**加进 `sbctl sub` 的默认输出——那条命令常被管道进日志与截图。
+- **G5 节点原生链接展示**：URI 单一渲染路径、`sbctl node --links [--protocol] [--qr]` 显式显示凭据、菜单二次确认、index 默认折叠展示；默认 `sbctl node` 与 `sbctl sub` 不泄露节点链接。index 与命令都使用 `canonical::nodes()` / `node_share_link()`。
 - **G6**：header 追加 `profile-update-interval=<小时>`；键序与四个既有键由 header-shape 测试锁死；账期故障时"宁可不发也不伪造 header"的降级行为（`serve.rs:410-416`、`verify.sh:131-134`）必须保持。
 
 **PR 切分**：(a) tag 统一 + `node_uri` 抽取（纯重构，金标准不得移动）→ (b) `Standard == 今天` 的模板轴 → (c) 嗅探 + 外部资源 → (d) G5 展示 → (e) G6 header。(a) 必须最先、单独合并。
@@ -256,7 +256,7 @@ canonical nodes → template（内置）→ client_rule_profile（是否用 CDN�
 | G3 | 按 模板 × `client_rule_profile` 断言 `route.rule_set[]` / `rule-providers:`；**`minimal` 必须保留内联规则**（针对 `singbox.rs:159`、`clash.rs:138` 那个回归） | U, C |
 | G3 可达性 | 规则 CDN 在国内、以及手机走蜂窝网的实际拉取 | **仅 V** |
 | G4 | 按模板 + 具名节点的金标准；真核逐 minor `check`；组名能 round-trip 过 `client-core` 的代理发现 | U, C, D |
-| G5 | `tests/cli`：index 响应含每条节点 URI；`sbctl status nodes --uri` 输出 N 行且**不含 credential**；金标准证明 `uri` 工件字节中性 | U, C, D |
+| G5 | `tests/cli`：`node --links` 五协议 URI 行逐字节匹配 `uri` 工件且不含订阅 credential；默认节点输出不含节点秘密；协议过滤、中文标签、QR opt-in、帮助文本和 index 折叠区块 | U, C, D |
 | G6 | header-shape 测试（键序 + 四个既有键完整 + 新键存在）+ 账期故障降级测试保持"不伪造 header" | U, C, D |
 | G7 | 连续性单测；CI 对 `releases/latest` 的带检查；`resolve_full_profile` 用"拒绝 `.last()` 的桩内核"单测；模拟滑动时发布门判红 | U, C, D + CI |
 | G8 | 令牌桶单测用 fixture 时钟（突发、每秒一个的回补、长时间空闲不回攒超过突发、地址之间互不影响、无欠费的地址不留在表里）；**再加一条过真实 listener 的接线测试**，断言限流确实在请求路径上，且被限流时"真凭据"与"错凭据"的响应**逐字节相同**、不含 credential。实现选择与 §Phase 7 字面不同：超限回 **429 + Retry-After** 而不是 404，理由见 §11 的 PR(G8) 小节 | U；D 腿的洪水断言**尚未加**（见同一小节的坑） |
@@ -360,7 +360,7 @@ sh tests/acceptance/run.sh
 唯一能证明：ACME / Direct HTTPS 在公网 80/443 端到端（ADR-0009 / 0011）、真实网络下从 GitHub 装最新稳定内核、规则 CDN 对目标人群的可达性（G3，**含国内可达性——VPS 本身可能并不代表国内**）、手机导入 `shadowrocket.txt` / `sing-box-full.json` / index 二维码。
 遵循 `release-readiness-and-vps-test-plan.md:20-24` 的原则：VPS 是确认环境，不是调试环境——**先在 L1–L3 跑干净再上机**。
 复用 `subscription-modes-testing.md` 的三模式 runbook（Direct 回归 `:16-32`、external-proxy `:33-69`、ip-fallback 自签五协议 `:71-95`，每模式 6 项通用清单 `:99-106`），不要另写一套。
-> 现有 VPS 已在承载生产（`64.81.29.67`，Ubuntu 22.04，sbctl 占公网 80/443，见 `.scratch/vps-connectivity-hardening/spec.md`）。**任何变更前先 `sbctl status` 并备份 `/etc/sbctl`，确认回滚路径后才动手。**
+> 现有生产 VPS（Ubuntu 22.04，sbctl 占公网 80/443，见 `.scratch/vps-connectivity-hardening/spec.md`）。**任何变更前先 `sbctl status` 并备份 `/etc/sbctl`，确认回滚路径后才动手。**
 
 ### 关于"不影响 Windows 宿主"
 
@@ -657,12 +657,25 @@ scripts 那条腿要放到 L2（WSL）或容器里跑。当前宿主 L1 结果�
   （`&esc(&node.tag())` 的 needless borrow），而 `cargo test` 全绿——三条门必须各自取退出码，
   不能只看测试。当前宿主 L1：fmt 0、clippy 0、workspace 测试全绿。
 
+### S7：节点分享链接的运维交互（已完成）
+
+- `sbctl node --links [--protocol <name>] [--qr]` 显式输出原生分享 URI；`--uri` 保留为别名。
+  不带 `--links` 时继续只打印节点摘要。分享链接带节点凭据，因此菜单入口先二次确认，
+  index 页放在默认折叠的 `<details>` 中。
+- 五协议分享链接与 `uri` 工件共用 `subscription::node_share_link`，CLI 测试逐字节比对 URI 行；
+  同时覆盖五个中文协议标签、协议过滤、QR 必须与分享链接选项一起使用、默认节点输出凭据隔离、
+  index 区块折叠状态。
+- 当前验证：`cargo test -p sbctl --features test-signing --test cli subscription_formats::`
+  （17 passed）、`cargo clippy -p sbctl --all-targets --features test-signing -- -D warnings`
+  与 `cargo fmt --all -- --check` 均通过；提交 `c54bda3` 的完整 CI run
+  [36129918694](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36129918694) 全绿。
+
 ### Phase 2 PR(e)：G6 `profile-update-interval`（已完成）
 
 - `subscription-userinfo` 现在是 `upload/download/total/expire/profile-update-interval`，
   新键**追加在末尾**；构造逻辑抽成 `serve.rs::subscription_userinfo(&TrafficReport)`，键序由
-  U 测试 `the_userinfo_header_locks_its_key_order_and_names` 用**整串等式**锁死（含无额度时
-  `total` 回落为已用字节这条分支）。
+  U 测试 `the_userinfo_header_locks_its_key_order_and_names` 用**整串等式**锁死。配置额度时
+  输出 `total=<额度>`；无限额时省略 `total`，不再把已用量冒充总额度。
 - 值是**对客户端的策略声明**（24 小时），不是服务端行为的描述：仓库里**没有**任何"订阅自动刷新
   间隔"配置字段（`grep interval src/config.rs` 为空），所以它不是"读一个已有旋钮"，而是一句
   "客户端一天拉一次就够"。这一点写进了常量文档注释，避免以后有人以为它反映服务端节奏。

@@ -21,6 +21,142 @@ use crate::fixture::{
     write_systemctl_health_failing_fixture, write_traffic_fixture,
 };
 
+#[test]
+fn guided_install_uses_one_confirmed_wizard_and_installs_its_configuration() {
+    let fixture = supported_systemd_host();
+    fs::create_dir_all(fixture.path().join("proc/net")).expect("route directory is created");
+    fs::write(
+        fixture.path().join("proc/net/route"),
+        "Iface\tDestination\tGateway\tFlags\nens3\t00000000\t00000000\t0003\n",
+    )
+    .expect("default route is written");
+    fs::create_dir_all(fixture.path().join("sys/class/net/ens3"))
+        .expect("default interface is created");
+    write_systemctl_fixture(&fixture, true);
+    let checker = sing_box_check_fixture(
+        &fixture,
+        true,
+        &["vless", "vmess", "hysteria2", "tuic", "anytls"],
+    );
+    let mut answers = vec![String::new(); 24];
+    answers[1] = "sub.example.test".into();
+    answers[4] = "y".into();
+    answers[17] = "www.cloudflare.com".into();
+    answers[23] = "y".into();
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "install",
+            "--guided",
+            "--sing-box-bin",
+            checker.to_str().expect("checker path is UTF-8"),
+            "--no-start",
+        ])
+        .write_stdin(answers.join("\n") + "\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("确认提交以上配置？"))
+        .stdout(predicate::str::contains(
+            "subscription credential: [redacted]",
+        ))
+        .stdout(predicate::str::contains("安装完成"));
+
+    let config = fs::read_to_string(fixture.path().join("etc/sbctl/config.toml"))
+        .expect("the confirmed guided configuration is installed");
+    assert!(config.contains("subscription_host = \"sub.example.test\""));
+    for protocol in [
+        "vless-reality",
+        "vmess-websocket",
+        "hysteria2",
+        "tuic",
+        "anytls",
+    ] {
+        assert!(
+            config.contains(protocol),
+            "guided config includes {protocol}"
+        );
+    }
+}
+
+#[test]
+fn cancelling_guided_install_leaves_no_managed_state() {
+    let fixture = supported_systemd_host();
+    fs::create_dir_all(fixture.path().join("proc/net")).expect("route directory is created");
+    fs::write(
+        fixture.path().join("proc/net/route"),
+        "Iface\tDestination\tGateway\tFlags\nens3\t00000000\t00000000\t0003\n",
+    )
+    .expect("default route is written");
+    fs::create_dir_all(fixture.path().join("sys/class/net/ens3"))
+        .expect("default interface is created");
+    let mut answers = vec![String::new(); 24];
+    answers[1] = "sub.example.test".into();
+    answers[4] = "y".into();
+    answers[17] = "www.cloudflare.com".into();
+    answers[23] = "n".into();
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "install",
+            "--guided",
+        ])
+        .write_stdin(answers.join("\n") + "\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "installation cancelled; the host was not changed",
+        ));
+
+    assert!(!fixture.path().join("etc/sbctl/config.toml").exists());
+    assert!(!fixture.path().join("usr/local/bin/sing-box").exists());
+}
+
+#[test]
+fn guided_install_refuses_an_existing_deployment_before_prompting() {
+    let fixture = supported_systemd_host();
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "config",
+            "init",
+            "--mode",
+            "ip-fallback",
+            "--subscription-host",
+            "203.0.113.7",
+            "--http-port",
+            "2080",
+            "--interface",
+            "ens3",
+            "--protocol",
+            "vless-reality",
+            "--reality-decoy-sni",
+            "www.cloudflare.com",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "install",
+            "--guided",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("Existing deployment detected"))
+        .stdout(predicate::str::contains("sbctl 配置向导").not());
+}
+
 #[cfg(unix)]
 use crate::fixture::write_manifest_spec;
 

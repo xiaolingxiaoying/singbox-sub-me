@@ -73,7 +73,7 @@ Status: ready-for-agent
 ### 1. 领域模型与持久化
 
 - `DeploymentConfig` 必须持久化 `subscription_mode`、主机字段、接口、五种协议选择与凭据、端口、monthly traffic limit、accounting policy、accounting timezone、anchored reset 配置和证书引用。
-- accounting timezone 默认固定为 `UTC`；显式配置必须是有效 IANA timezone，不能修改 VPS 操作系统时区。
+- 新部署的 VPS refresh timezone 默认固定为 `America/Los_Angeles`，client display timezone 默认固定为 `Asia/Shanghai`；两者必须是有效 IANA timezone，且不能修改 VPS 操作系统时区。
 - `anchored_reset_at` 使用 `YYYY-MM-DDTHH:MM`。锚定日允许 1–31；短月按当月最后一天计算。
 - `TrafficState` 必须带 schema version、cycle key、interface、baseline RX/TX、accumulated RX/TX、boot ID 和独立的手工修正记录。Total traffic adjustment 不得写成伪造的方向计数。
 - 状态缺失或损坏是可诊断的存储错误；Pending first reset 是合法状态，不是错误。
@@ -93,13 +93,13 @@ Status: ready-for-agent
 - 统一 canonical node model 作为 sing-box server config、sing-box JSON、Clash/Mihomo YAML 和 URI text 的唯一来源。
 - Managed protocol 固定为 VLESS Reality、VMess WebSocket、Hysteria2、TUIC v5、AnyTLS。每个 Enabled protocol 使用独立配置和监听端口。
 - Subscription credential 仅允许出现在 URL path；query 参数永不认证。代理 UUID/password 只用于代理节点，不可读取订阅。
-- 明确路由和 content type；响应动态生成 `subscription-userinfo`，~~`download=RX`、`upload=TX`~~（**2026-09-24 更正**：两个键按订阅客户端视角输出，`upload=RX`、`download=TX`；统计源仍是网卡 rx/tx）、`total` 为当前账期总 VPS traffic，`expire` 为下一次重置时间。
+- 明确路由和 content type；响应动态生成 `subscription-userinfo`，~~`download=RX`、`upload=TX`~~（**2026-09-24 更正**：两个键按订阅客户端视角输出，`upload=RX`、`download=TX`；统计源仍是网卡 rx/tx），`total` 仅在配置月度额度时输出为额度值；无限额时省略该键，不把已用流量伪装为额度。`expire` 为下一次重置时间。
 - 节点或配置改变后，三种缓存工件用临时文件和 atomic rename 一次性替换；请求只读取完整工件并只计算当前 header。
 - 协议或端口变更必须获取 operation lock，执行 sing-box check，成功后原子替换并 reload/restart；失败恢复上一版本。
 
 ### 4. 账期、计数器与写入者
 
-- 流量来源固定为所选 Linux interface 的 sysfs `rx_bytes` 和 `tx_bytes`：~~`download=RX`、`upload=TX`~~ → **2026-09-24 更正**为 `upload=RX`、`download=TX`（头按订阅客户端视角标签，统计源不变）、`total=RX+TX`。
+- 流量来源固定为所选 Linux interface 的 sysfs `rx_bytes` 和 `tx_bytes`：~~`download=RX`、`upload=TX`~~ → **2026-09-24 更正**为 `upload=RX`、`download=TX`（头按订阅客户端视角标签，统计源不变）；配置额度时 `total` 是额度，无限额时不发送 `total`。
 - accounting reset service/timer 每分钟执行一次，使用 `Persistent=true`；cycle key 决定是否真正切换并避免重复写状态。跨月停机由 persistent timer 补执行。
 - counter rollback 或 boot ID 改变时保留既有累计值，并以新计数器作为后续 baseline；不丢弃另一方向仍有效的增量。
 - 只有 `sbctl-accounting-reset.service/timer` 和管理员显式 Traffic correction 命令可以写 accounting state。`sbctl traffic`、`status`、`diagnostics` 和 HTTP subscription handler 只读或读取后计算，不写入。

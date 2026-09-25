@@ -44,8 +44,13 @@ contains "$install_output" '启用协议: vless-reality, vmess-websocket, hyster
 systemctl is-active --quiet sbctl.service || fail 'sbctl.service is not active'
 systemctl is-active --quiet sing-box.service || fail 'sing-box.service is not active'
 id sbctl >/dev/null 2>&1 || fail 'dedicated sbctl account was not created'
+sbctl_shell=$(getent passwd sbctl | cut -d: -f7)
+[ "$sbctl_shell" = /usr/sbin/nologin ] || fail 'sbctl account must not permit interactive login'
 service_user=$(systemctl show -p User --value sbctl.service)
 [ "$service_user" = sbctl ] || fail 'sbctl.service does not run as sbctl'
+service_pid=$(systemctl show -p MainPID --value sbctl.service)
+runtime_user=$(ps -o user= -p "$service_pid" | tr -d '[:space:]')
+[ "$runtime_user" = sbctl ] || fail 'sbctl.service process is not running as the sbctl account'
 
 credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' /etc/sbctl/config.toml)
 [ -n "$credential" ] || fail 'subscription credential was not persisted'
@@ -168,6 +173,11 @@ systemctl is-active --quiet sing-box.service || fail 'Direct sing-box.service is
 service_user=$(systemctl show -p User --value sing-box.service)
 [ "$service_user" = sing-box ] || fail 'sing-box.service does not run as sing-box'
 id sing-box >/dev/null 2>&1 || fail 'dedicated sing-box account was not created'
+sing_box_shell=$(getent passwd sing-box | cut -d: -f7)
+[ "$sing_box_shell" = /usr/sbin/nologin ] || fail 'sing-box account must not permit interactive login'
+service_pid=$(systemctl show -p MainPID --value sing-box.service)
+runtime_user=$(ps -o user= -p "$service_pid" | tr -d '[:space:]')
+[ "$runtime_user" = sing-box ] || fail 'sing-box.service process is not running as the sing-box account'
 
 # The generated units must be valid for the host systemd: Ubuntu 22.04 used to
 # report `Unknown key name 'Sockets' in section 'Unit', ignoring` for the

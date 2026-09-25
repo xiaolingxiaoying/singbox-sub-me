@@ -24,25 +24,11 @@ const PROBE_ENV: &str = "SBCTL_ORPHAN_PROBE_PARENT";
 fn stub_core(dir: &Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = dir.join("stub-core");
-    // No `exec`: the wrapper stays as the reported pid and can record *how* it
-    // died, which is the only way to learn what kills the child when the parent
-    // is SIGKILLed. `sleep` runs as its child and is waited on.
-    std::fs::write(
-        &path,
-        concat!(
-            "#!/bin/sh\n",
-            "log=\"${SBCTL_ORPHAN_DIAG:-/tmp/sbctl-orphan-diag.log}\"\n",
-            "trap 'echo \"stub $$ got SIGTERM\" >> $log' TERM\n",
-            "trap 'echo \"stub $$ got SIGINT\" >> $log' INT\n",
-            "echo \"stub $$ started, parent $$PPID\" >> $log\n",
-            "sleep 120 &\n",
-            "w=$!\n",
-            "wait $w\n",
-            "rc=$?\n",
-            "echo \"stub $$: sleep returned $rc\" >> $log\n",
-        ),
-    )
-    .unwrap();
+    // Keep the stub to one process, like the sing-box executable. A shell
+    // wrapper that traps SIGTERM can intentionally stay alive after the kernel
+    // sends the parent-death signal, testing shell trap semantics instead of
+    // the core's orphan guard.
+    std::fs::write(&path, "#!/bin/sh\nexec sleep 120\n").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     path
 }
@@ -75,17 +61,32 @@ fn proc_state(stat: &str) -> String {
     }
 }
 
+/// Whether the stub script has replaced itself with the long-lived process.
+/// Sampling the wrapper before `exec` would only prove that the shell dies.
+fn is_stub_process(pid: u32) -> bool {
+    let cmdline = command_line(pid);
+    cmdline
+        .split_whitespace()
+        .next()
+        .and_then(|arg| Path::new(arg).file_name())
+        .is_some_and(|name| name == "sleep")
+}
+
+fn command_line(pid: u32) -> String {
+    String::from_utf8_lossy(&std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default())
+        .replace('\0', " ")
+        .trim()
+        .to_owned()
+}
+
 /// A one-line description of the pid for diagnostics: state, parent, command.
 fn describe(pid: u32) -> String {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
-    let cmdline =
-        String::from_utf8_lossy(&std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default())
-            .replace('\0', " ");
     format!(
         "pid {pid} state={} ppid={:?} cmd={:?}",
         proc_state(&stat),
         parent_of(pid),
-        cmdline.trim()
+        command_line(pid)
     )
 }
 
@@ -147,14 +148,11 @@ fn a_killed_client_leaves_no_core_behind() {
     }
 
     let exe = std::env::current_exe().unwrap();
-    let diag = std::env::temp_dir().join("sbctl-orphan-diag.log");
-    let _ = std::fs::remove_file(&diag);
     let mut parent = Command::new(exe)
         .arg("--exact")
         .arg("a_killed_client_leaves_no_core_behind")
         .arg("--nocapture")
         .env(PROBE_ENV, "1")
-        .env("SBCTL_ORPHAN_DIAG", &diag)
         // The probe parent must die with SIGKILL from the observer below, so it
         // cannot be its own process-group leader; keep it in this group and
         // signal it directly.
@@ -189,7 +187,9 @@ fn a_killed_client_leaves_no_core_behind() {
     // Refuse to run the experiment unless the core really is a child of the
     // process about to be killed; otherwise a green result would mean nothing.
     let started = Instant::now();
-    while (parent_of(core_pid) != Some(parent_pid) || !alive(core_pid))
+    while (parent_of(core_pid) != Some(parent_pid)
+        || !alive(core_pid)
+        || !is_stub_process(core_pid))
         && started.elapsed() < Duration::from_secs(10)
     {
         std::thread::sleep(Duration::from_millis(50));
@@ -202,6 +202,11 @@ fn a_killed_client_leaves_no_core_behind() {
         parent_of(core_pid)
     );
     assert!(alive(core_pid), "the stub core never came up");
+    assert!(
+        is_stub_process(core_pid),
+        "the stub core never execed its long-lived process: {}",
+        describe(core_pid)
+    );
     eprintln!("probe: before killing the client — {}", describe(core_pid));
 
     parent.kill().expect("the probe parent is killable");
@@ -215,11 +220,7 @@ fn a_killed_client_leaves_no_core_behind() {
     // re-reading liveness after it would let an orphaned core pass its own test
     // — which is exactly how the mutant slipped through the first two versions.
     let survived = alive(core_pid);
-    eprintln!(
-        "probe: after killing the client — {} ; stub log:\n{}",
-        describe(core_pid),
-        std::fs::read_to_string(&diag).unwrap_or_else(|_| "<no log written>".to_owned())
-    );
+    eprintln!("probe: after killing the client — {}", describe(core_pid));
     if survived {
         let _ = Command::new("kill")
             .arg("-9")

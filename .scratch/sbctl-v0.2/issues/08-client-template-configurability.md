@@ -1,32 +1,42 @@
-# S9：客户端模板可配置化（策略组/规则集/DNS/TUN）
+# S9：客户端模板向导可用性
 
-Status: ready-for-agent
+Status: resolved
 Type: task
 Blocked by: 01
 
+## 范围决策（2026-09-25）
+
+沿用 ADR-0022 的编译期模板目录，不开放管理员任意字段或模板文件。管理员可通过向导选择受支持的模板、DNS 模式、规则档位、规则源镜像和测速 URL；结构字段（策略组、规则集、DNS/TUN 内部参数）由已验证的模板负责。
+
 ## 现状
 
-- 策略组名/类型/成员硬编码（`src/subscription/render/mod.rs:110-114`、`render/clash.rs:69-101`），
-  只有探测 URL 可配（`DeploymentConfig::client_latency_probe_url`）。
-- rule-set/rule-provider 集合固定（sing-box 两个、clash 四个）；只能换 base URL。
-- DNS 服务器列表、fake-ip 段、cache 选项、TUN 参数（地址/mtu/stack/auto_route）均固定。
-- 覆写机制（ADR-0021）已能整段替换，但普通用户不便使用。
+- `ConfigurationTopic::ClientTemplate` 已提供上述五个选项，沿用现有值作为默认答案，并在确认后应用。
+- URL 输入通过 `DeploymentConfig::validate` 校验，生成内容来自编译期模板；覆写仍走 ADR-0021 的专用校验流程。
+- 原提示只列选项名称，未充分说明远程规则的网络依赖、测速 URL 的可达性要求；配置预览/`sbctl status` 也没有显示 DNS 模式与两个 URL。
+- `docs/subscription-guide.md` 已说明模板策略、DNS 模式、规则档位和 URL 配置。
 
-## 动作（先设计后实现）
+## 动作
 
-1. 设计 `ClientTemplate` 扩展字段并写入 ADR：
-   - `proxy_groups`: 名称/类型/成员顺序/默认选中/探测 URL/interval/tolerance；
-   - `rule_sets`: 增删条目（tag/类型/URL/下载策略）；
-   - `dns_servers`: 直连/代理两侧服务器列表、fake-ip 段、cache 选项；
-   - `tun`: address/mtu/stack/auto_route/strict_route。
-2. 配置校验：非法组合（空组、重复 tag、未知协议节点成员）在 `config validate` 报错。
-3. 生成器按模板输出；字段与现有覆写合并语义保持一致（rules 前插）。
-4. 向导「客户端模板」主题逐项可改；`sbctl config show` 输出脱敏摘要。
-5. 测试：单测覆盖每个字段的默认值与自定义值；真核 CI（sing-box 五版本 + mihomo）保持通过；
-   `config validate` 拒绝非法模板的用例。
+1. 优化五项向导提示，说明各值的效果、网络依赖和 URL 填写边界。
+2. 预览与 `sbctl status` 显示模板、DNS 模式、规则档位、规则镜像和测速 URL；订阅凭据继续脱敏。
+3. 更新订阅指南并为预览字段保留回归测试。
 
 ## 验收
 
-- 自定义策略组名/默认节点/规则集增删后，生成的 sing-box 与 clash 工件在真核通过。
-- 默认值生成的工件与升级前逐字节一致（除有意新增字段），保证既有用户不漂移。
-- ADR 与 `docs/subscription-guide.md` 更新。
+- 空输入保留当前值；合法选项可修改；无效模板或 URL 会明确报错并重问。
+- 变更预览覆盖所有五项客户端设置，且不泄漏订阅凭据。
+- 生成结构仍由编译期目录提供，现有 sing-box/mihomo 验证门保持通过。
+
+## 原始需求调整
+
+原票要求把策略组、规则集、DNS/TUN 的任意字段交给管理员编辑；维护者选择沿用目录边界并优化向导，因此这部分已由 ADR-0022 明确排除。本票不验收自定义结构字段；若将来重开该需求，需先修改 ADR-0022 并重新评估跨内核 schema 校验与发布风险。
+
+## Comments
+
+2026-09-25 完成：
+
+- 向导明确每项选项的用途、远程规则依赖及 URL 要求；错误镜像 URL 会提示并重问。
+- 预览和 `sbctl status` 显示全部五个客户端设置；URL 认证信息、query、fragment 均脱敏，无效历史 URL 显示占位文本。
+- 本地 workspace fmt、clippy、test 全部通过；新回归覆盖预览、错误 URL 重问和 URL 凭据脱敏。
+- GitHub Actions run `36146609985`（提交 `e5aa7fc2352229a3fee8d77d4dab5842611a6cf6`）全部成功，含真实 sing-box profile、mihomo 模板与 Debian/Ubuntu systemd 验收。
+- VPS 用该 run 的 Linux artifact 实测，SHA-256 `4144187ffe519aaac6d83fdcc41c84d86e7a80ad3ef2767f3a51a737479a0d95` 匹配；新二进制读取实际配置并打印正确摘要，凭据脱敏。四个受管服务 active，`sbctl.service` 与 `sing-box.service` 的 `NRestarts=0`。仅在 `/tmp` 运行后清理，线上二进制及服务未更改。

@@ -43,8 +43,14 @@ pub(crate) enum Command {
         /// Also print each node's native share link (`vless://…` and friends).
         /// Those carry the proxy credentials, so they reach this terminal only
         /// and are never written to the journal.
-        #[arg(long)]
-        uri: bool,
+        #[arg(long, alias = "uri")]
+        links: bool,
+        /// Restrict the node list and any share links to one Managed protocol.
+        #[arg(long, value_enum)]
+        protocol: Option<CliManagedProtocol>,
+        /// Render a terminal QR code for each displayed share link.
+        #[arg(long, requires = "links")]
+        qr: bool,
     },
     /// Validate the active sing-box configuration and restart both managed services.
     Restart {
@@ -148,8 +154,17 @@ pub(crate) enum Command {
 /// of destructuring sixteen fields on both sides.
 #[derive(Debug, Args)]
 pub(crate) struct InstallOptions {
-    #[arg(long, value_enum, default_value_t = CliSubscriptionMode::Direct)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = CliSubscriptionMode::Direct,
+        conflicts_with = "guided"
+    )]
     pub(crate) mode: CliSubscriptionMode,
+    /// Collect all installation settings in the configuration wizard before
+    /// creating services or persistent state.
+    #[arg(long)]
+    pub(crate) guided: bool,
     #[arg(long)]
     pub(crate) subscription_host: Option<String>,
     #[arg(long)]

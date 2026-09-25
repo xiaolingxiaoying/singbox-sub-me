@@ -105,6 +105,8 @@ test -s /tmp/sbctl-install.sh && bash /tmp/sbctl-install.sh
 
 已安装部署进入主题配置后，回车会保持当前值；流量与账期主题覆盖每月流量上限、本周期流量修正、VPS 刷新时区、客户端显示时区、刷新规则、出口网卡以及对应的订阅服务端口。
 
+首次部署时，菜单提供快速安装和引导式安装。引导式安装会在写入服务与配置前展示脱敏摘要，确认后一次完成部署；也可运行 `sbctl install --guided` 直接打开向导。
+
 命令行方式检查服务并获取订阅地址：
 
 ```bash
@@ -278,7 +280,7 @@ sbctl uninstall --purge
 /sub/<subscription-credential>/index                # 中文总览页（按客户端速查 + 全链接 + 标注 + 二维码 + 导入步骤）
 ```
 
-sing-box 完整配置包含 DNS（fake-ip、分流解析）、tun 入站、🚀节点选择/♻️自动选择代理组、geosite-cn/geoip-cn 分流、AI 域名（ChatGPT/OpenAI/X.com）分流与 clash_api；服务端运行的 sing-box 内核始终是最新稳定版（直接从官方 [SagerNet/sing-box](https://github.com/SagerNet/sing-box) 仓库下载）。客户端版本适配覆盖最新 5 个稳定 minor 版本，每个版本字段差异见 `docs/research/sing-box-client-version-differences.md`。需要注意的客户端兼容性在订阅矩阵和总览页中逐一标注：
+sing-box 完整配置包含 DNS（fake-ip、分流解析）、tun 入站、🚀节点选择/♻️自动选择代理组、geosite-cn/geoip-cn 分流、AI 域名（ChatGPT/OpenAI/X.com）分流与 clash_api；服务端运行的 sing-box 内核始终是最新稳定版（直接从官方 [SagerNet/sing-box](https://github.com/SagerNet/sing-box) 仓库下载）。直接官方下载安装会校验 GitHub Release API 为对应资产提供的 SHA-256；上游未提供摘要时会显式告警并继续兼容性检查。此摘要不是发布者签名；要求发布者签名验证时请使用签名 release manifest（ADR-0010、ADR-0024）。客户端版本适配覆盖最新 5 个稳定 minor 版本，每个版本字段差异见 `docs/research/sing-box-client-version-differences.md`。需要注意的客户端兼容性在订阅矩阵和总览页中逐一标注：
 
 - **1.10 / 1.11 客户端不支持 AnyTLS 节点**（1.12.0 才加入该协议）；AnyTLS-only 部署不会生成这两个版本的工件，其余格式不受影响。
 - 1.10 / 1.11 / 1.12 / 1.13 的工件**不含 `cache_file.store_dns` 乐观 DNS 缓存**（1.14.0 才加入）。

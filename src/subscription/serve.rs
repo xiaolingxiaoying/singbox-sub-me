@@ -586,22 +586,16 @@ const PROFILE_UPDATE_INTERVAL_HOURS: u32 = 24;
 
 /// The `subscription-userinfo` header value.
 ///
-/// subscription-userinfo follows the common client convention: upload and
-/// download are the bytes used in the current period, while `total` is the
-/// configured monthly allowance. Keep the historical used-total value when no
-/// allowance is configured so unlimited deployments remain informative.
+/// `upload` and `download` are the bytes used in the current period. `total`
+/// is only present when an actual monthly allowance is configured; omitting it
+/// avoids presenting current usage as a quota in client subscription cards.
 ///
 /// The key order is the wire contract: client apps parse the four traffic keys
 /// by position-insensitive name but display them in this order, so a new key
 /// goes last and never between the existing ones.
 fn subscription_userinfo(traffic: &crate::traffic::TrafficReport) -> String {
-    let quota = if traffic.monthly_traffic_limit > 0 {
-        traffic.monthly_traffic_limit
-    } else {
-        traffic.total()
-    };
-    format!(
-        "upload={}; download={}; total={}; expire={}; profile-update-interval={}",
+    let usage = format!(
+        "upload={}; download={}",
         // The two counters are the VPS network interface's own rx/tx
         // (`traffic.rs` reads `statistics/rx_bytes` and `tx_bytes`), while this
         // header is read from the CLIENT's side: every consumer app labels
@@ -612,10 +606,21 @@ fn subscription_userinfo(traffic: &crate::traffic::TrafficReport) -> String {
         // Shadowrocket alike.
         traffic.received,
         traffic.transmitted,
-        quota,
-        traffic.next_reset.timestamp(),
-        PROFILE_UPDATE_INTERVAL_HOURS
-    )
+    );
+    if traffic.monthly_traffic_limit > 0 {
+        format!(
+            "{usage}; total={}; expire={}; profile-update-interval={}",
+            traffic.monthly_traffic_limit,
+            traffic.next_reset.timestamp(),
+            PROFILE_UPDATE_INTERVAL_HOURS
+        )
+    } else {
+        format!(
+            "{usage}; expire={}; profile-update-interval={}",
+            traffic.next_reset.timestamp(),
+            PROFILE_UPDATE_INTERVAL_HOURS
+        )
+    }
 }
 
 /// A scannable SVG QR code of the given format's subscription URL. The QR
@@ -1053,6 +1058,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn acme_listener_rejects_oversized_request_headers() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral listener is available");
+        let port = listener.local_addr().expect("listener address").port();
+        let handler = tokio::spawn(super::serve_acme_listener(
+            listener,
+            Arc::new(DeploymentStore::new(fixture.path())),
+            None,
+        ));
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("the service accepts the connection");
+        let request = format!(
+            "GET /.well-known/acme-challenge/missing HTTP/1.1\r\nHost: localhost\r\nX-Large: {}\r\n\r\n",
+            "x".repeat(20 * 1024)
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("the oversized request is sent");
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut response))
+            .await
+            .expect("the bounded parser closes an oversized request promptly")
+            .expect("the response socket closes cleanly");
+        assert!(
+            response.starts_with(b"HTTP/1.1 431 "),
+            "oversized headers must be rejected with 431, got: {}",
+            String::from_utf8_lossy(&response)
+        );
+        handler.abort();
+    }
+
+    #[tokio::test]
+    async fn acme_listener_closes_a_client_that_sends_headers_too_slowly() {
+        let fixture = TempDir::new().expect("temporary root is created");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral listener is available");
+        let port = listener.local_addr().expect("listener address").port();
+        let handler = tokio::spawn(super::serve_acme_listener(
+            listener,
+            Arc::new(DeploymentStore::new(fixture.path())),
+            None,
+        ));
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("the service accepts the connection");
+        stream
+            .write_all(
+                b"GET /.well-known/acme-challenge/missing HTTP/1.1\r\nHost: localhost\r\nX-Slow: ",
+            )
+            .await
+            .expect("the incomplete request header is sent");
+        tokio::time::sleep(Duration::from_secs(6)).await;
+
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut response))
+            .await
+            .expect("the slow-header timeout closes the connection")
+            .expect("the response socket closes cleanly");
+        assert!(
+            !response.starts_with(b"HTTP/1.1 200 OK"),
+            "an incomplete request must never reach a successful route"
+        );
+        handler.abort();
+    }
+
+    #[tokio::test]
+    async fn acme_listener_drops_connections_beyond_its_concurrency_limit() {
+        const MAX_EXPECTED_OPEN_CONNECTIONS: usize = 32;
+
+        let fixture = TempDir::new().expect("temporary root is created");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral listener is available");
+        let port = listener.local_addr().expect("listener address").port();
+        let handler = tokio::spawn(super::serve_acme_listener(
+            listener,
+            Arc::new(DeploymentStore::new(fixture.path())),
+            None,
+        ));
+
+        let mut clients = Vec::new();
+        for _ in 0..=MAX_EXPECTED_OPEN_CONNECTIONS {
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("the service accepts a connection attempt");
+            stream
+                .write_all(
+                    b"GET /.well-known/acme-challenge/missing HTTP/1.1\r\nHost: localhost\r\nX-Hold: ",
+                )
+                .await
+                .expect("the incomplete request header is sent");
+            clients.push(stream);
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let (open, rejected) = loop {
+            let mut open = 0;
+            let mut rejected = 0;
+            for stream in &mut clients {
+                let mut byte = [0; 1];
+                match stream.try_read(&mut byte) {
+                    Ok(0) => rejected += 1,
+                    Ok(_) => open += 1,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => open += 1,
+                    Err(_) => rejected += 1,
+                }
+            }
+            if rejected > 0 || tokio::time::Instant::now() >= deadline {
+                break (open, rejected);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(
+            open > 0 && open <= MAX_EXPECTED_OPEN_CONNECTIONS,
+            "the listener should keep no more than 32 of 33 incomplete requests open (observed {open})"
+        );
+        assert!(
+            rejected > 0,
+            "the listener must close at least one of 33 simultaneous incomplete requests"
+        );
+        handler.abort();
+    }
+
+    #[tokio::test]
     async fn direct_tls_listener_serves_the_subscription_after_a_real_handshake() {
         let fixture = TempDir::new().expect("temporary root is created");
         let (store, config, credential) = seed_direct_subscription(&fixture);
@@ -1204,8 +1340,8 @@ mod tests {
         };
         assert_eq!(
             super::subscription_userinfo(&unlimited),
-            "upload=36; download=71; total=112; expire=1767225600; profile-update-interval=24",
-            "without an allowance `total` keeps reporting the bytes used"
+            "upload=36; download=71; expire=1767225600; profile-update-interval=24",
+            "without an allowance the header must not invent a quota from bytes used"
         );
     }
 

@@ -16,6 +16,33 @@ use crate::fixture::{
 #[cfg(unix)]
 use crate::fixture::write_command_fixture;
 
+#[cfg(unix)]
+fn write_certbot_renewal_fixture(fixture: &TempDir, fullchain: &str, private_key: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fixture.path();
+    fs::write(root.join("var/lib/sbctl/renewed-fullchain.pem"), fullchain)
+        .expect("replacement fullchain is staged");
+    fs::write(root.join("var/lib/sbctl/renewed-privkey.pem"), private_key)
+        .expect("replacement private key is staged");
+
+    let certbot = root.join("usr/bin/certbot");
+    fs::create_dir_all(certbot.parent().expect("certbot has a parent"))
+        .expect("certbot fixture directory is created");
+    fs::write(
+        &certbot,
+        r#"#!/bin/sh
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+printf '%s\n' "$*" > "$root/.certbot-args"
+cp "$root/var/lib/sbctl/renewed-fullchain.pem" "$root/etc/letsencrypt/live/sub.example.test/fullchain.pem"
+cp "$root/var/lib/sbctl/renewed-privkey.pem" "$root/etc/letsencrypt/live/sub.example.test/privkey.pem"
+"#,
+    )
+    .expect("certbot renewal fixture is written");
+    fs::set_permissions(&certbot, fs::Permissions::from_mode(0o700))
+        .expect("certbot fixture is executable");
+}
+
 #[test]
 fn certificate_obtain_requires_a_valid_email_or_a_confirmed_no_email_path() {
     let fixture = TempDir::new().expect("temporary root is created");
@@ -212,6 +239,143 @@ fn certificate_obtain_runs_certbot_and_pins_the_renewed_certificate() {
         "obtain pins the certificate for the daemon"
     );
     let _ = credential;
+}
+
+#[cfg(unix)]
+#[test]
+fn certificate_renew_pins_the_certificate_written_by_certbot() {
+    let fixture = supported_systemd_host();
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    seed_direct_config(&fixture);
+    seed_live_certificate(&fixture, &["sub.example.test"]);
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "certificate",
+            "verify",
+        ])
+        .assert()
+        .success();
+
+    let renewed = rcgen::generate_simple_self_signed(vec!["sub.example.test".into()])
+        .expect("a replacement certificate is generated");
+    let renewed_fullchain = renewed.cert.pem();
+    let renewed_private_key = renewed.signing_key.serialize_pem();
+    let root = fixture.path();
+    write_certbot_renewal_fixture(&fixture, &renewed_fullchain, &renewed_private_key);
+
+    let renewal_output = Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            root.to_str().expect("fixture path is UTF-8"),
+            "certificate",
+            "renew",
+        ])
+        .output()
+        .expect("renew output is captured");
+    assert!(
+        renewal_output.status.success(),
+        "a valid renewed certificate is published: {}",
+        String::from_utf8_lossy(&renewal_output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&renewal_output.stdout).contains("certificate operation completed")
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".certbot-args")).expect("Certbot arguments are recorded"),
+        "renew --cert-name sub.example.test --non-interactive\n"
+    );
+
+    let pinned = root.join("var/lib/sbctl/certificates/sub.example.test");
+    assert_eq!(
+        fs::read(pinned.join("fullchain.pem")).expect("renewed fullchain is pinned"),
+        renewed_fullchain.as_bytes()
+    );
+    assert_eq!(
+        fs::read(pinned.join("privkey.pem")).expect("renewed private key is pinned"),
+        renewed_private_key.as_bytes()
+    );
+
+    // `certificate status` reports hook presence as part of the deployment
+    // health summary. Model the hook installed by the real installer.
+    let hook = root.join(sbctl::lifecycle::CERTBOT_DEPLOY_HOOK_RELATIVE_PATH);
+    fs::create_dir_all(hook.parent().expect("deploy hook has a parent"))
+        .expect("deploy hook directory is created");
+    fs::write(&hook, "#!/bin/sh\nexec sbctl certificate verify\n")
+        .expect("deploy hook fixture is written");
+
+    let status = Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            root.to_str().expect("fixture path is UTF-8"),
+            "certificate",
+            "status",
+        ])
+        .output()
+        .expect("certificate status output is captured");
+    assert!(status.status.success());
+    let status = String::from_utf8_lossy(&status.stdout);
+    assert!(status.contains("状态: 有效"));
+    assert!(status.contains("Certbot deploy hook: 已安装"));
+}
+
+#[cfg(unix)]
+#[test]
+fn certificate_renew_rejects_an_invalid_certificate_without_replacing_the_pinned_copy() {
+    let fixture = supported_systemd_host();
+    write_traffic_fixture(&fixture, 100, 200, "boot-a");
+    seed_direct_config(&fixture);
+    seed_live_certificate(&fixture, &["sub.example.test"]);
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "certificate",
+            "verify",
+        ])
+        .assert()
+        .success();
+
+    let pinned = fixture
+        .path()
+        .join("var/lib/sbctl/certificates/sub.example.test");
+    let old_fullchain = fs::read(pinned.join("fullchain.pem")).expect("old fullchain is pinned");
+    let old_private_key = fs::read(pinned.join("privkey.pem")).expect("old key is pinned");
+    let invalid_renewal = rcgen::generate_simple_self_signed(vec!["other.example.test".into()])
+        .expect("a certificate for the wrong host is generated");
+    write_certbot_renewal_fixture(
+        &fixture,
+        &invalid_renewal.cert.pem(),
+        &invalid_renewal.signing_key.serialize_pem(),
+    );
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            fixture.path().to_str().expect("fixture path is UTF-8"),
+            "certificate",
+            "renew",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("does not cover that host name"));
+
+    assert_eq!(
+        fs::read(pinned.join("fullchain.pem")).expect("previous fullchain remains pinned"),
+        old_fullchain
+    );
+    assert_eq!(
+        fs::read(pinned.join("privkey.pem")).expect("previous private key remains pinned"),
+        old_private_key
+    );
 }
 
 #[test]

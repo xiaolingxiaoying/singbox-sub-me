@@ -33,6 +33,8 @@ pub enum UpdateError {
     MissingArtifactArgument(&'static str),
     #[error("{0} artifact does not match the pinned release manifest")]
     DigestMismatch(&'static str),
+    #[error("official sing-box archive does not match GitHub's SHA-256 digest")]
+    OfficialChecksumMismatch,
     #[error("pinned release manifest has no download URL for {0}")]
     MissingDownloadUrl(&'static str),
     #[error("download of {0} failed: {1}")]
@@ -170,6 +172,23 @@ pub fn official_release_arch() -> &'static str {
 /// GitHub's `releases/latest` endpoint already excludes drafts and
 /// pre-releases, so the returned tag is the latest stable version.
 pub fn fetch_latest_official_sing_box_version() -> Result<String, UpdateError> {
+    let release = fetch_official_release_json(SING_BOX_OFFICIAL_RELEASE_API)?;
+    let tag = release
+        .get("tag_name")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            UpdateError::DownloadFailed(
+                "official sing-box release",
+                "GitHub 发布 JSON 缺少 tag_name 字段".to_owned(),
+            )
+        })?;
+    let version = tag.strip_prefix('v').unwrap_or(tag);
+    crate::release::parse_version(version, "official sing-box version")
+        .map_err(|error| UpdateError::Operation(error.to_string()))?;
+    Ok(version.to_owned())
+}
+
+fn fetch_official_release_json(url: &str) -> Result<serde_json::Value, UpdateError> {
     let temporary = tempfile::NamedTempFile::new().map_err(|error| {
         UpdateError::DownloadFailed("official sing-box release", error.to_string())
     })?;
@@ -189,10 +208,12 @@ pub fn fetch_latest_official_sing_box_version() -> Result<String, UpdateError> {
             "Accept: application/vnd.github+json",
             "--header",
             "User-Agent: sbctl",
+            "--header",
+            "X-GitHub-Api-Version: 2022-11-28",
             "--output",
         ])
         .arg(temporary.path())
-        .arg(SING_BOX_OFFICIAL_RELEASE_API)
+        .arg(url)
         .output()
         .map_err(|error| {
             UpdateError::DownloadFailed(
@@ -206,35 +227,101 @@ pub fn fetch_latest_official_sing_box_version() -> Result<String, UpdateError> {
             curl_diagnostic("official sing-box release", &output),
         ));
     }
-    let release: serde_json::Value = serde_json::from_reader(fs::File::open(temporary.path())?)
-        .map_err(|error| {
-            UpdateError::DownloadFailed(
-                "official sing-box release",
-                format!("GitHub 返回的不是有效的发布 JSON：{error}"),
-            )
-        })?;
-    let tag = release
-        .get("tag_name")
-        .and_then(serde_json::Value::as_str)
+    serde_json::from_reader(fs::File::open(temporary.path())?).map_err(|error| {
+        UpdateError::DownloadFailed(
+            "official sing-box release",
+            format!("GitHub 返回的不是有效的发布 JSON：{error}"),
+        )
+    })
+}
+
+fn official_release_api_url(version: &str) -> Result<String, UpdateError> {
+    let parsed = crate::release::parse_version(version, "official sing-box version")
+        .map_err(|error| UpdateError::Operation(error.to_string()))?;
+    let [major, minor, patch] = parsed;
+    Ok(format!(
+        "https://api.github.com/repos/SagerNet/sing-box/releases/tags/v{major}.{minor}.{patch}"
+    ))
+}
+
+fn fetch_official_archive_digest(version: &str) -> Result<Option<String>, UpdateError> {
+    let url = official_release_api_url(version)?;
+    let release = fetch_official_release_json(&url)?;
+    parse_official_archive_digest(&release.to_string(), &official_archive_asset(version))
+}
+
+fn parse_official_archive_digest(
+    release_json: &str,
+    expected_asset_name: &str,
+) -> Result<Option<String>, UpdateError> {
+    let release: serde_json::Value = serde_json::from_str(release_json).map_err(|error| {
+        UpdateError::DownloadFailed(
+            "official sing-box release",
+            format!("GitHub 返回的不是有效的发布 JSON：{error}"),
+        )
+    })?;
+    let assets = release
+        .get("assets")
+        .and_then(serde_json::Value::as_array)
         .ok_or_else(|| {
             UpdateError::DownloadFailed(
                 "official sing-box release",
-                "GitHub 发布 JSON 缺少 tag_name 字段".to_owned(),
+                "GitHub 发布 JSON 缺少 assets 列表".to_owned(),
             )
         })?;
-    let version = tag.strip_prefix('v').unwrap_or(tag);
-    crate::release::parse_version(version, "official sing-box version")
-        .map_err(|error| UpdateError::Operation(error.to_string()))?;
-    Ok(version.to_owned())
+    let asset = assets
+        .iter()
+        .find(|asset| {
+            asset.get("name").and_then(serde_json::Value::as_str) == Some(expected_asset_name)
+        })
+        .ok_or_else(|| {
+            UpdateError::DownloadFailed(
+                "official sing-box release",
+                format!("GitHub 发布中找不到预期资产 {expected_asset_name}"),
+            )
+        })?;
+    let Some(digest) = asset.get("digest").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let digest = digest.as_str().ok_or_else(|| {
+        UpdateError::DownloadFailed(
+            "official sing-box release",
+            "GitHub 资产 digest 字段不是字符串".to_owned(),
+        )
+    })?;
+    let Some(hex) = digest.strip_prefix("sha256:") else {
+        return Err(UpdateError::DownloadFailed(
+            "official sing-box release",
+            "GitHub 资产 digest 不是 sha256:<64 位十六进制>".to_owned(),
+        ));
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(UpdateError::DownloadFailed(
+            "official sing-box release",
+            "GitHub 资产 digest 不是 sha256:<64 位十六进制>".to_owned(),
+        ));
+    }
+    Ok(Some(hex.to_ascii_lowercase()))
 }
 
-/// Downloads the official sing-box release archive, extracts the kernel
-/// binary, confirms it runs and reports the requested version, and copies it
-/// to `output_bin`. Integrity rests on the HTTPS release plus the runtime
-/// version check; the signed-manifest flow remains available for pinned,
-/// hash-verified installs.
+fn verify_official_archive_checksum(archive: &Path, expected: &str) -> Result<(), UpdateError> {
+    let contents = fs::read(archive)?;
+    let actual = format!("{:x}", Sha256::digest(contents));
+    if actual.eq_ignore_ascii_case(expected) {
+        Ok(())
+    } else {
+        Err(UpdateError::OfficialChecksumMismatch)
+    }
+}
+
+/// Downloads the official sing-box release archive, checks GitHub's asset
+/// SHA-256 digest when supplied, extracts the kernel binary, confirms it runs
+/// and reports the requested version, and copies it to `output_bin`. The
+/// official digest is an integrity check from GitHub, not an independent
+/// publisher signature; signed manifests remain the stronger trust path.
 pub fn download_sing_box_official(version: &str, output_bin: &Path) -> Result<(), UpdateError> {
     let url = official_sing_box_archive_url(version)?;
+    let expected_digest = fetch_official_archive_digest(version)?;
     let archive = tempfile::Builder::new()
         .suffix(".tar.gz")
         .tempfile()
@@ -267,6 +354,14 @@ pub fn download_sing_box_official(version: &str, output_bin: &Path) -> Result<()
             "sing-box",
             curl_diagnostic("sing-box", &download),
         ));
+    }
+    if let Some(expected_digest) = expected_digest {
+        verify_official_archive_checksum(archive.path(), &expected_digest)?;
+    } else {
+        eprintln!(
+            "warning: GitHub 未提供 sing-box {} 资产的 SHA-256 摘要；将继续通过 HTTPS 下载并检查候选内核版本，但归档完整性未校验。需要签名验证时请使用固定版本 release manifest。",
+            version
+        );
     }
     let extracted = tempfile::tempdir().map_err(|error| {
         UpdateError::DownloadFailed("sing-box", format!("无法创建解压目录：{error}"))
@@ -728,6 +823,113 @@ fn check_sbctl_candidate(candidate: &Path) -> Result<(), UpdateError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn official_release_asset_digest_selects_the_exact_archive_name() {
+        let expected = format!("sha256:{:x}", Sha256::digest(b"official archive"));
+        let release = serde_json::json!({
+            "assets": [
+                {"name": "other.tar.gz", "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"},
+                {"name": "sing-box-1.14.1-linux-amd64.tar.gz", "digest": expected},
+            ]
+        });
+
+        assert_eq!(
+            parse_official_archive_digest(
+                &release.to_string(),
+                "sing-box-1.14.1-linux-amd64.tar.gz"
+            )
+            .expect("the exact official archive digest is parsed"),
+            Some(format!("{:x}", Sha256::digest(b"official archive")))
+        );
+    }
+
+    #[test]
+    fn official_release_asset_digest_is_optional_but_malformed_values_fail_closed() {
+        let missing = serde_json::json!({
+            "assets": [{"name": "sing-box-1.14.1-linux-amd64.tar.gz"}]
+        });
+        assert_eq!(
+            parse_official_archive_digest(
+                &missing.to_string(),
+                "sing-box-1.14.1-linux-amd64.tar.gz"
+            )
+            .expect("older GitHub API response may omit an asset digest"),
+            None
+        );
+
+        for digest in ["sha512:abcd", "sha256:xyz", "sha256:abcd"] {
+            let malformed = serde_json::json!({
+                "assets": [{
+                    "name": "sing-box-1.14.1-linux-amd64.tar.gz",
+                    "digest": digest,
+                }]
+            });
+            assert!(
+                parse_official_archive_digest(
+                    &malformed.to_string(),
+                    "sing-box-1.14.1-linux-amd64.tar.gz"
+                )
+                .is_err(),
+                "malformed digest must fail closed: {digest}"
+            );
+        }
+    }
+
+    #[test]
+    fn official_archive_checksum_rejects_modified_downloads() {
+        let archive = tempfile::NamedTempFile::new().expect("archive fixture is created");
+        fs::write(archive.path(), b"modified archive").expect("archive fixture is written");
+
+        let result = verify_official_archive_checksum(
+            archive.path(),
+            &format!("{:x}", Sha256::digest(b"official archive")),
+        );
+
+        assert!(result.is_err(), "a digest mismatch must reject the archive");
+    }
+
+    #[test]
+    fn official_archive_checksum_accepts_the_matching_download() {
+        let archive = tempfile::NamedTempFile::new().expect("archive fixture is created");
+        fs::write(archive.path(), b"official archive").expect("archive fixture is written");
+
+        verify_official_archive_checksum(
+            archive.path(),
+            &format!("{:x}", Sha256::digest(b"official archive")),
+        )
+        .expect("the expected official archive is accepted");
+    }
+
+    #[test]
+    fn official_release_asset_digest_handles_null_and_missing_assets_explicitly() {
+        let null_digest = serde_json::json!({
+            "assets": [{
+                "name": "sing-box-1.14.1-linux-amd64.tar.gz",
+                "digest": null,
+            }]
+        });
+        assert_eq!(
+            parse_official_archive_digest(
+                &null_digest.to_string(),
+                "sing-box-1.14.1-linux-amd64.tar.gz"
+            )
+            .expect("null digest is treated as unavailable"),
+            None
+        );
+
+        let wrong_asset = serde_json::json!({
+            "assets": [{"name": "sing-box-1.14.1-linux-arm64.tar.gz", "digest": null}]
+        });
+        assert!(
+            parse_official_archive_digest(
+                &wrong_asset.to_string(),
+                "sing-box-1.14.1-linux-amd64.tar.gz"
+            )
+            .is_err(),
+            "a release that omits the expected architecture asset must fail"
+        );
+    }
 
     #[test]
     fn rollback_history_keeps_only_the_newest_generations() {

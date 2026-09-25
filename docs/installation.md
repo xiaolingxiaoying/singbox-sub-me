@@ -37,6 +37,8 @@ bootstrap 脚本只安装并校验 sbctl；它不会接管已有的 sing-box 部
 安装完成后，运行 `sbctl menu`（或 `sbctl m`）可重新打开管理菜单，无需再次下载安装脚本。
 菜单可查看状态、VPS 流量、节点端口和订阅地址，也可在确认后重启服务或卸载 sbctl（默认保留备份和配置）。
 
+首次部署可在菜单中选择“引导式安装”，一次完成订阅模式、域名/IP、协议、端口和流量账期设置；安装前会显示脱敏摘要并要求确认，取消不会写入部署配置。命令行可用 `sbctl install --guided` 打开同一向导。菜单中的“快速安装”保留较短的默认配置路径。
+
 安装时可为五个协议分别指定监听端口；端口必须大于 1024，且五个协议之间不能重复：
 
 ```bash
@@ -93,16 +95,19 @@ sbctl certificate obtain --email admin@example.com
 sbctl certificate obtain --no-email
 ```
 
-安装或签发完成后，按输出清单手动放行端口（sbctl 永不自动修改防火墙）。协议端口见
-`sbctl node`：VLESS Reality、VMess WebSocket、AnyTLS 使用 TCP；Hysteria2、TUIC 使用 UDP。
+安装或通过 `sbctl config wizard` 更改配置后，按输出清单手动核对并放行端口（sbctl 永不自动修改防火墙）。
+协议端口见 `sbctl node`：VLESS Reality、VMess WebSocket、AnyTLS 使用 TCP；Hysteria2、TUIC 使用 UDP。
 
 ```bash
 # Direct 模式需要 80/443
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
-# 逐协议放行（示例）
+# 逐协议放行（将端口替换为 sbctl node 显示的当前值）
 sudo ufw allow <vless端口>/tcp
+sudo ufw allow <vmess端口>/tcp
 sudo ufw allow <hysteria2端口>/udp
+sudo ufw allow <tuic端口>/udp
+sudo ufw allow <anytls端口>/tcp
 
 # DNS 自检：应返回 VPS 公网 IP
 dig +short sub.example.com

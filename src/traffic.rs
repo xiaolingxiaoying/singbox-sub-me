@@ -1013,6 +1013,40 @@ mod tests {
     }
 
     #[test]
+    fn a_reset_after_several_missed_periods_starts_at_the_current_period_baseline() {
+        let fixture = TempDir::new().unwrap();
+        let store = DeploymentStore::new(fixture.path());
+        let config = config();
+        let january = Utc.with_ymd_and_hms(2024, 1, 20, 0, 0, 0).unwrap();
+        let april = Utc.with_ymd_and_hms(2024, 4, 5, 0, 0, 0).unwrap();
+
+        write_interface_fixture(&fixture, 100, 200, "boot-a");
+        assert_eq!(reset_at(&store, &config, january).unwrap().total(), 0);
+        write_interface_fixture(&fixture, 130, 260, "boot-a");
+        assert_eq!(reset_at(&store, &config, january).unwrap().total(), 90);
+
+        // Model Persistent=true waking the reset service after February and
+        // March were missed. The first run belongs to April and must establish
+        // a current baseline instead of carrying old-period traffic forward.
+        write_interface_fixture(&fixture, 1_000, 2_000, "boot-a");
+        let april_report = reset_at(&store, &config, april).unwrap();
+        assert_eq!(april_report.total(), 0);
+        assert_eq!(april_report.accounting_period, "2024-04-01T00:00:00+00:00");
+
+        // Repeating the persistent timer in the same cycle accumulates only
+        // deltas since that baseline and does not establish it again.
+        write_interface_fixture(&fixture, 1_015, 2_017, "boot-a");
+        assert_eq!(reset_at(&store, &config, april).unwrap().total(), 32);
+
+        let state: TrafficState = serde_json::from_slice(
+            &fs::read(fixture.path().join("var/lib/sbctl/state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!((state.baseline_rx, state.baseline_tx), (1_015, 2_017));
+        assert_eq!((state.accumulated_rx, state.accumulated_tx), (15, 17));
+    }
+
+    #[test]
     fn an_interface_change_establishes_a_new_period() {
         let fixture = TempDir::new().unwrap();
         let store = DeploymentStore::new(fixture.path());

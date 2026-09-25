@@ -583,12 +583,12 @@ fn five_protocols_export_the_same_canonical_nodes_across_server_and_subscription
     let _: serde_yaml::Value = serde_yaml::from_str(&clash).expect("Clash subscription is YAML");
 }
 
-/// G5: `sbctl node --uri` is the operator's own view of the same links the
+/// G5: `sbctl node --links` is the operator's own view of the same links the
 /// `uri` artifact ships. It is opt-in because the lines carry node credentials,
 /// and it must never carry the Subscription credential, which would let a
 /// pasted screenshot both read and administer the deployment (ADR-0002).
 #[test]
-fn node_uri_flag_prints_the_native_share_links_and_plain_node_prints_none() {
+fn node_links_are_opt_in_filtered_and_match_the_uri_artifact() {
     let fixture = TempDir::new().expect("temporary root is created");
     let checker = sing_box_check_fixture(
         &fixture,
@@ -651,25 +651,83 @@ fn node_uri_flag_prints_the_native_share_links_and_plain_node_prints_none() {
         !plain.contains("://"),
         "share links stay opt-in; `sbctl node` is piped into logs and screenshots: {plain}"
     );
+    let server_config: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            fixture
+                .path()
+                .join("var/lib/sbctl/artifacts/sing-box-server.json"),
+        )
+        .expect("server configuration is generated"),
+    )
+    .expect("server configuration is JSON");
+    for inbound in server_config["inbounds"]
+        .as_array()
+        .expect("inbounds are listed")
+    {
+        for user in inbound["users"]
+            .as_array()
+            .expect("inbound users are listed")
+        {
+            for field in ["uuid", "password"] {
+                if let Some(secret) = user[field].as_str() {
+                    assert!(!secret.is_empty());
+                    assert!(
+                        !plain.contains(secret),
+                        "default node output must not expose {field} values"
+                    );
+                }
+            }
+        }
+        if let Some(reality) = inbound["tls"]["reality"].as_object() {
+            if let Some(secret) = reality.get("private_key").and_then(|value| value.as_str()) {
+                assert!(!secret.is_empty());
+                assert!(
+                    !plain.contains(secret),
+                    "default node output must not expose the Reality private key"
+                );
+            }
+            if let Some(short_ids) = reality.get("short_id").and_then(|value| value.as_array()) {
+                for secret in short_ids.iter().filter_map(serde_json::Value::as_str) {
+                    assert!(!secret.is_empty());
+                    assert!(
+                        !plain.contains(secret),
+                        "default node output must not expose Reality short IDs"
+                    );
+                }
+            }
+        }
+    }
 
-    let with_uris = Command::cargo_bin("sbctl")
+    let with_links = Command::cargo_bin("sbctl")
         .expect("sbctl binary is built")
-        .args(["--root", root, "node", "--uri"])
+        .args(["--root", root, "node", "--links"])
         .assert()
         .success()
         .stdout(predicate::str::contains("原生分享链接"))
         .get_output()
         .stdout
         .clone();
-    let with_uris = String::from_utf8(with_uris).expect("--uri output is UTF-8");
-    let links = with_uris
-        .split_once("：\n")
-        .or_else(|| with_uris.split_once(":\n"))
-        .map(|(_, rest)| rest)
-        .expect("the share-link header ends its own line");
+    let with_links = String::from_utf8(with_links).expect("--links output is UTF-8");
+    let links = with_links
+        .lines()
+        .filter(|line| {
+            [
+                "vless://",
+                "vmess://",
+                "hysteria2://",
+                "tuic://",
+                "anytls://",
+            ]
+            .iter()
+            .any(|scheme| line.starts_with(scheme))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let links = format!("{links}\n");
     assert_eq!(
-        links, artifact,
-        "--uri must print the uri artifact byte-for-byte"
+        links.as_bytes(),
+        artifact.as_bytes(),
+        "--links must print the uri artifact byte-for-byte"
     );
     assert_eq!(
         links.lines().filter(|line| !line.is_empty()).count(),
@@ -677,9 +735,87 @@ fn node_uri_flag_prints_the_native_share_links_and_plain_node_prints_none() {
         "every one of the five enabled nodes needs a line"
     );
     assert!(
-        !with_uris.contains(&credential),
-        "--uri must not expose the Subscription credential"
+        !with_links.contains(&credential),
+        "--links must not expose the Subscription credential"
     );
+    for label in [
+        "VLESS Reality 节点",
+        "VMess WebSocket 节点",
+        "Hysteria2 节点",
+        "TUIC 节点",
+        "AnyTLS 节点",
+    ] {
+        assert!(with_links.contains(label), "missing Chinese label: {label}");
+    }
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(["--root", root, "node", "--uri"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("原生分享链接"));
+
+    let filtered = Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            root,
+            "node",
+            "--links",
+            "--protocol",
+            "vless-reality",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let filtered = String::from_utf8(filtered).expect("filtered link output is UTF-8");
+    let filtered_links = filtered
+        .lines()
+        .filter(|line| line.starts_with("vless://"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        filtered_links.len(),
+        1,
+        "--protocol must restrict --links to the requested Managed protocol"
+    );
+    assert!(filtered.contains("VLESS Reality 节点"));
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(["--root", root, "node", "--qr"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--links"));
+
+    let qr = Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args([
+            "--root",
+            root,
+            "node",
+            "--links",
+            "--protocol",
+            "vless-reality",
+            "--qr",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("vless://"))
+        .get_output()
+        .stdout
+        .clone();
+    let qr = String::from_utf8(qr).expect("QR output is UTF-8");
+    assert!(qr.contains('█'), "--qr must render a terminal QR code");
+
+    Command::cargo_bin("sbctl")
+        .expect("sbctl binary is built")
+        .args(["node", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--links"))
+        .stdout(predicate::str::contains("--protocol"))
+        .stdout(predicate::str::contains("--qr"));
 }
 
 /// G5: the index page sits behind the 256-bit path credential exactly like the
@@ -737,6 +873,21 @@ fn the_index_page_shows_every_native_share_link_the_uri_route_serves() {
         index.contains("节点与原生分享链接"),
         "the index page carries the native share-link section"
     );
+    let node_section = index
+        .split_once("<h2>节点与原生分享链接</h2>")
+        .expect("the index page has a node section")
+        .1
+        .split_once("<h2>全部订阅链接</h2>")
+        .expect("the subscription section follows the node links")
+        .0;
+    assert!(
+        node_section.contains("<details><summary>查看节点分享链接（含节点凭据）</summary>"),
+        "node credentials start hidden behind a collapsed disclosure"
+    );
+    assert!(
+        !node_section.contains("<details open>"),
+        "credential-bearing node links must not be visible on initial page load"
+    );
 
     let lines: Vec<&str> = uris.lines().filter(|line| !line.is_empty()).collect();
     assert_eq!(
@@ -746,7 +897,7 @@ fn the_index_page_shows_every_native_share_link_the_uri_route_serves() {
     );
     for line in &lines {
         assert!(
-            index.contains(&html_escape(line)),
+            node_section.contains(&html_escape(line)),
             "the index page must carry the {line} link"
         );
     }
@@ -1277,7 +1428,11 @@ fn subscription_userinfo_total_reflects_a_total_only_correction() {
     assert!(
         // The interface counted rx=30 / tx=60 over the period; from the client's
         // side those are upload=30 and download=60.
-        response.contains("subscription-userinfo: upload=30; download=60; total=5000; expire=")
+        response.contains("subscription-userinfo: upload=30; download=60; expire=")
+    );
+    assert!(
+        !response.contains("subscription-userinfo: upload=30; download=60; total="),
+        "unlimited subscriptions must not advertise used traffic as a quota"
     );
     assert!(server.wait().expect("server exits").success());
 }

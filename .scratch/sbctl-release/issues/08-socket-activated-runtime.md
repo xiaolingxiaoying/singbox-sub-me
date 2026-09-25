@@ -1,6 +1,6 @@
 # 实现 socket-activated Direct HTTPS 与双非 root 服务
 
-Status: needs-triage
+Status: resolved
 Type: task
 Blocked by: 01, 06
 
@@ -18,13 +18,17 @@ Blocked by: 01, 06
 
 ## 验收标准
 
-- [ ] sbctl daemon 不直接 bind 80/443，socket unit 持有两个公网监听。
-- [ ] 真实或等价 systemd 中 80/443 均能到达正确 HTTP/TLS 处理路径。
-- [ ] `sbctl` 与 `sing-box` 使用不同无登录服务账户，服务不以 root 常驻运行。
-- [ ] External proxy 只监听 loopback，IP fallback 只使用配置的高位 HTTP 端口。
-- [ ] 超大请求、慢读取、超并发和异常连接均受边界限制且不导致进程失控。
-- [ ] 现有 Caddy/Nginx、iptables、NAT 和其他服务未被修改。
+- [x] sbctl daemon 不直接 bind 80/443，socket unit 持有两个公网监听。
+- [x] 三发行版真实 systemd acceptance 验证 Direct HTTP/TLS 80/443 路由。
+- [x] `sbctl` 与 `sing-box` 使用不同 `/usr/sbin/nologin` 服务账户；验收检查 systemd 配置和运行进程用户，服务不以 root 常驻运行。
+- [x] External proxy 只监听 loopback，IP fallback 只使用配置的高位 HTTP 端口。
+- [x] Hyper HTTP/1 入口对超大请求头、慢读和超过 32 的并发未完成请求有实时 socket 测试；连接按上限关闭。
+- [x] 安装和卸载验收检查不接管既有 UFW/Nginx 配置；VPS 测试只为五个 sbctl 节点端口显式添加 UFW allow 规则，未改云防火墙或 NAT 配置。
 
 ## 相关规格
 
 `.scratch/sbctl-release/spec.md`、ADR-0009、ADR-0011、ADR-0012
+
+## Comments
+
+- 2026-09-25：运行时和 systemd 验收完成。Actions run `36121273005` 全部通过，覆盖生产构建、Debian 12/Ubuntu 22.04/24.04 systemd acceptance、Linux/Windows/macOS 检查及 profile 校验。验收新增 `/usr/sbin/nologin` 与实际 MainPID 用户断言；`src/subscription/serve.rs` 新增超大头、慢读和并发上限 live-listener 测试。三种部署模式、80/443 Direct socket、非 root 服务、loopback proxy 和 IP fallback 也已在 VPS/acceptance 验证。随后将 oversized-header 测试收紧为必须返回 HTTP 431；Actions run `36122703588` 全部通过，确认了该严格断言及完整系统验收。

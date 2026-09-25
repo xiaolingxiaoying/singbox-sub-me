@@ -16,21 +16,57 @@ pub(crate) fn format_local_time(instant: chrono::DateTime<chrono::Utc>, timezone
         .unwrap_or_else(|_| instant.to_rfc3339())
 }
 
-pub(crate) fn print_nodes(root: &Path, uri: bool) -> ExitCode {
+pub(crate) fn print_nodes(
+    root: &Path,
+    links: bool,
+    protocol: Option<sbctl::config::ManagedProtocol>,
+    qr: bool,
+) -> ExitCode {
     match sbctl::config::DeploymentStore::new(root).load() {
         Ok(config) => {
-            println!("{}", sbctl::lifecycle::enabled_nodes(&config));
-            if uri {
-                let links = sbctl::lifecycle::node_share_links(&config);
-                if !links.is_empty() {
+            let protocol_name = protocol.as_ref().map(ToString::to_string);
+            let nodes = sbctl::canonical::nodes(&config)
+                .into_iter()
+                .filter(|node| {
+                    protocol
+                        .as_ref()
+                        .is_none_or(|selected| &node.protocol() == selected)
+                })
+                .collect::<Vec<_>>();
+            if let Some(protocol) = &protocol_name
+                && nodes.is_empty()
+            {
+                eprintln!("未启用协议：{protocol}");
+                return ExitCode::from(2);
+            }
+            let summary = sbctl::lifecycle::enabled_nodes_for_protocol(&config, protocol.as_ref());
+            println!("{summary}");
+            if links && !nodes.is_empty() {
+                if qr {
+                    for node in &nodes {
+                        let link = sbctl::subscription::node_share_link(&config, node);
+                        println!("\n{}", node.protocol().label_zh());
+                        println!("{}", link.trim_end());
+                        match sbctl::qr::render_ansi(link.trim()) {
+                            Ok(rendered) => print!("{rendered}"),
+                            Err(error) => {
+                                eprintln!("节点二维码生成失败：{error}");
+                                return ExitCode::from(2);
+                            }
+                        }
+                    }
+                } else {
                     println!("\n原生分享链接（含节点凭据，仅输出到本终端）:");
-                    print!("{links}");
+                    for node in &nodes {
+                        println!("{}:", node.protocol().label_zh());
+                        print!("{}", sbctl::subscription::node_share_link(&config, node));
+                    }
                 }
             }
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("node failed: {error}");
+            eprintln!("节点命令失败：{error}");
             ExitCode::from(2)
         }
     }

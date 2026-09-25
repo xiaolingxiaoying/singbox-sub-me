@@ -31,6 +31,8 @@ sbctl 在同一份节点模型上生成多种订阅格式。所有链接都在 `
 
 `sbctl sub` 会先输出以上按客户端速查，再输出完整矩阵；`index` 总览页顶部同样提供该速查表。
 
+管理员可以在服务器终端运行 `sbctl node --links` 查看各协议原生分享链接；链接含 Proxy credential，因此默认的 `sbctl node` 不会显示。可以用 `--protocol vless-reality` 等协议名筛选，`--qr` 会在终端渲染对应链接的二维码（需要同时指定 `--links`）。旧参数 `--uri` 仍可作为 `--links` 的兼容别名。订阅总览页中的节点链接默认折叠，展开后才显示；不要截图或转发这些链接。
+
 ## 完整客户端配置包含什么
 
 `sing-box-full.json`（及各版本文件）与 `sing-box.json` 的区别：
@@ -91,6 +93,9 @@ sbctl config override clear     # 删除并重新生成
 
 `sbctl` 菜单「订阅中心 → 12. 客户端模板配置」（或向导主题）可调：
 
+每项都会显示当前值作为默认答案；保存前预览会列出模板、DNS 模式、规则档位、规则镜像和测速 URL，
+订阅凭据保持脱敏，URL 中的认证信息、查询参数和片段也会隐藏。URL 选项仅接受 `http://` 或 `https://` 地址。
+
 - `client_dns_mode`：fake-ip（默认）/ redir-host
 - `client_template`：**standard（默认）/ global / split** —— 编译期内置的内容目录（ADR-0022），
   决定订阅里的策略组、规则集、内联分流规则、DNS 与最终出口，不是磁盘上的管理员模板文件。
@@ -144,7 +149,7 @@ upload=<已用上行字节>; download=<已用下行字节>; total=<额度>; expi
   但表头标签站在订阅用户那一边——v2rayN、Clash Verge、Shadowrocket 都把这两个键显示成
   "我上传/我下载了多少"。早先的实现按服务端视角打标签，于是下载为主的月份在客户端里显示成巨额"上传"。
   （`docs/implementation-plan.md` 里那行 `download=RX、upload=TX` 是当年有意的写法，现已按消费方语义纠正。）
-- `total=` 是配置的月度额度；没有配额度时它退化为"已用字节"，不是"无限"。
+- `total=` 只在配置了月度额度时发送，值是额度本身；无限额时省略 `total`，避免客户端把当前已用量误显示成总额度。`upload` / `download` 与 `expire` 仍照常发送。
 - `expire=` 承担"刷新/重置日期"语义：本项目没有账号到期概念，它就是账期的下次重置时刻。
   因此**不设** `refresh=` 键（各客户端渲染重置日期用的就是 `expire`）。
 - `profile-update-interval=24` 是对客户端的**策略声明**（"一天拉一次就够"），不描述服务端行为：

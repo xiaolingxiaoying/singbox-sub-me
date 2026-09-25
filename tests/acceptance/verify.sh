@@ -221,7 +221,10 @@ pending_credential=$(sed -n 's/^subscription_credential = "\([^"]*\)"/\1/p' "$ro
 sleep 1
 pending_response=$(curl --silent --show-error --include "http://127.0.0.1:2089/sub/$pending_credential/uri")
 contains "$pending_response" 'HTTP/1.1 200 OK'
-contains "$pending_response" 'subscription-userinfo: upload=0; download=0; total=0; expire='
+contains "$pending_response" 'subscription-userinfo: upload=0; download=0; expire='
+if printf '%s' "$pending_response" | grep -Fi 'subscription-userinfo:' | grep -F 'total=' >/dev/null; then
+  fail 'unlimited subscription fabricated a total quota from used traffic'
+fi
 contains "$pending_response" '; profile-update-interval=24'
 curl --silent --output /dev/null "http://127.0.0.1:2089/sub/wrong-credential/uri"
 
