@@ -2,7 +2,8 @@
 
 更新日期：2026-09-25  
 工作分支：`dev-sbctl`  
-服务端代码验证提交：`bd7b60d9fd4d6b1bea62770f8d3f937f960e441b`
+服务端代码验证提交：`e5aa7fc2352229a3fee8d77d4dab5842611a6cf6`  
+当前工作分支提交：`937588782b8a357061f448c20ac05cc824442bb5`（后续仅更新验收记录）
 
 ## 目标
 
@@ -43,6 +44,10 @@
 
 2026-09-25 的 S11 验收修复已由 Actions run `36133020517` 全部通过（workspace tests、Clippy、Windows/macOS 检查、生产 Linux amd64 构建、sing-box/Mihomo 真核验证、Debian/Ubuntu systemd acceptance）。VPS 当前运行 `sbctl 0.2.0`，SHA-256 `45dacacda646d9b433a6a41455ee7c596accfceb2a23830db0bf59a66776793f`；该生产二进制由 run `36131353579` 构建，后续 `bd7b60d` 仅改验收脚本和文档，未改生产二进制源码。root-only 回滚副本 `/root/sbctl.pre-bd7b60d` 的 SHA-256 为 `3dd2d829b39d00812baee6c0f48002f64c78fbe1a2d19a0757f9d68bd1a69dce`。更新后 `sbctl.service` 与 `sing-box.service` 均 active、`NRestarts=0`、`sbctl config validate` 通过；节点清单有五条，`sing-box-full` HTTPS 订阅返回 200，userinfo 含配置额度 `536870912000` 和 `profile-update-interval=24`。本轮部署未修改 sing-box 配置、UFW 或证书。
 
+2026-09-25 的 S9 客户端模板向导改进提交 `e5aa7fc2352229a3fee8d77d4dab5842611a6cf6` 已由 [Actions run 36146609985](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36146609985) 全部通过。模板仍遵循 ADR-0022 编译期目录边界；向导和状态摘要覆盖模板、DNS、规则档位、镜像 URL 与测速 URL，并对订阅凭据、URL 认证信息、query 和 fragment 脱敏。使用该 CI Linux 工件在 VPS `/tmp` 中只读运行，摘要匹配 `4144187ffe519aaac6d83fdcc41c84d86e7a80ad3ef2767f3a51a737479a0d95`，状态摘要正确，受管服务保持 active 且重启计数未增长；临时工件已清理，生产二进制和服务未替换。S10 已决定由维护者先核实并固定新 sing-box minor 的 schema/profile，再由 CI 硬门禁；新 minor 未审查前不自动滚动发布。上述问题单为 `resolved`。
+
+当前记录提交 `937588782b8a357061f448c20ac05cc824442bb5` 的 [Actions run 36148995690](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36148995690) 已全部通过：Linux workspace 测试/Clippy/release trust、Windows/macOS 检查、生产 Linux amd64 构建、真实 sing-box/Mihomo profile 校验、原型检查，以及 Debian 12、Ubuntu 22.04、Ubuntu 24.04 systemd 工件验收。此 run 包含文档记录提交，S9 对应的代码验证仍以 `e5aa7fc` 工件和 run `36146609985` 为准。
+
 订阅矩阵包括 sing-box、版本化 sing-box、Clash、版本化 Clash、URI、Base64 URI、Shadowrocket、索引页和 QR。客户端流量测试使用一次性 root-only 配置；测试后已删除临时配置和客户端进程。
 
 ## Actions 证据
@@ -59,6 +64,8 @@
 - 服务端 HTTP 连接边界与服务账户验收：commit `6420a2a`；[GitHub Actions run 36121273005](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36121273005) 全部通过。新增 live-listener 测试覆盖超大头、慢读和超过 32 的并发请求；systemd acceptance 检查 `sbctl`/`sing-box` 的 nologin 账户和实际进程用户。之后将超大头断言收紧为必须返回 HTTP 431，并在 Windows 本机及 [Actions run 36122703588](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36122703588) 通过验证。
 - 严格 HTTP 431 验收与文档收口：commit `e009fa8` / `5e4be3b`；[GitHub Actions run 36122703588](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36122703588) 全部通过，严格 431 回归测试、生产构建和三发行版 systemd acceptance 均通过。
 - 最新文档提交的回归门禁：[GitHub Actions run 36124229773](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36124229773) 全部通过，含 Linux/macOS/Windows 检查、完整测试、生产构建、真实核心配置校验和 systemd acceptance。
+- S9 向导改进及状态摘要脱敏：代码提交 `e5aa7fc2352229a3fee8d77d4dab5842611a6cf6`；[GitHub Actions run 36146609985](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36146609985) 全部通过，VPS 临时工件运行证据见阶段 7 和 S9 工单。
+- 最新跟踪记录提交 `937588782b8a357061f448c20ac05cc824442bb5`：[GitHub Actions run 36148995690](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36148995690) 全部通过，包括 Debian/Ubuntu 三发行版 systemd acceptance；该提交为文档记录更新。
 
 ## 尚未完成的发布级与端到端验证
 
