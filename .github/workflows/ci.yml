@@ -166,7 +166,7 @@ jobs:
           set -euo pipefail
           mkdir -p mihomo
           curl -fsSL --retry 3 -o mihomo/mihomo.gz \
-            "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.30/mihomo-linux-amd64-compatible-v1.19.30.gz"
+            "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.31/mihomo-linux-amd64-compatible-v1.19.31.gz"
           gunzip -c mihomo/mihomo.gz > mihomo/mihomo
           chmod +x mihomo/mihomo
           mihomo/mihomo -v
