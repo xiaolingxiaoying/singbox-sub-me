@@ -31,4 +31,4 @@ Blocked by: 01, 06
 
 ## Comments
 
-- 2026-09-25：运行时和 systemd 验收完成。Actions run `36121273005` 全部通过，覆盖生产构建、Debian 12/Ubuntu 22.04/24.04 systemd acceptance、Linux/Windows/macOS 检查及 profile 校验。验收新增 `/usr/sbin/nologin` 与实际 MainPID 用户断言；`src/subscription/serve.rs` 新增超大头、慢读和并发上限 live-listener 测试。三种部署模式、80/443 Direct socket、非 root 服务、loopback proxy 和 IP fallback 也已在 VPS/acceptance 验证。
+- 2026-09-25：运行时和 systemd 验收完成。Actions run `36121273005` 全部通过，覆盖生产构建、Debian 12/Ubuntu 22.04/24.04 systemd acceptance、Linux/Windows/macOS 检查及 profile 校验。验收新增 `/usr/sbin/nologin` 与实际 MainPID 用户断言；`src/subscription/serve.rs` 新增超大头、慢读和并发上限 live-listener 测试。三种部署模式、80/443 Direct socket、非 root 服务、loopback proxy 和 IP fallback 也已在 VPS/acceptance 验证。随后将 oversized-header 测试收紧为必须返回 HTTP 431；Actions run `36122703588` 全部通过，确认了该严格断言及完整系统验收。
