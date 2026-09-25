@@ -31,7 +31,7 @@
 | 阶段 | 工作 | 结果 |
 | --- | --- | --- |
 | 1. 改进入口 | `sbctl install --guided` 先运行安装前检查，再一次收集完整配置、显示脱敏摘要并确认后执行事务；取消时不创建部署状态。新鲜安装菜单直接进入同一向导。配置向导提交后重印当前订阅与全部已启用协议的 UFW 放行命令，供管理员核对；不自动修改防火墙。 | 已实现；首次向导、配置变更、取消与凭据脱敏测试通过。 |
-| 2. 自动门禁 | CI 构建生产 Linux amd64 二进制；真实 systemd 验收使用隔离的 test-signing 工件，不把测试签名带入生产工件。验收覆盖 Debian 12、Ubuntu 22.04、Ubuntu 24.04。 | [Actions run 36122703588](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36122703588) 全部通过：workspace Rust tests/Clippy、Windows/macOS 检查、生产 Linux 构建、真实 sing-box/Mihomo profile 校验，以及三发行版 `server-acceptance`。该运行也验证严格 HTTP 431 oversized-header 断言。验收辅助二进制改由 Ubuntu 22.04 构建，兼容 Debian 12 的 glibc。 |
+| 2. 自动门禁 | CI 构建生产 Linux amd64 二进制；真实 systemd 验收使用隔离的 test-signing 工件，不把测试签名带入生产工件。验收覆盖 Debian 12、Ubuntu 22.04、Ubuntu 24.04。代码验证见 [Actions run 36122703588](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36122703588)，全部通过：workspace Rust tests/Clippy、Windows/macOS 检查、生产 Linux 构建、真实 sing-box/Mihomo profile 校验，以及三发行版 `server-acceptance`；该运行也验证严格 HTTP 431 oversized-header 断言。之后的文档提交在 [Actions run 36124229773](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36124229773) 再次全部通过，包括完整 workspace tests、生产构建、profile 校验和 Debian/Ubuntu systemd acceptance。验收辅助二进制改由 Ubuntu 22.04 构建，兼容 Debian 12 的 glibc。 |
 | 3. 候选安装 | 用 Actions 构建产物在现有 Direct 部署上升级 sbctl；执行重启、配置检查、节点与订阅检查。 | 通过。CI run `36108915661` 构建的生产 Linux amd64 工件 SHA-256 为 `3dd2d829b39d00812baee6c0f48002f64c78fbe1a2d19a0757f9d68bd1a69dce`，已在 VPS 上校验摘要后原子替换旧版；旧二进制另存 root-only 回滚副本，摘要为 `48e2a566e587264e380164442b502ea0cb0c7196927c2b2cf291910793fb4efd`。新程序报告 `sbctl 0.2.0`；`sbctl status` 正常，`sing-box.service` 和 `sbctl.service` 均为 active。替换 CLI 二进制无需重启代理服务。 |
 | 4. Direct | 检查 80/443 socket activation、HTTPS 订阅、索引和 QR、全部订阅格式、错误凭据和 query 边界、HTTP-01 webroot、证书状态及服务账户。 | 通过。真实公网 HTTPS 返回 200 和 `subscription-userinfo`；坏凭据和带 query 的路径返回 404。 |
 | 5. External proxy | 用配置向导切换到 loopback 监听，并临时安装 Nginx 验证 TLS 反代到 sbctl；完成后移除 Nginx 及测试配置。 | 通过。loopback 监听未占用公网 80/443；真实 HTTPS 反代订阅返回 200 和流量头。Nginx 已卸载。 |
@@ -54,8 +54,9 @@
 - 账期遗漏数月后的 reset 回归测试：commit `183b1cc`；[GitHub Actions run 36116097720](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36116097720) 全部通过，包括 Windows/macOS、全量 Rust 测试和 systemd acceptance。
 - 时区规格同步：commit `11ab87b`。Run `36116953002` 的测试、生产构建、跨平台检查和 server-acceptance 均通过；sing-box 最新版探测遇到匿名 Releases API HTTP 403。CI 已改为解析 GitHub 官方 `/releases/latest` 的重定向，不跳过最新版本兼容性检查。
 - CI 限流修正：commit `ca96b67`；[GitHub Actions run 36119636867](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36119636867) 全部通过，含最新稳定 sing-box v1.14.2 核心 profile 校验。
-- 服务端 HTTP 连接边界与服务账户验收：commit `6420a2a`；[GitHub Actions run 36121273005](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36121273005) 全部通过。新增 live-listener 测试覆盖超大头、慢读和超过 32 的并发请求；systemd acceptance 检查 `sbctl`/`sing-box` 的 nologin 账户和实际进程用户。之后将超大头断言收紧为必须返回 HTTP 431，当前该精确断言已在 Windows 本机通过，待下一轮 Actions 再验证。
+- 服务端 HTTP 连接边界与服务账户验收：commit `6420a2a`；[GitHub Actions run 36121273005](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36121273005) 全部通过。新增 live-listener 测试覆盖超大头、慢读和超过 32 的并发请求；systemd acceptance 检查 `sbctl`/`sing-box` 的 nologin 账户和实际进程用户。之后将超大头断言收紧为必须返回 HTTP 431，并在 Windows 本机及 [Actions run 36122703588](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36122703588) 通过验证。
 - 严格 HTTP 431 验收与文档收口：commit `e009fa8` / `5e4be3b`；[GitHub Actions run 36122703588](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36122703588) 全部通过，严格 431 回归测试、生产构建和三发行版 systemd acceptance 均通过。
+- 最新文档提交的回归门禁：[GitHub Actions run 36124229773](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36124229773) 全部通过，含 Linux/macOS/Windows 检查、完整测试、生产构建、真实核心配置校验和 systemd acceptance。
 
 ## 尚未完成的发布级与端到端验证
 
@@ -67,4 +68,4 @@
 
 ## 敏感信息与清理
 
-文档和 CI 不保留 VPS 地址、域名、密码、订阅凭据、节点凭据或私钥。临时 VPS 公钥已从 `authorized_keys` 精确移除；root-only 备份按恢复需要保留。工作站 `%TEMP%` 中本轮 SSH 测试密钥文件仍待本机清理（精确路径为 `sbctl-vps-validation-20260925` 和同名 `.pub` 文件）。测试使用的 root 密码应在测试后由 VPS 管理员轮换。
+文档和 CI 不保留 VPS 地址、域名、密码、订阅凭据、节点凭据或私钥。临时 VPS 公钥已从 `authorized_keys` 精确移除；工作站 `%TEMP%` 中本轮 SSH 测试私钥和公钥也已删除并确认不存在。root-only 备份按恢复需要保留。测试时使用过的 root 密码仍应由 VPS 管理员轮换。
