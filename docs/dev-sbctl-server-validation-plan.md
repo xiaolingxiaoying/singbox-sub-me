@@ -38,8 +38,8 @@
 | 6. IP fallback | 向导切换到高位 HTTP 端口，从 VPS 和外部测试机分别请求订阅。 | 通过。公网端口返回 200；坏凭据和 query 返回 404。 |
 | 7. 协议和订阅 | 每种模式验证 14 种订阅/二维码路径；用 sing-box 客户端分别测试 VLESS Reality、VMess WebSocket、Hysteria2、TUIC 和 AnyTLS。 | 三种模式的订阅矩阵通过；五种协议分别成功完成 HTTPS 请求。 |
 | 8. 服务端操作 | 运行配置向导改模式、配置重生成、状态/节点、override 校验、系统状态、QR、流量校正、账期 timer、凭据轮换和交互主菜单。 | 通过。凭据轮换后新凭据可用，旧凭据立即返回 404。 |
-| 9. 故障与卸载 | 用 `check=0`、`run=1` 的 sing-box 故障桩验证回滚；测试默认卸载、purge 和独立 sing-box 删除；再完成真实 guided 全新安装。 | 坏候选被拒绝、旧二进制摘要恢复、服务稳定；卸载保留/清除语义正确。guided 取消无写入，guided 安装及公网订阅、五种协议通过。 |
-| 10. 证书和恢复 | Direct 证书 verify、renew、status；Certbot staging dry-run；恢复快照和候选 sbctl，复核公网订阅与 systemd。 | 通过。`renew` 因现有证书未到续期窗口未重新签发；staging dry-run 通过。快照保留，最终运行状态为健康 Direct。 |
+| 9. 故障与卸载 | 用 `check=0`、`run=1` 的 sing-box 故障桩验证回滚；测试默认卸载、purge 和独立 sing-box 删除；再完成真实 guided 全新安装。隔离 CLI 测试覆盖已签名更新同时替换 sbctl 与 sing-box，并保留回滚点。 | 坏候选被拒绝、旧二进制摘要恢复、服务稳定；卸载保留/清除语义正确。guided 取消无写入，guided 安装及公网订阅、五种协议通过。signed update 成功路径在 `test-signing` 隔离工件上验证通过；未证明生产签名发行流程。 |
+| 10. 证书和恢复 | Direct 证书 verify、renew、status；Certbot staging dry-run；恢复快照和候选 sbctl，复核公网订阅与 systemd。 | 通过。VPS 上 `renew` 因现有证书未到续期窗口未重新签发；staging dry-run 通过。新增隔离 CLI 测试模拟 Certbot 替换有效 live 证书，验证 `certificate renew` 参数、新证书与私钥固定副本及状态输出。快照保留，最终运行状态为健康 Direct。 |
 
 订阅矩阵包括 sing-box、版本化 sing-box、Clash、版本化 Clash、URI、Base64 URI、Shadowrocket、索引页和 QR。客户端流量测试使用一次性 root-only 配置；测试后已删除临时配置和客户端进程。
 
@@ -49,6 +49,7 @@
 - systemd 验收 CI：`d5fd927` 首次引入；其验收辅助程序在 Debian 12 上遇到 glibc 基线不兼容后，将验收 job 改为 Ubuntu 22.04 构建。
 - Server/UI 验收提交：`fa0b31b`；[GitHub Actions run 36094245350](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36094245350) 全部通过，包括生产 Linux 构建、`test`、Windows 静态检查、macOS `sbtui`、三发行版 `server-acceptance`、sing-box/Mihomo profiles 和 prototype。
 - 该运行也确认补充的 `tab-4-macos.snap` 与 macOS runner 实际渲染一致，先前 47 passed、1 failed 的 macOS 快照失败已修复。
+- 签名更新与续期测试提交：`22452ed`；[GitHub Actions run 36098937975](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36098937975) 全部通过。`tests/cli/update_release.rs` 验证签名更新成功事务，`tests/cli/certificate.rs` 验证 Certbot 续期成功后新证书和私钥被固定。
 
 ## 尚未完成的发布级验证
 
