@@ -47,8 +47,8 @@
 
 - 代码改进：`de5efaa`；Actions `36085917092` 的 Linux 构建和 sbctl 测试通过。该运行的 macOS `sbtui` 快照检查失败。
 - systemd 验收 CI：`d5fd927` 首次引入；其验收辅助程序在 Debian 12 上遇到 glibc 基线不兼容后，将验收 job 改为 Ubuntu 22.04 构建。
-- 当前工作流提交：`496aa6b`；[GitHub Actions run 36087995403](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36087995403)。`build-sbctl-linux-amd64`、`test`、`windows-static`、`server-acceptance`、sing-box/Mihomo profiles、prototype 均通过；`server-acceptance` 在三种 Linux 系统上通过。
-- 整体 CI 仍为失败：`sbtui-macos` 的 `tab-4-macos` 发布快照断言失败（47 passed、1 failed）。这不是 sbctl 服务端测试失败，但应由对应 GUI 任务单独修复后再要求全工作流绿色。
+- 最新工作流提交：`8f3ce55`；[GitHub Actions run 36092692279](https://github.com/xiaolingxiaoying/singbox-sub-me/actions/runs/36092692279)。生产 Linux 构建、`test`、Windows 静态检查、三种 Linux 的 `server-acceptance`、sing-box/Mihomo profiles、prototype 均通过。
+- `36092692279` 的整体 CI 因 `sbtui-macos` 的 `tab-4-macos` 快照失败（47 passed、1 failed）。失败日志显示仓库缺少 macOS Settings 快照；现已按 CI 实际渲染帧补齐 `tab-4-macos.snap`，需由后续 macOS Actions 运行确认该基线并复验全工作流。
 
 ## 尚未完成的发布级验证
 
@@ -59,4 +59,4 @@
 
 ## 敏感信息与清理
 
-文档和 CI 不保留 VPS 地址、域名、密码、订阅凭据、节点凭据或私钥。临时 VPS 公钥已从 `authorized_keys` 精确移除；root-only 备份按恢复需要保留。测试使用的 root 密码应在测试后由 VPS 管理员轮换。
+文档和 CI 不保留 VPS 地址、域名、密码、订阅凭据、节点凭据或私钥。临时 VPS 公钥已从 `authorized_keys` 精确移除；root-only 备份按恢复需要保留。工作站 `%TEMP%` 中本轮 SSH 测试密钥文件仍待本机清理（精确路径为 `sbctl-vps-validation-20260925` 和同名 `.pub` 文件）。测试使用的 root 密码应在测试后由 VPS 管理员轮换。
