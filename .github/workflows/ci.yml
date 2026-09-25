@@ -49,7 +49,9 @@ jobs:
 
   server-acceptance:
     needs: [build-sbctl-linux-amd64, test]
-    runs-on: ubuntu-24.04
+    # Build the test-only binaries against the oldest supported runner glibc so
+    # Debian 12 can execute them in the acceptance matrix.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
