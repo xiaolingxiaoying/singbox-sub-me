@@ -136,6 +136,14 @@ ln -sf /usr/local/bin/sbctl /usr/local/bin/ly
 green "sbctl 已安装；快捷方式：ly"
 
 if [[ "$#" -eq 0 ]]; then
+  # Fail before collecting configuration when this host already has a sing-box
+  # deployment. `sbctl install` treats a non-terminal stdin as a read-only
+  # preflight, so this cannot start an installation or change deployment state.
+  preflight_output=$(/usr/local/bin/sbctl install </dev/null 2>&1) || {
+    printf '%s\n' "$preflight_output" >&2
+    exit 2
+  }
+
   if [[ -t 0 ]]; then
     input=/dev/stdin
   elif [[ -r /dev/tty ]]; then

@@ -64,7 +64,9 @@ pub enum PreflightError {
         "could not inspect TCP 80/443 listeners with `ss`; install iproute2 and retry. sbctl will not assume the ports are free"
     )]
     PortProbeUnavailable,
-    #[error("Existing deployment detected ({0}); sbctl will not modify it")]
+    #[error(
+        "Existing deployment detected ({0}); `sbctl install` only creates a fresh deployment and will not modify it. If sbctl already manages this host, run `sbctl menu` or `sbctl status`; otherwise back up and remove the conflicting deployment before retrying."
+    )]
     ExistingDeployment(ExistingDeployment),
 }
 
