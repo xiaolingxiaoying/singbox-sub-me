@@ -24,10 +24,11 @@ bash /tmp/sbctl-install.sh
 域名/IP、可选代理连接主机、网卡和 Reality 伪装 SNI；随后逐项确认需要启用的协议。协议端口
 默认自动分配。IP fallback 会自动只启用 VLESS Reality，并询问 HTTP 订阅端口。
 
-安装脚本下载并校验 sbctl 后，会在询问首次部署配置前对主机做只读预检。如果已经存在
-sing-box/sbctl 部署，它会停止，避免把“首次安装”误当成修改现有部署。管理已有部署请运行 `ly` 或
-`sbctl menu`，查看状态可运行 `sbctl status`。预检报出其他 sing-box 部署时，请先确认其归属并做好备份，
-再决定是否移除冲突后重试；安装器不会自动接管或删除这些文件、服务和数据。
+安装脚本下载并校验 sbctl 后，会在询问首次部署配置前做只读预检。如果发现已有部署，会给出选项：
+保留并退出，或输入确认词后先备份旧配置、状态、证书、二进制和相关 systemd 单元，再停止服务并继续全新安装。
+备份保存在 `/var/backups/sbctl/reinstall/`；如果新安装失败，安装器会尝试恢复旧部署和原服务状态。
+如果只想管理现有部署，请运行 `ly` 或 `sbctl menu`，查看状态可运行 `sbctl status`。
+对于不属于 sbctl 的 sing-box 服务，选择清理也会先将检测到的路径存入备份，之后才移除。
 
 脚本默认使用 GitHub Release 的 `latest/download/manifest-{arch}.json`。如需固定版本或使用
 镜像，请设置 `SBCTL_MANIFEST_URL`，例如：

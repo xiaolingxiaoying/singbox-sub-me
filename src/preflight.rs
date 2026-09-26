@@ -65,7 +65,7 @@ pub enum PreflightError {
     )]
     PortProbeUnavailable,
     #[error(
-        "Existing deployment detected ({0}); `sbctl install` only creates a fresh deployment and will not modify it. If sbctl already manages this host, run `sbctl menu` or `sbctl status`; otherwise back up and remove the conflicting deployment before retrying."
+        "Existing deployment detected ({0}); `sbctl install` only creates a fresh deployment and will not modify it. If sbctl already manages this host, run `sbctl menu` or `sbctl status`; to replace it, rerun the release installer and choose backup/cleanup, or pass `--replace-existing` with the complete install options."
     )]
     ExistingDeployment(ExistingDeployment),
 }
@@ -90,6 +90,19 @@ impl fmt::Display for ExistingDeployment {
 /// Performs only filesystem and environment reads. It never installs, stops, or
 /// changes a detected Existing deployment.
 pub fn preflight(root: &Path) -> Result<(), PreflightError> {
+    preflight_platform(root)?;
+
+    let existing = existing_deployment_paths(root);
+    if existing.is_empty() {
+        Ok(())
+    } else {
+        Err(PreflightError::ExistingDeployment(
+            ExistingDeployment::from_artifacts(existing),
+        ))
+    }
+}
+
+fn preflight_platform(root: &Path) -> Result<(), PreflightError> {
     let os_release = fs::read_to_string(root.join("etc/os-release"))
         .ok()
         .and_then(|contents| parse_os_release(&contents))
@@ -106,24 +119,26 @@ pub fn preflight(root: &Path) -> Result<(), PreflightError> {
     if !is_supported_architecture(env::consts::ARCH) {
         return Err(PreflightError::UnsupportedArchitecture);
     }
-
-    let existing = existing_deployment_paths(root);
-    if existing.is_empty() {
-        Ok(())
-    } else {
-        Err(PreflightError::ExistingDeployment(
-            ExistingDeployment::from_artifacts(existing),
-        ))
-    }
+    Ok(())
 }
 
 /// Checks privileges and Direct's fixed public listeners before installation
 /// downloads artifacts or writes persistent state. Fixture roots are read-only
 /// test environments and intentionally skip host privilege/port probes.
-pub fn preflight_install(root: &Path, direct: bool) -> Result<(), PreflightError> {
+pub fn preflight_install(
+    root: &Path,
+    direct: bool,
+    allow_existing: bool,
+) -> Result<(), PreflightError> {
     require_install_privileges(root)?;
-    preflight(root)?;
-    if direct && root == Path::new("/") {
+    if allow_existing {
+        preflight_platform(root)?;
+    } else {
+        preflight(root)?;
+    }
+    // A replacement install stops the detected deployment first, then repeats
+    // preflight with allow_existing=false to check ports against the clean host.
+    if direct && !allow_existing && root == Path::new("/") {
         let output = std::process::Command::new("ss")
             .args(["-H", "-ltnp", "( sport = :80 or sport = :443 )"])
             .output();
@@ -151,7 +166,7 @@ pub fn require_install_privileges(root: &Path) -> Result<(), PreflightError> {
     Ok(())
 }
 
-fn existing_deployment_paths(root: &Path) -> Vec<String> {
+pub fn existing_deployment_paths(root: &Path) -> Vec<String> {
     let mut paths = vec![
         "usr/bin/sing-box",
         "usr/local/bin/sing-box",
@@ -161,6 +176,15 @@ fn existing_deployment_paths(root: &Path) -> Vec<String> {
         "opt/sing-box",
         "etc/systemd/system/sing-box.service",
         "lib/systemd/system/sing-box.service",
+        "etc/systemd/system/sbctl.service",
+        "etc/systemd/system/sbctl-http.socket",
+        "etc/systemd/system/sbctl-accounting-reset.service",
+        "etc/systemd/system/sbctl-accounting-reset.timer",
+        "etc/systemd/system/multi-user.target.wants/sing-box.service",
+        "etc/systemd/system/multi-user.target.wants/sbctl.service",
+        "etc/systemd/system/sockets.target.wants/sbctl-http.socket",
+        "etc/systemd/system/timers.target.wants/sbctl-accounting-reset.timer",
+        "etc/letsencrypt/renewal-hooks/deploy/sbctl-certificate-deploy-hook",
         // sbctl's own persistent state, e.g. left behind on purpose by a
         // non-purge uninstall. A fresh install regenerates the subscription
         // credential, every protocol credential and the accounting state, and a
@@ -173,9 +197,10 @@ fn existing_deployment_paths(root: &Path) -> Vec<String> {
         "var/lib/sbctl/ownership",
         "var/lib/sbctl/artifacts",
         "var/lib/sbctl/certificates",
+        "var/lib/sbctl/acme-webroot",
     ]
     .into_iter()
-    .filter(|path| root.join(path).exists())
+    .filter(|path| path_exists_including_symlink(&root.join(path)))
     .map(str::to_owned)
     .collect::<Vec<_>>();
 
@@ -263,15 +288,21 @@ fn path_binary_matches(root: &Path) -> Vec<String> {
 
     env::split_paths(&path)
         .filter_map(|directory| rooted_path(root, &directory))
-        .filter_map(|directory| directory.join("sing-box").exists().then_some(directory))
-        .map(|directory| {
-            format!(
-                "{}{}sing-box",
-                directory.display(),
-                std::path::MAIN_SEPARATOR
-            )
+        .filter_map(|directory| {
+            path_exists_including_symlink(&directory.join("sing-box")).then_some(directory)
+        })
+        .filter_map(|directory| {
+            directory
+                .join("sing-box")
+                .strip_prefix(root)
+                .ok()
+                .map(|path| path.to_string_lossy().replace('\\', "/"))
         })
         .collect()
+}
+
+fn path_exists_including_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
 }
 
 fn rooted_path(root: &Path, path: &Path) -> Option<PathBuf> {

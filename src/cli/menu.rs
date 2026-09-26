@@ -568,6 +568,7 @@ fn menu_install(root: &Path, guided: bool) -> ExitCode {
                 anytls_port: None,
                 sing_box_bin: None,
                 manifest: None,
+                replace_existing: false,
                 no_start: false,
             },
         ),

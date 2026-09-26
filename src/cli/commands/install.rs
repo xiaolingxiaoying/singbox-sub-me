@@ -32,13 +32,12 @@ pub(crate) fn install(root: &Path, options: InstallOptions) -> ExitCode {
         return ExitCode::from(2);
     }
     let mut installation_started = false;
-    // Snapshot before anything is written: a failed install must not delete
-    // persistent state it did not create.
+    let mut state_before_install = sbctl::lifecycle::PreexistingState::default();
+    let mut replacement_backup = None;
     if let Err(error) = sbctl::preflight::require_install_privileges(root) {
         eprintln!("install preflight failed: {error}");
         return ExitCode::from(2);
     }
-    let state_before_install = sbctl::lifecycle::preexisting_state(root);
     if options.guided
         && let Err(error) = sbctl::preflight::preflight(root)
     {
@@ -49,6 +48,7 @@ pub(crate) fn install(root: &Path, options: InstallOptions) -> ExitCode {
         && let Err(error) = sbctl::preflight::preflight_install(
             root,
             matches!(&options.mode, crate::cli::args::CliSubscriptionMode::Direct),
+            options.replace_existing,
         )
     {
         eprintln!("install preflight failed: {error}");
@@ -121,6 +121,7 @@ pub(crate) fn install(root: &Path, options: InstallOptions) -> ExitCode {
             sbctl::preflight::preflight_install(
                 root,
                 config.subscription_mode == sbctl::config::SubscriptionMode::Direct,
+                options.replace_existing,
             )
             .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
         }
@@ -130,6 +131,25 @@ pub(crate) fn install(root: &Path, options: InstallOptions) -> ExitCode {
                 "installation accepts either --sing-box-bin or a signed --manifest, not both",
             ));
         }
+        if options.replace_existing {
+            let conflicts = sbctl::preflight::existing_deployment_paths(root);
+            if !conflicts.is_empty() {
+                replacement_backup = Some(
+                    sbctl::lifecycle::prepare_reinstall(root, &conflicts)
+                        .map_err(sbctl::config::ConfigError::StateContent)?,
+                );
+            }
+            sbctl::preflight::preflight_install(
+                root,
+                config.subscription_mode == sbctl::config::SubscriptionMode::Direct,
+                false,
+            )
+            .map_err(|error| sbctl::config::ConfigError::StateContent(error.to_string()))?;
+        }
+        // Capture only after an explicitly requested replacement has moved the
+        // previous deployment into its protected backup. A failed fresh install
+        // is then rolled back before the old deployment is restored.
+        state_before_install = sbctl::lifecycle::preexisting_state(root);
         let sing_box_bin = match options.sing_box_bin {
             Some(path) => path,
             None => match options.manifest {
@@ -220,11 +240,29 @@ pub(crate) fn install(root: &Path, options: InstallOptions) -> ExitCode {
     match result {
         Ok(config) => {
             print_post_install_checklist(&config);
+            if let Some(backup) = replacement_backup {
+                println!("旧部署备份保存在 {}", backup.archive_path().display());
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {
             if installation_started {
                 sbctl::lifecycle::rollback_fresh_installation(root, state_before_install);
+            }
+            if let Some(backup) = replacement_backup {
+                if let Err(restore_error) =
+                    sbctl::lifecycle::restore_replaced_deployment(root, &backup)
+                {
+                    eprintln!(
+                        "恢复旧部署失败: {restore_error}; 完整备份仍保存在 {}",
+                        backup.archive_path().display()
+                    );
+                } else {
+                    eprintln!(
+                        "新安装失败，旧部署已从备份恢复。备份: {}",
+                        backup.archive_path().display()
+                    );
+                }
             }
             eprintln!("installation failed: {error}");
             ExitCode::from(2)

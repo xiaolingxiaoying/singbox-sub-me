@@ -55,7 +55,7 @@ case "${ID}" in
 esac
 
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl jq openssl
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl jq openssl tar
 
 # The first-release Ed25519 verification key, identical to the one embedded in
 # src/release.rs. The signature in the manifest covers the canonical JSON of
@@ -135,16 +135,53 @@ mv -f /usr/local/bin/.sbctl.new /usr/local/bin/sbctl
 ln -sf /usr/local/bin/sbctl /usr/local/bin/ly
 green "sbctl 已安装；快捷方式：ly"
 
-if [[ "$#" -eq 0 ]]; then
-  # Fail before collecting configuration when this host already has a sing-box
-  # deployment. `sbctl install` treats a non-terminal stdin as a read-only
-  # preflight, so this cannot start an installation or change deployment state.
-  preflight_output=$(/usr/local/bin/sbctl install </dev/null 2>&1) || {
-    printf '%s\n' "$preflight_output" >&2
+replace_existing=0
+# Fail before collecting configuration when this host already has a sing-box
+# deployment. `sbctl install` treats a non-terminal stdin as a read-only
+# preflight, so this cannot start an installation or change deployment state.
+if preflight_output=$(/usr/local/bin/sbctl install </dev/null 2>&1); then
+  :
+else
+  printf '%s\n' "$preflight_output" >&2
+  if [[ "$preflight_output" != *"Existing deployment detected"* ]]; then
     exit 2
-  }
+  fi
 
   if [[ -t 0 ]]; then
+    input=/dev/stdin
+  elif [[ -r /dev/tty ]]; then
+    input=/dev/tty
+  else
+    echo "检测到已有部署；请在 VPS 交互终端运行安装脚本，选择备份清理或退出。" >&2
+    exit 2
+  fi
+
+  echo ""
+  echo "发现已有 sing-box/sbctl 部署。如何处理？"
+  echo "1) 保留现有部署并退出（默认）"
+  echo "2) 备份旧部署、停止相关服务、清理冲突路径，然后继续全新安装"
+  while :; do
+    read -r -p "请选择 [1]: " replace_choice <"$input"
+    case "${replace_choice:-1}" in
+      1)
+        echo "已取消；现有部署未更改。"
+        exit 0 ;;
+      2) break ;;
+      *) echo "请输入 1 或 2。" >&2 ;;
+    esac
+  done
+  read -r -p "此操作会重建订阅和协议凭据；输入 REINSTALL 确认: " confirmation <"$input"
+  if [[ "$confirmation" != REINSTALL ]]; then
+    echo "确认文字不匹配，已取消；现有部署未更改。"
+    exit 0
+  fi
+  replace_existing=1
+fi
+
+if [[ "$#" -eq 0 ]]; then
+  if [[ -n "${input:-}" ]]; then
+    :
+  elif [[ -t 0 ]]; then
     input=/dev/stdin
   elif [[ -r /dev/tty ]]; then
     input=/dev/tty
@@ -197,6 +234,9 @@ if [[ "$#" -eq 0 ]]; then
   reality_decoy_sni=$(read_required "Reality 伪装 SNI" "www.cloudflare.com")
 
   install_args=(--mode "$mode" --subscription-host "$subscription_host" --proxy-host "$proxy_host" --reality-decoy-sni "$reality_decoy_sni")
+  if [[ "$replace_existing" -eq 1 ]]; then
+    install_args+=(--replace-existing)
+  fi
   if [[ "$interface" != auto ]]; then
     install_args+=(--interface "$interface")
   fi
@@ -211,4 +251,8 @@ if [[ "$#" -eq 0 ]]; then
   run_installer /usr/local/bin/sbctl install --manifest "$work_dir/manifest.json" "${install_args[@]}" <"$input"
 fi
 
-run_installer /usr/local/bin/sbctl install --manifest "$work_dir/manifest.json" "$@"
+extra_install_args=()
+if [[ "$replace_existing" -eq 1 ]]; then
+  extra_install_args+=(--replace-existing)
+fi
+run_installer /usr/local/bin/sbctl install --manifest "$work_dir/manifest.json" "$@" "${extra_install_args[@]}"

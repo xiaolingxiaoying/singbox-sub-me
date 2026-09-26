@@ -1,6 +1,6 @@
 use std::fs;
 use std::net::{SocketAddr, TcpStream};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -253,6 +253,266 @@ pub fn preexisting_state(root: &Path) -> PreexistingState {
             || root.join("var/lib/sbctl/artifacts").is_dir()
             || root.join("var/lib/sbctl/certificates").is_dir(),
     }
+}
+
+#[derive(Debug)]
+pub struct ReinstallBackup {
+    archive: PathBuf,
+    services: Vec<PreviousServiceState>,
+}
+
+impl ReinstallBackup {
+    pub fn archive_path(&self) -> &Path {
+        &self.archive
+    }
+}
+
+#[derive(Debug)]
+struct PreviousServiceState {
+    unit: String,
+    was_active: bool,
+    was_enabled: bool,
+}
+
+/// Saves every preflight conflict, stops matching systemd services, and removes
+/// only the listed paths. The archive is root-only and retains ownership,
+/// permissions, directories, and symlinks so an unsuccessful new install can
+/// restore the old deployment.
+pub fn prepare_reinstall(root: &Path, conflicts: &[String]) -> Result<ReinstallBackup, String> {
+    let conflicts = validate_conflict_paths(conflicts)?;
+    if conflicts.is_empty() {
+        return Err("no existing deployment paths were supplied for replacement".into());
+    }
+
+    let _operation_lock = DeploymentStore::new(root)
+        .acquire_operation_lock()
+        .map_err(|error| format!("could not lock sbctl state for replacement: {error}"))?;
+    let services = previous_service_states(root, &conflicts);
+    let backup_directory = new_reinstall_backup_directory(root)?;
+    let archive = backup_directory.join("existing-deployment.tar");
+    let partial_archive = backup_directory.join("existing-deployment.tar.part");
+
+    let operation = (|| {
+        create_conflict_archive(root, &conflicts, &partial_archive)?;
+        set_root_readable_file_permissions(&partial_archive)?;
+        fs::rename(&partial_archive, &archive).map_err(|error| {
+            format!("could not finalize the existing-deployment backup: {error}")
+        })?;
+        stop_previous_services(root, &services)?;
+
+        for relative in &conflicts {
+            remove_conflict_path(&root.join(relative))?;
+        }
+        systemctl(root, &["daemon-reload"])?;
+        Ok::<_, String>(())
+    })();
+
+    if let Err(error) = operation {
+        let restore_error = if archive.is_file() {
+            restore_reinstall_backup(root, &archive)
+                .and_then(|()| systemctl(root, &["daemon-reload"]))
+                .and_then(|()| restore_previous_services(root, &services))
+                .err()
+        } else {
+            restore_previous_services(root, &services).err()
+        };
+        return Err(match restore_error {
+            Some(restore_error) => format!(
+                "could not prepare replacement ({error}); recovery also failed ({restore_error}). Backup: {}",
+                archive.display()
+            ),
+            None => format!("could not prepare replacement: {error}"),
+        });
+    }
+
+    Ok(ReinstallBackup { archive, services })
+}
+
+/// Restores a prior deployment after the replacement install fails. The backup
+/// remains available even after a successful new installation for manual recovery.
+pub fn restore_replaced_deployment(root: &Path, backup: &ReinstallBackup) -> Result<(), String> {
+    let _operation_lock = DeploymentStore::new(root)
+        .acquire_operation_lock()
+        .map_err(|error| format!("could not lock sbctl state for recovery: {error}"))?;
+    restore_reinstall_backup(root, &backup.archive)?;
+    systemctl(root, &["daemon-reload"])?;
+    restore_previous_services(root, &backup.services)
+}
+
+fn validate_conflict_paths(paths: &[String]) -> Result<Vec<String>, String> {
+    let mut validated = std::collections::BTreeSet::new();
+    for path in paths {
+        let parsed = Path::new(path);
+        if path.is_empty()
+            || parsed
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+            || parsed.starts_with("var/backups/sbctl")
+        {
+            return Err(format!("refusing unsafe replacement path: {path}"));
+        }
+        validated.insert(path.replace('\\', "/"));
+    }
+    Ok(validated.into_iter().collect())
+}
+
+fn previous_service_states(root: &Path, paths: &[String]) -> Vec<PreviousServiceState> {
+    let mut units = std::collections::BTreeSet::new();
+    for path in paths {
+        if !is_systemd_path(path) {
+            continue;
+        }
+        for component in Path::new(path).components() {
+            let Component::Normal(component) = component else {
+                continue;
+            };
+            let component = component.to_string_lossy();
+            let unit = component
+                .strip_suffix(".service.d")
+                .map(|prefix| format!("{prefix}.service"))
+                .or_else(|| {
+                    [".service", ".socket", ".timer"]
+                        .iter()
+                        .any(|suffix| component.ends_with(suffix))
+                        .then(|| component.to_string())
+                });
+            if let Some(unit) = unit {
+                units.insert(unit);
+            }
+        }
+    }
+
+    units
+        .into_iter()
+        .map(|unit| PreviousServiceState {
+            was_active: systemctl_probe(root, &["is-active", "--quiet", &unit]),
+            was_enabled: systemctl_probe(root, &["is-enabled", "--quiet", &unit]),
+            unit,
+        })
+        .collect()
+}
+
+fn is_systemd_path(path: &str) -> bool {
+    [
+        "etc/systemd/system/",
+        "lib/systemd/system/",
+        "usr/lib/systemd/system/",
+        "run/systemd/system/",
+    ]
+    .iter()
+    .any(|prefix| path.starts_with(prefix))
+}
+
+fn stop_previous_services(root: &Path, services: &[PreviousServiceState]) -> Result<(), String> {
+    for service in services {
+        if service.was_active {
+            systemctl(root, &["stop", &service.unit])?;
+        }
+        if service.was_enabled {
+            systemctl(root, &["disable", &service.unit])?;
+        }
+    }
+    Ok(())
+}
+
+fn restore_previous_services(root: &Path, services: &[PreviousServiceState]) -> Result<(), String> {
+    for service in services {
+        if service.was_enabled {
+            systemctl(root, &["enable", &service.unit])?;
+        }
+        if service.was_active {
+            systemctl(root, &["start", &service.unit])?;
+        }
+    }
+    Ok(())
+}
+
+fn systemctl_probe(root: &Path, args: &[&str]) -> bool {
+    let command = root.join("usr/bin/systemctl");
+    let program = if command.is_file() {
+        command
+    } else {
+        "systemctl".into()
+    };
+    Command::new(program)
+        .args(args)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn new_reinstall_backup_directory(root: &Path) -> Result<PathBuf, String> {
+    let parent = root.join("var/backups/sbctl/reinstall");
+    fs::create_dir_all(&parent).map_err(|error| {
+        format!("could not create the protected reinstall backup directory: {error}")
+    })?;
+    set_private_directory_permissions(&parent)?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let directory = parent.join(format!("{timestamp}-{}", std::process::id()));
+    fs::create_dir(&directory)
+        .map_err(|error| format!("could not create reinstall backup directory: {error}"))?;
+    set_private_directory_permissions(&directory)?;
+    Ok(directory)
+}
+
+fn create_conflict_archive(root: &Path, paths: &[String], archive: &Path) -> Result<(), String> {
+    let program = root
+        .join("usr/bin/tar")
+        .is_file()
+        .then(|| root.join("usr/bin/tar"))
+        .unwrap_or_else(|| "tar".into());
+    let status = Command::new(program)
+        .arg("-cpf")
+        .arg(archive)
+        .arg("--numeric-owner")
+        .arg("-C")
+        .arg(root)
+        .arg("--")
+        .args(paths)
+        .status()
+        .map_err(|error| format!("could not create the existing-deployment backup: {error}"))?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| format!("tar exited with {status} while backing up the existing deployment"))
+}
+
+fn restore_reinstall_backup(root: &Path, archive: &Path) -> Result<(), String> {
+    let program = root
+        .join("usr/bin/tar")
+        .is_file()
+        .then(|| root.join("usr/bin/tar"))
+        .unwrap_or_else(|| "tar".into());
+    let status = Command::new(program)
+        .arg("-xpf")
+        .arg(archive)
+        .arg("--same-owner")
+        .arg("--same-permissions")
+        .arg("--numeric-owner")
+        .arg("-C")
+        .arg(root)
+        .status()
+        .map_err(|error| format!("could not restore the existing-deployment backup: {error}"))?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| format!("tar exited with {status} while restoring the existing deployment"))
+}
+
+fn remove_conflict_path(path: &Path) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("could not inspect {}: {error}", path.display())),
+    };
+    if metadata.file_type().is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+    .map_err(|error| format!("could not remove {}: {error}", path.display()))
 }
 
 /// True for paths owned by a deployment that predates the transaction being

@@ -199,6 +199,9 @@ pub(crate) struct InstallOptions {
     /// Signed release manifest used to download and verify the data plane.
     #[arg(long, value_name = "PATH")]
     pub(crate) manifest: Option<PathBuf>,
+    /// Back up and remove the detected deployment before installing a fresh one.
+    #[arg(long, conflicts_with = "guided")]
+    pub(crate) replace_existing: bool,
     /// Create units and configuration without starting services (acceptance fixture use).
     #[arg(long, hide = true)]
     pub(crate) no_start: bool,
