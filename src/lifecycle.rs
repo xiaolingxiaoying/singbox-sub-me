@@ -458,11 +458,12 @@ fn new_reinstall_backup_directory(root: &Path) -> Result<PathBuf, String> {
 }
 
 fn create_conflict_archive(root: &Path, paths: &[String], archive: &Path) -> Result<(), String> {
-    let program = root
-        .join("usr/bin/tar")
-        .is_file()
-        .then(|| root.join("usr/bin/tar"))
-        .unwrap_or_else(|| "tar".into());
+    let rooted_tar = root.join("usr/bin/tar");
+    let program = if rooted_tar.is_file() {
+        rooted_tar
+    } else {
+        "tar".into()
+    };
     let status = Command::new(program)
         .arg("-cpf")
         .arg(archive)
@@ -480,11 +481,12 @@ fn create_conflict_archive(root: &Path, paths: &[String], archive: &Path) -> Res
 }
 
 fn restore_reinstall_backup(root: &Path, archive: &Path) -> Result<(), String> {
-    let program = root
-        .join("usr/bin/tar")
-        .is_file()
-        .then(|| root.join("usr/bin/tar"))
-        .unwrap_or_else(|| "tar".into());
+    let rooted_tar = root.join("usr/bin/tar");
+    let program = if rooted_tar.is_file() {
+        rooted_tar
+    } else {
+        "tar".into()
+    };
     let status = Command::new(program)
         .arg("-xpf")
         .arg(archive)
